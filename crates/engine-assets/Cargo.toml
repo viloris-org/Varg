@@ -14,7 +14,21 @@ runtime-game = ["runtime-min"]
 editor = ["engine-core/editor"]
 agent-tools = ["engine-core/agent-tools"]
 script-python = ["engine-core/script-python"]
-dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "engine-core/dev-full"]
+fbx-importer = []
+assimp-importer = []
+heavy-importers = ["fbx-importer", "assimp-importer"]
+dev-full = [
+    "runtime-game",
+    "editor",
+    "agent-tools",
+    "script-python",
+    "engine-core/dev-full",
+    "heavy-importers",
+]
 
 [dependencies]
 engine-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

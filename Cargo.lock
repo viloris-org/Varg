@@ -13,6 +13,10 @@ name = "engine-assets"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
