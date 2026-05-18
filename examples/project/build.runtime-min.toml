@@ -1,0 +1,11 @@
+target = "native"
+release = false
+features = ["runtime-min"]
+
+[format]
+version = 1
+
+[evolution]
+policy = "minor versions may add optional fields; major schema bumps require migration"
+forward_compatible_read = true
+migration_framework = "versioned Rust migrators keyed by explicit version"

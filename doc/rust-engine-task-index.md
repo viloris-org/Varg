@@ -26,3 +26,11 @@ This directory splits the Rust native game engine requirements into executable t
 | P2 | task-05, write-capable agent tools in task-06, packaging stabilization in task-07 |
 | P3 | additional render backends, mobile/Web support, deeper optimization |
 
+## P0 Outputs
+
+- [Project decisions and scope](project-decisions-and-scope.md)
+
+## P1 Outputs
+
+- Task 02 scene/ECS/project model implementation lives in `engine-ecs`.
+- Example project formats live under `examples/project/`.

@@ -1,12 +1,661 @@
-//! Base scene storage.
+//! Scene graph, game object metadata, lifecycle, and serialization support.
 
-use crate::{TransformHierarchy, World};
+use std::{collections::HashMap, fmt};
 
-/// Minimal scene made from an ECS world plus transform hierarchy.
-#[derive(Clone, Debug, Default)]
+use engine_core::{math::Transform, EngineError, EngineResult, EntityId};
+
+use crate::{
+    transform::TransformHierarchy,
+    world::{Entity, Lifecycle, World},
+};
+
+/// Scene file schema version.
+pub const SCENE_FILE_VERSION: u32 = 1;
+
+/// Camera query role attached to a game object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum CameraRole {
+    /// Editor or runtime main camera.
+    Main,
+    /// Runtime gameplay camera.
+    Game,
+}
+
+/// Lifecycle stage exposed by the scene API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleStage {
+    /// Called once before the first update.
+    Start,
+    /// Called once per variable frame.
+    Update,
+    /// Called on fixed timestep ticks.
+    FixedUpdate,
+    /// Called after regular updates.
+    LateUpdate,
+    /// Called by editor-only ticking.
+    EditorUpdate,
+}
+
+impl From<LifecycleStage> for Lifecycle {
+    fn from(value: LifecycleStage) -> Self {
+        match value {
+            LifecycleStage::Start => Self::Start,
+            LifecycleStage::Update => Self::Update,
+            LifecycleStage::FixedUpdate => Self::FixedUpdate,
+            LifecycleStage::LateUpdate => Self::LateUpdate,
+            LifecycleStage::EditorUpdate => Self::EditorUpdate,
+        }
+    }
+}
+
+/// Active scene mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneMode {
+    /// Scene edits apply to the edit-time state.
+    Edit,
+    /// Scene edits apply to an isolated play copy.
+    Play,
+}
+
+/// Monotonic object ID allocator for one runtime session.
+#[derive(Clone, Debug)]
+pub struct ObjectIdAllocator {
+    next: u128,
+}
+
+impl Default for ObjectIdAllocator {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl ObjectIdAllocator {
+    /// Allocates a stable object ID for this runtime session.
+    pub fn allocate(&mut self) -> EntityId {
+        let id = EntityId::from_u128(self.next);
+        self.next = self.next.saturating_add(1).max(1);
+        id
+    }
+
+    /// Observes an ID loaded from disk and advances the allocator past it.
+    pub fn observe(&mut self, id: EntityId) {
+        self.next = self.next.max(id.as_u128().saturating_add(1));
+    }
+}
+
+/// Script component placeholder stored without requiring a script backend.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ScriptComponentProxy {
+    /// Stable backend name, for example `python`.
+    pub backend: String,
+    /// Script module or asset path.
+    pub script: String,
+    /// Serialized script state as opaque JSON.
+    pub state_json: Option<String>,
+    /// Whether the component awaits backend recovery.
+    pub pending_recovery: bool,
+}
+
+/// Game object metadata.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct GameObject {
+    /// Runtime-session stable object ID.
+    pub id: EntityId,
+    /// User-visible object name.
+    pub name: String,
+    /// User-visible tag.
+    pub tag: String,
+    /// Render/physics layer.
+    pub layer: u32,
+    /// Optional camera role.
+    pub camera_role: Option<CameraRole>,
+    /// Whether this object is active.
+    pub active: bool,
+    /// Optional script proxy records.
+    pub scripts: Vec<ScriptComponentProxy>,
+}
+
+impl GameObject {
+    /// Creates default metadata for a named object.
+    pub fn new(id: EntityId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            tag: "Untagged".to_string(),
+            layer: 0,
+            camera_role: None,
+            active: true,
+            scripts: Vec::new(),
+        }
+    }
+}
+
+/// Serializable game object record.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SerializedGameObject {
+    /// Game object metadata.
+    pub object: GameObject,
+    /// Local transform.
+    pub local_transform: Transform,
+    /// Parent object ID.
+    pub parent: Option<EntityId>,
+    /// Sibling index under parent or roots.
+    pub sibling_index: usize,
+}
+
+/// Scene file format.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SceneFile {
+    /// Explicit schema version.
+    pub version: u32,
+    /// Human-readable scene name.
+    pub name: String,
+    /// Serialized objects.
+    pub objects: Vec<SerializedGameObject>,
+}
+
+#[derive(Default)]
+struct SceneState {
+    world: World,
+    transforms: TransformHierarchy,
+    objects: HashMap<Entity, GameObject>,
+    by_id: HashMap<EntityId, Entity>,
+    id_allocator: ObjectIdAllocator,
+    version: u64,
+    pending_destroy: Vec<Entity>,
+}
+
+impl fmt::Debug for SceneState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SceneState")
+            .field("objects", &self.objects.len())
+            .field("version", &self.version)
+            .field("pending_destroy", &self.pending_destroy)
+            .finish()
+    }
+}
+
+impl SceneState {
+    fn spawn_object(&mut self, name: impl Into<String>) -> EngineResult<Entity> {
+        let entity = self.world.spawn()?;
+        let object = GameObject::new(self.id_allocator.allocate(), name);
+        self.by_id.insert(object.id, entity);
+        self.objects.insert(entity, object);
+        self.transforms.set_local(entity, Transform::IDENTITY);
+        self.transforms.set_parent(entity, None)?;
+        self.bump_version();
+        Ok(entity)
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.saturating_add(1);
+    }
+}
+
+/// Rust-native scene API with isolated edit and play states.
+#[derive(Default)]
 pub struct Scene {
-    /// Entity storage.
-    pub world: World,
-    /// Transform hierarchy storage.
-    pub transforms: TransformHierarchy,
+    edit: SceneState,
+    play: Option<SceneState>,
+    mode: SceneMode,
+}
+
+impl fmt::Debug for Scene {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Scene")
+            .field("mode", &self.mode)
+            .field("edit", &self.edit)
+            .field("play_active", &self.play.is_some())
+            .finish()
+    }
+}
+
+impl Default for SceneMode {
+    fn default() -> Self {
+        Self::Edit
+    }
+}
+
+impl Scene {
+    /// Creates an empty scene.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the active mode.
+    pub fn mode(&self) -> SceneMode {
+        self.mode
+    }
+
+    /// Returns the active scene structure version.
+    pub fn structure_version(&self) -> u64 {
+        self.active().version
+    }
+
+    /// Returns active transform hierarchy.
+    pub fn transforms(&self) -> &TransformHierarchy {
+        &self.active().transforms
+    }
+
+    /// Returns active transform hierarchy mutably.
+    pub fn transforms_mut(&mut self) -> &mut TransformHierarchy {
+        &mut self.active_mut().transforms
+    }
+
+    /// Returns active ECS world.
+    pub fn world(&self) -> &World {
+        &self.active().world
+    }
+
+    /// Returns active ECS world mutably.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.active_mut().world
+    }
+
+    /// Creates a new object at the scene root.
+    pub fn create_object(&mut self, name: impl Into<String>) -> EngineResult<Entity> {
+        self.active_mut().spawn_object(name)
+    }
+
+    /// Returns immutable object metadata.
+    pub fn object(&self, entity: Entity) -> Option<&GameObject> {
+        self.active().objects.get(&entity)
+    }
+
+    /// Returns mutable object metadata and bumps scene version.
+    pub fn object_mut(&mut self, entity: Entity) -> Option<&mut GameObject> {
+        self.active_mut().bump_version();
+        self.active_mut().objects.get_mut(&entity)
+    }
+
+    /// Finds the first object by name.
+    pub fn find_by_name(&self, name: &str) -> Option<Entity> {
+        self.active()
+            .objects
+            .iter()
+            .find_map(|(entity, object)| (object.name == name).then_some(*entity))
+    }
+
+    /// Finds all objects with a tag.
+    pub fn find_by_tag(&self, tag: &str) -> Vec<Entity> {
+        self.active()
+            .objects
+            .iter()
+            .filter_map(|(entity, object)| (object.tag == tag).then_some(*entity))
+            .collect()
+    }
+
+    /// Finds all objects on a layer.
+    pub fn find_by_layer(&self, layer: u32) -> Vec<Entity> {
+        self.active()
+            .objects
+            .iter()
+            .filter_map(|(entity, object)| (object.layer == layer).then_some(*entity))
+            .collect()
+    }
+
+    /// Returns the object marked as the main camera.
+    pub fn main_camera(&self) -> Option<Entity> {
+        self.find_camera(CameraRole::Main)
+    }
+
+    /// Returns the object marked as the game camera.
+    pub fn game_camera(&self) -> Option<Entity> {
+        self.find_camera(CameraRole::Game)
+    }
+
+    /// Sets an object's parent.
+    pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) -> EngineResult<()> {
+        let state = self.active_mut();
+        Self::ensure_alive(state, child)?;
+        if let Some(parent) = parent {
+            Self::ensure_alive(state, parent)?;
+        }
+        state.transforms.set_parent(child, parent)?;
+        state.bump_version();
+        Ok(())
+    }
+
+    /// Defers object destruction until a frame-safe processing point.
+    pub fn destroy_deferred(&mut self, entity: Entity) -> EngineResult<()> {
+        let state = self.active_mut();
+        Self::ensure_alive(state, entity)?;
+        if !state.pending_destroy.contains(&entity) {
+            state.pending_destroy.push(entity);
+        }
+        Ok(())
+    }
+
+    /// Processes pending destruction.
+    pub fn process_deferred_destroy(&mut self) -> EngineResult<()> {
+        let state = self.active_mut();
+        let pending = std::mem::take(&mut state.pending_destroy);
+        for entity in pending {
+            if let Some(object) = state.objects.remove(&entity) {
+                state.by_id.remove(&object.id);
+            }
+            state.transforms.remove(entity);
+            if state.world.is_alive(entity) {
+                state.world.despawn(entity)?;
+            }
+            state.bump_version();
+        }
+        Ok(())
+    }
+
+    /// Runs lifecycle hooks in the required stage order chosen by the caller.
+    pub fn run_lifecycle(&mut self, stage: LifecycleStage) {
+        self.active_mut().world.run_lifecycle(stage.into());
+    }
+
+    /// Runs a variable runtime frame in `Start`, `Update`, then `LateUpdate` order.
+    pub fn tick_runtime_frame(&mut self) {
+        self.run_lifecycle(LifecycleStage::Start);
+        self.run_lifecycle(LifecycleStage::Update);
+        self.run_lifecycle(LifecycleStage::LateUpdate);
+    }
+
+    /// Runs a fixed timestep lifecycle pass.
+    pub fn tick_fixed_frame(&mut self) {
+        self.run_lifecycle(LifecycleStage::FixedUpdate);
+    }
+
+    /// Runs an editor lifecycle pass.
+    pub fn tick_editor_frame(&mut self) {
+        self.run_lifecycle(LifecycleStage::EditorUpdate);
+    }
+
+    /// Clones object metadata and transform into a new object.
+    pub fn clone_object(&mut self, source: Entity) -> EngineResult<Entity> {
+        let state = self.active_mut();
+        Self::ensure_alive(state, source)?;
+        let source_object = state
+            .objects
+            .get(&source)
+            .ok_or_else(|| EngineError::invalid_handle("source object is missing metadata"))?
+            .clone();
+        let new_entity = state.world.spawn()?;
+        let mut cloned = source_object;
+        cloned.id = state.id_allocator.allocate();
+        cloned.name = format!("{} Clone", cloned.name);
+        state.by_id.insert(cloned.id, new_entity);
+        state.objects.insert(new_entity, cloned);
+        state.transforms.set_local(
+            new_entity,
+            state.transforms.local(source).unwrap_or_default(),
+        );
+        state
+            .transforms
+            .set_parent(new_entity, state.transforms.parent(source))?;
+        state.bump_version();
+        Ok(new_entity)
+    }
+
+    /// Instantiates a prefab file into the active scene.
+    pub fn instantiate_prefab(
+        &mut self,
+        prefab: &crate::schema::PrefabFile,
+    ) -> EngineResult<Vec<Entity>> {
+        self.load_objects_from_scene_file(&prefab.scene)
+    }
+
+    /// Enters play mode by cloning serializable edit-time state.
+    pub fn enter_play_mode(&mut self) -> EngineResult<()> {
+        if self.play.is_some() {
+            self.mode = SceneMode::Play;
+            return Ok(());
+        }
+        self.play = Some(Self::state_from_file(&self.to_scene_file("play-copy")?)?);
+        self.mode = SceneMode::Play;
+        Ok(())
+    }
+
+    /// Exits play mode and restores edit-time state as the active state.
+    pub fn exit_play_mode(&mut self) {
+        self.play = None;
+        self.mode = SceneMode::Edit;
+    }
+
+    /// Converts active scene state to a serializable file.
+    pub fn to_scene_file(&self, name: impl Into<String>) -> EngineResult<SceneFile> {
+        let state = self.active();
+        let mut objects = Vec::with_capacity(state.objects.len());
+        for (entity, object) in &state.objects {
+            let parent = state
+                .transforms
+                .parent(*entity)
+                .and_then(|parent| state.objects.get(&parent))
+                .map(|parent| parent.id);
+            objects.push(SerializedGameObject {
+                object: object.clone(),
+                local_transform: state.transforms.local(*entity).unwrap_or_default(),
+                parent,
+                sibling_index: state.transforms.sibling_index(*entity).unwrap_or_default(),
+            });
+        }
+        objects.sort_by_key(|object| (object.parent.map(EntityId::as_u128), object.sibling_index));
+        Ok(SceneFile {
+            version: SCENE_FILE_VERSION,
+            name: name.into(),
+            objects,
+        })
+    }
+
+    /// Serializes active scene to pretty JSON.
+    pub fn to_json(&self, name: impl Into<String>) -> EngineResult<String> {
+        serde_json::to_string_pretty(&self.to_scene_file(name)?)
+            .map_err(|error| EngineError::other(format!("scene serialization failed: {error}")))
+    }
+
+    /// Loads a scene from JSON.
+    pub fn from_json(input: &str) -> EngineResult<Self> {
+        let file = serde_json::from_str::<SceneFile>(input)
+            .map_err(|error| EngineError::other(format!("scene parse failed: {error}")))?;
+        Self::from_scene_file(file)
+    }
+
+    /// Loads a scene from a scene file structure.
+    pub fn from_scene_file(file: SceneFile) -> EngineResult<Self> {
+        Ok(Self {
+            edit: Self::state_from_file(&file)?,
+            play: None,
+            mode: SceneMode::Edit,
+        })
+    }
+
+    fn load_objects_from_scene_file(&mut self, file: &SceneFile) -> EngineResult<Vec<Entity>> {
+        let state = self.active_mut();
+        let mut source_to_entity = HashMap::new();
+        let mut created = Vec::with_capacity(file.objects.len());
+
+        for record in &file.objects {
+            let entity = state.world.spawn()?;
+            let mut object = record.object.clone();
+            object.id = state.id_allocator.allocate();
+            state.id_allocator.observe(object.id);
+            state.by_id.insert(object.id, entity);
+            state.objects.insert(entity, object);
+            state.transforms.set_local(entity, record.local_transform);
+            source_to_entity.insert(record.object.id, entity);
+            created.push(entity);
+        }
+
+        for record in &file.objects {
+            let entity = source_to_entity[&record.object.id];
+            let parent = record
+                .parent
+                .and_then(|id| source_to_entity.get(&id).copied());
+            state.transforms.set_parent(entity, parent)?;
+        }
+        state.bump_version();
+        Ok(created)
+    }
+
+    fn state_from_file(file: &SceneFile) -> EngineResult<SceneState> {
+        if file.version > SCENE_FILE_VERSION {
+            return Err(EngineError::other(format!(
+                "scene version {} is newer than supported version {}",
+                file.version, SCENE_FILE_VERSION
+            )));
+        }
+        let mut state = SceneState::default();
+        let mut source_to_entity = HashMap::new();
+        let mut records = file.objects.clone();
+        records.sort_by_key(|record| (record.parent.map(EntityId::as_u128), record.sibling_index));
+
+        for record in &records {
+            let entity = state.world.spawn()?;
+            state.id_allocator.observe(record.object.id);
+            state.by_id.insert(record.object.id, entity);
+            state.objects.insert(entity, record.object.clone());
+            state.transforms.set_local(entity, record.local_transform);
+            source_to_entity.insert(record.object.id, entity);
+        }
+        for record in &records {
+            let entity = source_to_entity[&record.object.id];
+            let parent = record
+                .parent
+                .and_then(|id| source_to_entity.get(&id).copied());
+            state.transforms.set_parent(entity, parent)?;
+        }
+        Ok(state)
+    }
+
+    fn active(&self) -> &SceneState {
+        match self.mode {
+            SceneMode::Edit => &self.edit,
+            SceneMode::Play => self.play.as_ref().unwrap_or(&self.edit),
+        }
+    }
+
+    fn active_mut(&mut self) -> &mut SceneState {
+        match self.mode {
+            SceneMode::Edit => &mut self.edit,
+            SceneMode::Play => self.play.as_mut().unwrap_or(&mut self.edit),
+        }
+    }
+
+    fn ensure_alive(state: &SceneState, entity: Entity) -> EngineResult<()> {
+        if state.world.is_alive(entity) {
+            Ok(())
+        } else {
+            Err(EngineError::invalid_handle("scene object is not live"))
+        }
+    }
+
+    fn find_camera(&self, role: CameraRole) -> Option<Entity> {
+        self.active()
+            .objects
+            .iter()
+            .find_map(|(entity, object)| (object.camera_role == Some(role)).then_some(*entity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::Any;
+
+    #[test]
+    fn saves_loads_and_saves_again() {
+        let mut scene = Scene::new();
+        let root = scene.create_object("Root").unwrap();
+        let child = scene.create_object("Child").unwrap();
+        scene.set_parent(child, Some(root)).unwrap();
+        scene.object_mut(child).unwrap().tag = "Enemy".to_string();
+
+        let first = scene.to_json("Example").unwrap();
+        let loaded = Scene::from_json(&first).unwrap();
+        let second = loaded.to_json("Example").unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(loaded.find_by_tag("Enemy").len(), 1);
+    }
+
+    #[test]
+    fn deferred_destroy_happens_at_safe_point() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("Temp").unwrap();
+
+        scene.destroy_deferred(entity).unwrap();
+        assert!(scene.world().is_alive(entity));
+        scene.process_deferred_destroy().unwrap();
+
+        assert!(!scene.world().is_alive(entity));
+    }
+
+    #[test]
+    fn play_mode_preserves_edit_time_data() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("Editable").unwrap();
+        scene.enter_play_mode().unwrap();
+        let play_entity = scene.find_by_name("Editable").unwrap();
+        scene.object_mut(play_entity).unwrap().name = "Runtime".to_string();
+        scene.exit_play_mode();
+
+        assert_eq!(scene.object(entity).unwrap().name, "Editable");
+        assert!(scene.find_by_name("Runtime").is_none());
+    }
+
+    struct LifecycleRecorder {
+        stages: Vec<&'static str>,
+    }
+
+    impl crate::Component for LifecycleRecorder {
+        fn start(&mut self) {
+            self.stages.push("start");
+        }
+
+        fn update(&mut self) {
+            self.stages.push("update");
+        }
+
+        fn fixed_update(&mut self) {
+            self.stages.push("fixed_update");
+        }
+
+        fn late_update(&mut self) {
+            self.stages.push("late_update");
+        }
+
+        fn editor_update(&mut self) {
+            self.stages.push("editor_update");
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn lifecycle_ticks_in_expected_order() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("Actor").unwrap();
+        scene
+            .world_mut()
+            .insert_component(entity, LifecycleRecorder { stages: Vec::new() })
+            .unwrap();
+
+        scene.tick_runtime_frame();
+        scene.tick_fixed_frame();
+        scene.tick_editor_frame();
+
+        let stages = &scene
+            .world_mut()
+            .component_mut::<LifecycleRecorder>(entity)
+            .unwrap()
+            .stages;
+        assert_eq!(
+            stages,
+            &[
+                "start",
+                "update",
+                "late_update",
+                "fixed_update",
+                "editor_update"
+            ]
+        );
+    }
 }

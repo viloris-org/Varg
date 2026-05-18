@@ -1,0 +1,11 @@
+name = "Aster Example"
+asset_root = "assets"
+default_scene = "scenes/example.aster_scene.json"
+
+[format]
+version = 1
+
+[evolution]
+policy = "minor versions may add optional fields; major schema bumps require migration"
+forward_compatible_read = true
+migration_framework = "versioned Rust migrators keyed by explicit version"

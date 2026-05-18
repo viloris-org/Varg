@@ -3,7 +3,18 @@
 macro_rules! id_type {
     ($name:ident) => {
         #[doc = concat!("Opaque ", stringify!($name), " value.")]
-        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+            serde::Deserialize,
+            serde::Serialize,
+        )]
         pub struct $name(u128);
 
         impl $name {

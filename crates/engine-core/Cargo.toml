@@ -17,5 +17,6 @@ script-python = []
 dev-full = ["runtime-game", "editor", "agent-tools", "script-python"]
 
 [dependencies]
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

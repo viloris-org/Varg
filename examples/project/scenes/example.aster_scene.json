@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "Example",
+  "objects": [
+    {
+      "object": {
+        "id": 1,
+        "name": "Main Camera",
+        "tag": "MainCamera",
+        "layer": 0,
+        "camera_role": "Main",
+        "active": true,
+        "scripts": []
+      },
+      "local_transform": {
+        "translation": { "x": 0.0, "y": 1.5, "z": -6.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "parent": null,
+      "sibling_index": 0
+    },
+    {
+      "object": {
+        "id": 2,
+        "name": "Player",
+        "tag": "Player",
+        "layer": 1,
+        "camera_role": null,
+        "active": true,
+        "scripts": [
+          {
+            "backend": "python",
+            "script": "scripts/player_controller.py",
+            "state_json": null,
+            "pending_recovery": true
+          }
+        ]
+      },
+      "local_transform": {
+        "translation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "rotation": { "x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+      },
+      "parent": null,
+      "sibling_index": 1
+    }
+  ]
+}

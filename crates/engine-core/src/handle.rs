@@ -3,7 +3,9 @@
 use crate::{EngineError, EngineResult};
 
 /// A generation counter used to distinguish recycled handle slots.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
 pub struct Generation(u32);
 
 impl Generation {
@@ -21,7 +23,7 @@ impl Generation {
 }
 
 /// Stable handle with slot and generation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Handle {
     slot: u32,
     generation: Generation,

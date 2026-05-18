@@ -1,7 +1,7 @@
 //! Public math types.
 
 /// 3D vector with single-precision components.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Vec3 {
     /// X component.
     pub x: f32,
@@ -24,7 +24,7 @@ impl Vec3 {
 }
 
 /// Quaternion in `(x, y, z, w)` order.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Quat {
     /// X component.
     pub x: f32,
@@ -53,7 +53,7 @@ impl Default for Quat {
 }
 
 /// Translation, rotation, and scale transform.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Transform {
     /// Position in parent space.
     pub translation: Vec3,

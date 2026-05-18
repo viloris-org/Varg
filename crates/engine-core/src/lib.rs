@@ -11,7 +11,7 @@ pub mod logging;
 pub mod math;
 pub mod time;
 
-pub use config::EngineConfig;
+pub use config::{EngineConfig, RuntimeProfile};
 pub use error::{EngineError, EngineResult};
 pub use handle::{Generation, Handle, HandleAllocator};
 pub use ids::{AssetId, EntityId, ResourceId};
