@@ -1,0 +1,31 @@
+[package]
+name = "engine-cli"
+description = "Aster native command-line launcher and build smoke entry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["runtime-min"]
+runtime-min = ["runtime-min/runtime-min"]
+runtime-game = ["runtime-min/runtime-game"]
+editor = ["runtime-min/editor", "engine-editor/editor", "engine-editor-ui/editor"]
+agent-tools = ["runtime-min/agent-tools", "engine-editor/agent-tools"]
+script-python = ["runtime-min/script-python"]
+dev-full = [
+    "runtime-game",
+    "editor",
+    "agent-tools",
+    "script-python",
+    "runtime-min/dev-full",
+    "engine-editor/dev-full",
+    "engine-editor-ui/dev-full",
+]
+
+[dependencies]
+engine-core.workspace = true
+engine-editor = { workspace = true, optional = true }
+engine-editor-ui = { workspace = true, optional = true }
+runtime-min.workspace = true

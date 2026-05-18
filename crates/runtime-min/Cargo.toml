@@ -39,6 +39,8 @@ agent-tools = [
     "engine-assets/agent-tools",
     "engine-core/agent-tools",
     "engine-ecs/agent-tools",
+    "dep:engine-editor",
+    "engine-editor/agent-tools",
     "engine-platform/agent-tools",
     "engine-render/agent-tools",
 ]

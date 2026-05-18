@@ -20,6 +20,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-cli"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-editor",
+ "engine-editor-ui",
+ "runtime-min",
+]
+
+[[package]]
 name = "engine-core"
 version = "0.1.0"
 dependencies = [

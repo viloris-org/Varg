@@ -11,6 +11,9 @@ use std::{
 use engine_core::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "agent-tools")]
+pub mod agent;
+
 /// Theme preference used by Hub and editor shells.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
