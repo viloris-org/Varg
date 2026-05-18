@@ -28,6 +28,10 @@ editor = [
     "engine-assets/editor",
     "engine-core/editor",
     "engine-ecs/editor",
+    "dep:engine-editor",
+    "dep:engine-editor-ui",
+    "engine-editor/editor",
+    "engine-editor-ui/editor",
     "engine-platform/editor",
     "engine-render/editor",
 ]
@@ -51,5 +55,7 @@ dev-full = ["runtime-game", "editor", "agent-tools", "script-python"]
 engine-assets.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
+engine-editor = { workspace = true, optional = true }
+engine-editor-ui = { workspace = true, optional = true }
 engine-platform.workspace = true
 engine-render.workspace = true

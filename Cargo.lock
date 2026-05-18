@@ -39,6 +39,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-editor"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "engine-editor-ui"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-editor",
+]
+
+[[package]]
 name = "engine-platform"
 version = "0.1.0"
 dependencies = [
@@ -124,6 +141,8 @@ dependencies = [
  "engine-assets",
  "engine-core",
  "engine-ecs",
+ "engine-editor",
+ "engine-editor-ui",
  "engine-platform",
  "engine-render",
 ]

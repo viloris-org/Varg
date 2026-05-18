@@ -1,0 +1,17 @@
+[package]
+name = "engine-editor-ui"
+description = "Aster hub and editor UI state shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+editor = ["engine-editor/editor", "engine-core/editor"]
+dev-full = ["editor", "engine-editor/dev-full", "engine-core/dev-full"]
+
+[dependencies]
+engine-core.workspace = true
+engine-editor.workspace = true

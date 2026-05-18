@@ -25,13 +25,14 @@ fn run() -> EngineResult<()> {
             "--features",
             "runtime-min",
         ]),
+        Some("build-editor") => cargo(["build", "-p", "engine-editor-ui", "--features", "editor"]),
         Some("test") => cargo(["test", "--workspace"]),
         Some("check") => cargo(["check", "--workspace", "--all-features"]),
         Some(command) => Err(EngineError::config(format!(
             "unknown xtask command `{command}`"
         ))),
         None => Err(EngineError::config(
-            "expected xtask command: runtime-min, test, or check",
+            "expected xtask command: runtime-min, build-editor, test, or check",
         )),
     }
 }

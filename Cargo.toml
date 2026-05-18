@@ -5,6 +5,8 @@ members = [
     "crates/engine-platform",
     "crates/engine-assets",
     "crates/engine-render",
+    "crates/engine-editor",
+    "crates/engine-editor-ui",
     "crates/runtime-min",
     "xtask",
 ]
@@ -30,6 +32,8 @@ engine-ecs = { path = "crates/engine-ecs", version = "0.1.0" }
 engine-platform = { path = "crates/engine-platform", version = "0.1.0" }
 engine-assets = { path = "crates/engine-assets", version = "0.1.0" }
 engine-render = { path = "crates/engine-render", version = "0.1.0" }
+engine-editor = { path = "crates/engine-editor", version = "0.1.0" }
+engine-editor-ui = { path = "crates/engine-editor-ui", version = "0.1.0" }
 
 [workspace.metadata.aster.profiles]
 runtime-min = ["runtime-min/runtime-min"]
