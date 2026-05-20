@@ -55,6 +55,16 @@ impl RenderDevice for VulkanStub {
         })
     }
 
+    fn upload_texture(
+        &mut self,
+        _desc: ImageDesc,
+        _data: &[u8],
+    ) -> EngineResult<engine_render::ImageHandle> {
+        Err(engine_core::EngineError::UnsupportedCapability {
+            capability: "vulkan",
+        })
+    }
+
     fn destroy_image(&mut self, _handle: engine_render::ImageHandle) {}
 
     fn create_buffer(&mut self, _desc: BufferDesc) -> EngineResult<BufferHandle> {

@@ -9,9 +9,12 @@ use std::{
     hash::{Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     thread,
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use engine_core::{AssetId, EngineError, EngineResult, Handle, HandleAllocator, ResourceId};
@@ -21,7 +24,7 @@ use serde::{Deserialize, Serialize};
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// Stable resource GUID serialized as 128 bits.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AssetGuid(u128);
 
 impl AssetGuid {
@@ -49,6 +52,59 @@ impl AssetGuid {
 impl fmt::Display for AssetGuid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:032x}", self.0)
+    }
+}
+
+impl Serialize for AssetGuid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetGuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AssetGuidVisitor;
+
+        impl serde::de::Visitor<'_> for AssetGuidVisitor {
+            type Value = AssetGuid;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a 128-bit asset GUID as hex string or unsigned integer")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let value = value.strip_prefix("0x").unwrap_or(value);
+                u128::from_str_radix(value, 16)
+                    .or_else(|_| value.parse::<u128>())
+                    .map(AssetGuid::from_u128)
+                    .map_err(E::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(AssetGuid::from_u128(value as u128))
+            }
+
+            fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(AssetGuid::from_u128(value))
+            }
+        }
+
+        deserializer.deserialize_any(AssetGuidVisitor)
     }
 }
 
@@ -270,6 +326,86 @@ impl MaterialFormat {
         })?;
         ensure_schema("material", parsed.version)?;
         Ok(parsed)
+    }
+
+    /// Parses a material from TOML.
+    pub fn from_toml(input: &str) -> Result<Self, AssetError> {
+        let parsed: Self = toml::from_str(input).map_err(|source| AssetError::Parse {
+            format: "material",
+            diagnostic: AssetDiagnostic::new(source.to_string()),
+        })?;
+        ensure_schema("material", parsed.version)?;
+        Ok(parsed)
+    }
+}
+
+/// Decoded texture payload ready for a render backend upload.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DecodedTextureResource {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Runtime pixel format.
+    pub format: String,
+    /// Tightly packed RGBA pixels.
+    pub pixels: Vec<u8>,
+}
+
+impl DecodedTextureResource {
+    /// Parses a decoded texture payload from JSON bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetError> {
+        serde_json::from_slice(bytes).map_err(|source| AssetError::Parse {
+            format: "decoded texture",
+            diagnostic: AssetDiagnostic::new(source.to_string()),
+        })
+    }
+
+    fn to_bytes(&self) -> EngineResult<Arc<[u8]>> {
+        serde_json::to_vec(self)
+            .map(Arc::from)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+}
+
+/// CPU-side mesh payload imported from a model file.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct BasicMeshResource {
+    /// Vertex positions.
+    pub positions: Vec<[f32; 3]>,
+    /// Vertex normals, if present.
+    #[serde(default)]
+    pub normals: Vec<[f32; 3]>,
+    /// First texture coordinate set, if present.
+    #[serde(default)]
+    pub texcoords: Vec<[f32; 2]>,
+    /// Triangle indices.
+    #[serde(default)]
+    pub indices: Vec<u32>,
+    /// Material index referenced by the primitive, if present.
+    pub material_index: Option<usize>,
+}
+
+/// Imported model payload containing basic static meshes.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct ModelResource {
+    /// Mesh primitives available to runtime rendering.
+    pub meshes: Vec<BasicMeshResource>,
+}
+
+impl ModelResource {
+    /// Parses a model payload from JSON bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetError> {
+        serde_json::from_slice(bytes).map_err(|source| AssetError::Parse {
+            format: "model resource",
+            diagnostic: AssetDiagnostic::new(source.to_string()),
+        })
+    }
+
+    fn to_bytes(&self) -> EngineResult<Arc<[u8]>> {
+        serde_json::to_vec(self)
+            .map(Arc::from)
+            .map_err(|error| EngineError::other(error.to_string()))
     }
 }
 
@@ -716,6 +852,16 @@ impl AssetRegistry {
         self.set_state(handle, ResourceState::CpuReady)
     }
 
+    /// Returns CPU cache data for a resource.
+    pub fn cpu_resource(&self, handle: ResourceHandle) -> Option<&CpuResource> {
+        self.cpu_cache.get(&handle)
+    }
+
+    /// Returns GPU cache data for a resource.
+    pub fn gpu_resource(&self, handle: ResourceHandle) -> Option<&GpuResource> {
+        self.gpu_cache.get(&handle)
+    }
+
     /// Inserts or replaces GPU cache data without changing CPU lifetime.
     pub fn put_gpu(&mut self, handle: ResourceHandle, resource: GpuResource) -> EngineResult<()> {
         self.ensure_live(handle)?;
@@ -925,15 +1071,54 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
     }
 }
 
-fn stable_guid_for_path(path: &Path) -> AssetGuid {
-    let mut first = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut first);
-    let first = first.finish() as u128;
-    let mut second = std::collections::hash_map::DefaultHasher::new();
-    "aster-asset-guid-v1".hash(&mut second);
-    path.hash(&mut second);
-    let second = second.finish() as u128;
-    AssetGuid::from_u128((first << 64) | second)
+static NEXT_GENERATED_GUID: AtomicU64 = AtomicU64::new(1);
+
+fn generate_asset_guid(path: &Path) -> AssetGuid {
+    let mut entropy = std::collections::hash_map::DefaultHasher::new();
+    "aster-asset-guid-v2".hash(&mut entropy);
+    path.hash(&mut entropy);
+    std::process::id().hash(&mut entropy);
+    let entropy = entropy.finish() as u128;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = NEXT_GENERATED_GUID.fetch_add(1, Ordering::Relaxed) as u128;
+    AssetGuid::from_u128(timestamp ^ (counter << 64) ^ entropy)
+}
+
+fn meta_path_for_source(path: &Path) -> PathBuf {
+    let mut meta_path = path.to_path_buf();
+    if let Some(name) = path.file_name() {
+        let mut meta_name = name.to_os_string();
+        meta_name.push(".meta");
+        meta_path.set_file_name(meta_name);
+    } else {
+        meta_path.set_extension("meta");
+    }
+    meta_path
+}
+
+fn read_resource_meta(path: &Path) -> EngineResult<Option<ResourceMetaFormat>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    ResourceMetaFormat::from_toml(&text)
+        .map(Some)
+        .map_err(EngineError::from)
+}
+
+fn write_resource_meta(path: &Path, meta: &ResourceMetaFormat) -> EngineResult<()> {
+    let text =
+        toml::to_string_pretty(meta).map_err(|error| EngineError::other(error.to_string()))?;
+    fs::write(path, text).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Result of scanning a project asset root.
@@ -980,14 +1165,29 @@ pub fn scan_project_assets(
                 report.ignored.push(relative);
                 continue;
             };
-            let meta = ResourceMetaFormat {
-                version: CURRENT_SCHEMA_VERSION,
-                guid: stable_guid_for_path(&relative),
-                source_path: relative,
-                kind,
-                importer: importer.to_string(),
-                dependencies: Vec::new(),
+            let meta_path = meta_path_for_source(&path);
+            let previous = read_resource_meta(&meta_path)?;
+            let meta = match previous.clone() {
+                Some(mut meta) => {
+                    meta.version = CURRENT_SCHEMA_VERSION;
+                    meta.source_path = relative;
+                    meta.kind = kind;
+                    meta.importer = importer.to_string();
+                    meta.dependencies = discover_asset_dependencies(&path, kind, importer)?;
+                    meta
+                }
+                None => ResourceMetaFormat {
+                    version: CURRENT_SCHEMA_VERSION,
+                    guid: generate_asset_guid(&relative),
+                    source_path: relative,
+                    kind,
+                    importer: importer.to_string(),
+                    dependencies: discover_asset_dependencies(&path, kind, importer)?,
+                },
             };
+            if previous.as_ref() != Some(&meta) {
+                write_resource_meta(&meta_path, &meta)?;
+            }
             database
                 .upsert_meta(meta.clone())
                 .map_err(EngineError::from)?;
@@ -999,6 +1199,31 @@ pub fn scan_project_assets(
         .sort_by(|left, right| left.source_path.cmp(&right.source_path));
     report.ignored.sort();
     Ok(report)
+}
+
+fn discover_asset_dependencies(
+    path: &Path,
+    kind: ResourceKind,
+    importer: &str,
+) -> EngineResult<Vec<AssetGuid>> {
+    if kind != ResourceKind::Material {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let material = if importer == "material-toml" {
+        MaterialFormat::from_toml(&text)
+    } else {
+        MaterialFormat::from_json(&text)
+    }
+    .map_err(EngineError::from)?;
+    let mut dependencies = material.textures.values().copied().collect::<Vec<_>>();
+    dependencies.push(material.shader);
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(dependencies)
 }
 
 /// Runs a built-in import task into CPU cache and queues a GPU upload.
@@ -1020,28 +1245,318 @@ pub fn import_builtin_asset(
             path: path.clone(),
             source,
         })?;
+    let imported = import_cpu_payload(&path, task.kind, &task.importer, &bytes);
     registry.put_cpu(
         handle,
         CpuResource {
             kind: task.kind,
-            bytes: Arc::from(bytes),
+            bytes: imported.bytes,
         },
     )?;
     registry.set_preview(
         handle,
         PreviewData {
             thumbnail: None,
-            summary: format!("{} bytes imported by {}", path.display(), task.importer),
+            summary: imported.summary,
         },
     )?;
     Ok(ImportOutcome {
         guid: task.guid,
-        diagnostics: Vec::new(),
+        diagnostics: imported.diagnostics,
         upload: Some(GpuUploadTask {
             handle,
             kind: task.kind,
         }),
     })
+}
+
+struct ImportedCpuPayload {
+    bytes: Arc<[u8]>,
+    summary: String,
+    diagnostics: Vec<AssetDiagnostic>,
+}
+
+fn import_cpu_payload(
+    path: &Path,
+    kind: ResourceKind,
+    importer: &str,
+    bytes: &[u8],
+) -> ImportedCpuPayload {
+    match kind {
+        ResourceKind::Texture => import_texture_payload(path, importer, bytes),
+        ResourceKind::Model | ResourceKind::SkinnedModel => {
+            import_model_payload(path, importer, bytes)
+        }
+        ResourceKind::Shader => import_shader_payload(path, importer, bytes),
+        ResourceKind::Material => import_material_payload(path, importer, bytes),
+        ResourceKind::Audio | ResourceKind::Animation => ImportedCpuPayload {
+            bytes: Arc::from(bytes),
+            summary: format!("{} bytes imported by {}", bytes.len(), importer),
+            diagnostics: Vec::new(),
+        },
+    }
+}
+
+fn import_texture_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    let mut diagnostics = Vec::new();
+    let (payload, summary) = match image::load_from_memory(bytes) {
+        Ok(image) => {
+            let rgba = image.to_rgba8();
+            let width = rgba.width();
+            let height = rgba.height();
+            let texture = DecodedTextureResource {
+                width,
+                height,
+                format: "rgba8_srgb".to_string(),
+                pixels: rgba.into_raw(),
+            };
+            match texture.to_bytes() {
+                Ok(bytes) => (
+                    bytes,
+                    format!("decoded {width}x{height} rgba8_srgb texture by {importer}"),
+                ),
+                Err(error) => {
+                    diagnostics.push(
+                        AssetDiagnostic::new(format!("texture encode failed: {error}"))
+                            .with_path(path),
+                    );
+                    (
+                        Arc::from(bytes),
+                        format!(
+                            "{} bytes texture source imported by {importer}",
+                            bytes.len()
+                        ),
+                    )
+                }
+            }
+        }
+        Err(error) => {
+            diagnostics.push(
+                AssetDiagnostic::new(format!("texture decode failed: {error}")).with_path(path),
+            );
+            let summary = if let Some((format, width, height)) = parse_image_dimensions(bytes) {
+                format!("{format} {width}x{height} texture source imported by {importer}")
+            } else {
+                format!(
+                    "{} bytes texture source imported by {importer}",
+                    bytes.len()
+                )
+            };
+            (Arc::from(bytes), summary)
+        }
+    };
+    ImportedCpuPayload {
+        bytes: payload,
+        summary,
+        diagnostics,
+    }
+}
+
+fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    let mut diagnostics = Vec::new();
+    let (payload, summary) = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
+        }) {
+        match import_gltf_model(path) {
+            Ok(model) => {
+                let primitive_count = model.meshes.len();
+                match model.to_bytes() {
+                    Ok(bytes) => (
+                        bytes,
+                        format!(
+                            "glTF model imported by {importer}: {primitive_count} mesh primitives"
+                        ),
+                    ),
+                    Err(error) => {
+                        diagnostics.push(
+                            AssetDiagnostic::new(format!("model encode failed: {error}"))
+                                .with_path(path),
+                        );
+                        (
+                            Arc::from(bytes),
+                            format!("{} bytes model source imported by {importer}", bytes.len()),
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                diagnostics.push(
+                    AssetDiagnostic::new(format!("glTF import failed: {error}")).with_path(path),
+                );
+                (
+                    Arc::from(bytes),
+                    format!("{} bytes model source imported by {importer}", bytes.len()),
+                )
+            }
+        }
+    } else {
+        (
+            Arc::from(bytes),
+            format!("{} bytes model source imported by {importer}", bytes.len()),
+        )
+    };
+    ImportedCpuPayload {
+        bytes: payload,
+        summary,
+        diagnostics,
+    }
+}
+
+fn import_gltf_model(path: &Path) -> EngineResult<ModelResource> {
+    let (document, buffers, _) =
+        gltf::import(path).map_err(|error| EngineError::other(error.to_string()))?;
+    let mut model = ModelResource::default();
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &**data));
+            let positions = reader
+                .read_positions()
+                .map(|items| items.collect::<Vec<_>>())
+                .unwrap_or_default();
+            if positions.is_empty() {
+                continue;
+            }
+            let normals = reader
+                .read_normals()
+                .map(|items| items.collect::<Vec<_>>())
+                .unwrap_or_default();
+            let texcoords = reader
+                .read_tex_coords(0)
+                .map(|items| items.into_f32().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let indices = reader
+                .read_indices()
+                .map(|items| items.into_u32().collect::<Vec<_>>())
+                .unwrap_or_else(|| (0..positions.len() as u32).collect());
+            model.meshes.push(BasicMeshResource {
+                positions,
+                normals,
+                texcoords,
+                indices,
+                material_index: primitive.material().index(),
+            });
+        }
+    }
+    Ok(model)
+}
+
+fn import_material_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    let mut diagnostics = Vec::new();
+    let material = if importer == "material-toml" {
+        std::str::from_utf8(bytes)
+            .map_err(|error| AssetError::Parse {
+                format: "material",
+                diagnostic: AssetDiagnostic::new(error.to_string()).with_path(path),
+            })
+            .and_then(MaterialFormat::from_toml)
+    } else {
+        std::str::from_utf8(bytes)
+            .map_err(|error| AssetError::Parse {
+                format: "material",
+                diagnostic: AssetDiagnostic::new(error.to_string()).with_path(path),
+            })
+            .and_then(MaterialFormat::from_json)
+    };
+    let summary = match material {
+        Ok(material) => format!(
+            "material imported by {importer}: {} textures, {} parameters",
+            material.textures.len(),
+            material.parameters.len()
+        ),
+        Err(error) => {
+            diagnostics.push(AssetDiagnostic::new(error.to_string()).with_path(path));
+            format!(
+                "{} bytes material source imported by {importer}",
+                bytes.len()
+            )
+        }
+    };
+    ImportedCpuPayload {
+        bytes: Arc::from(bytes),
+        summary,
+        diagnostics,
+    }
+}
+
+fn import_shader_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    let mut diagnostics = Vec::new();
+    if std::str::from_utf8(bytes).is_err() {
+        diagnostics.push(
+            AssetDiagnostic::new("shader source is not valid UTF-8; queued raw bytes")
+                .with_path(path),
+        );
+    }
+    ImportedCpuPayload {
+        bytes: Arc::from(bytes),
+        summary: format!(
+            "{} bytes shader source imported by {}",
+            bytes.len(),
+            importer
+        ),
+        diagnostics,
+    }
+}
+
+fn parse_image_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    parse_png_dimensions(bytes).or_else(|| parse_jpeg_dimensions(bytes))
+}
+
+fn parse_png_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some(("png", width, height))
+}
+
+fn parse_jpeg_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+    let mut cursor = 2;
+    while cursor + 9 < bytes.len() {
+        if bytes[cursor] != 0xff {
+            cursor += 1;
+            continue;
+        }
+        let marker = bytes[cursor + 1];
+        cursor += 2;
+        if marker == 0xd8 || marker == 0xd9 {
+            continue;
+        }
+        if cursor + 2 > bytes.len() {
+            return None;
+        }
+        let segment_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+        if segment_len < 2 || cursor + segment_len > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            let height = u16::from_be_bytes([bytes[cursor + 3], bytes[cursor + 4]]) as u32;
+            let width = u16::from_be_bytes([bytes[cursor + 5], bytes[cursor + 6]]) as u32;
+            return Some(("jpeg", width, height));
+        }
+        cursor += segment_len;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1184,6 +1699,7 @@ mod tests {
             .iter()
             .find(|meta| meta.source_path == PathBuf::from("textures/player.png"))
             .unwrap();
+        assert!(root.join("textures/player.png.meta").exists());
 
         let mut registry = AssetRegistry::default();
         let outcome = import_builtin_asset(
@@ -1205,6 +1721,126 @@ mod tests {
                 .unwrap()
                 .state,
             ResourceState::CpuReady
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn imports_png_as_decoded_texture_payload() {
+        let root =
+            std::env::temp_dir().join(format!("aster-texture-decode-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("textures")).unwrap();
+        std::fs::write(root.join("textures/white.png"), one_pixel_png()).unwrap();
+
+        let mut database = AssetDatabase::new(&root, "builtin");
+        let report = scan_project_assets(&root, &mut database).unwrap();
+        let meta = report
+            .metas
+            .iter()
+            .find(|meta| meta.source_path == PathBuf::from("textures/white.png"))
+            .unwrap();
+        let mut registry = AssetRegistry::default();
+        import_builtin_asset(
+            &root,
+            &mut registry,
+            ImportTask {
+                guid: meta.guid,
+                source_path: meta.source_path.clone(),
+                kind: meta.kind,
+                importer: meta.importer.clone(),
+            },
+        )
+        .unwrap();
+
+        let handle = registry.handle_for_guid(meta.guid).unwrap();
+        let texture =
+            DecodedTextureResource::from_bytes(&registry.cpu_resource(handle).unwrap().bytes)
+                .unwrap();
+
+        assert_eq!(texture.width, 1);
+        assert_eq!(texture.height, 1);
+        assert_eq!(texture.format, "rgba8_srgb");
+        assert_eq!(texture.pixels, vec![255, 255, 255, 255]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn material_scan_records_shader_and_texture_dependencies() {
+        let root =
+            std::env::temp_dir().join(format!("aster-material-deps-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("materials")).unwrap();
+        std::fs::write(
+            root.join("materials/player.material.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "shader": "{shader}",
+  "textures": {{"albedo": "{texture}"}},
+  "parameters": {{}}
+}}"#,
+                shader = guid(11),
+                texture = guid(12),
+            ),
+        )
+        .unwrap();
+
+        let mut database = AssetDatabase::new(&root, "builtin");
+        let report = scan_project_assets(&root, &mut database).unwrap();
+        let material = report.metas.first().unwrap();
+
+        assert_eq!(
+            database.dependencies().dependencies(material.guid),
+            vec![guid(11), guid(12)]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn scan_preserves_guid_from_moved_meta_file() {
+        let root =
+            std::env::temp_dir().join(format!("aster-assets-meta-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("textures")).unwrap();
+        std::fs::write(root.join("textures/player.png"), [1_u8, 2, 3, 4]).unwrap();
+
+        let mut database = AssetDatabase::new(&root, "builtin");
+        let first = scan_project_assets(&root, &mut database).unwrap();
+        let guid = first.metas[0].guid;
+
+        std::fs::rename(
+            root.join("textures/player.png"),
+            root.join("textures/hero.png"),
+        )
+        .unwrap();
+        std::fs::rename(
+            root.join("textures/player.png.meta"),
+            root.join("textures/hero.png.meta"),
+        )
+        .unwrap();
+
+        let mut database = AssetDatabase::new(&root, "builtin");
+        let second = scan_project_assets(&root, &mut database).unwrap();
+        assert_eq!(second.metas[0].guid, guid);
+        assert_eq!(
+            second.metas[0].source_path,
+            PathBuf::from("textures/hero.png")
         );
 
         let _ = std::fs::remove_dir_all(&root);

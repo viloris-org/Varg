@@ -1,0 +1,24 @@
+[package]
+name = "engine-render-wgpu"
+description = "Aster wgpu rendering backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+runtime-min = ["engine-render/runtime-min"]
+runtime-game = ["runtime-min"]
+editor = ["engine-render/editor"]
+agent-tools = ["engine-render/agent-tools"]
+script-python = ["engine-render/script-python"]
+dev-full = ["runtime-game", "editor", "agent-tools", "script-python"]
+
+[dependencies]
+bytemuck.workspace = true
+engine-core.workspace = true
+engine-render.workspace = true
+pollster.workspace = true
+wgpu.workspace = true

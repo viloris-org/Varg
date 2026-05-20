@@ -4,13 +4,16 @@
 
 #![allow(deprecated)]
 
-use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, StrokeKind, Vec2};
+use egui::{
+    Align2, Color32, CornerRadius, FontId, Frame, Margin, Rect, RichText, Stroke, StrokeKind, Vec2,
+};
 
 use crate::{
     ConfirmDeleteDialog, DesignTokens, HubAction, HubPage, HubState, NewProjectDialog,
     ProjectDeletionMode,
 };
 use engine_editor::{NewProjectRequest, ProjectMetadata, ThemePreference};
+use engine_i18n::Translations;
 use std::path::PathBuf;
 
 // ── colour helpers ────────────────────────────────────────────────────────────
@@ -94,6 +97,7 @@ fn apply_visuals(ctx: &egui::Context, pal: &Palette) {
 pub fn draw_hub(ctx: &egui::Context, hub: &mut HubState) -> bool {
     let is_dark = hub.preferences().theme != ThemePreference::Light;
     let pal = make_palette(&hub.design_tokens(), is_dark);
+    let tr = Translations::load(hub.preferences().locale);
     apply_visuals(ctx, &pal);
 
     let mut close = false;
@@ -107,27 +111,33 @@ pub fn draw_hub(ctx: &egui::Context, hub: &mut HubState) -> bool {
                 .inner_margin(Margin::ZERO),
         )
         .show(ctx, |ui| {
-            draw_sidebar(ui, hub, &pal, &mut close);
+            draw_sidebar(ui, hub, &pal, &tr, &mut close);
         });
 
     egui::CentralPanel::default()
         .frame(Frame::NONE.fill(pal.base))
         .show(ctx, |ui| match hub.page() {
-            HubPage::Projects => draw_projects_page(ui, hub, &pal),
-            HubPage::Installs => draw_installs_page(ui, hub, &pal),
-            HubPage::Settings => draw_settings_page(ui, hub, &pal),
+            HubPage::Projects => draw_projects_page(ui, hub, &pal, &tr),
+            HubPage::Installs => draw_installs_page(ui, hub, &pal, &tr),
+            HubPage::Settings => draw_settings_page(ui, hub, &pal, &tr),
         });
 
     // Overlay dialogs
-    draw_new_project_dialog(ctx, hub, &pal);
-    draw_confirm_delete_dialog(ctx, hub, &pal);
+    draw_new_project_dialog(ctx, hub, &pal, &tr);
+    draw_confirm_delete_dialog(ctx, hub, &pal, &tr);
 
     close
 }
 
 // ── sidebar ───────────────────────────────────────────────────────────────────
 
-fn draw_sidebar(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette, _close: &mut bool) {
+fn draw_sidebar(
+    ui: &mut egui::Ui,
+    hub: &mut HubState,
+    pal: &Palette,
+    tr: &Translations,
+    _close: &mut bool,
+) {
     let r = ui.max_rect();
     ui.painter().line_segment(
         [r.right_top(), r.right_bottom()],
@@ -139,23 +149,27 @@ fn draw_sidebar(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette, _close: &m
         ui.add_space(20.0);
         ui.vertical(|ui| {
             ui.label(
-                RichText::new("Aster")
+                RichText::new(tr.tr("app_name"))
                     .size(22.0)
                     .strong()
                     .color(pal.text_primary),
             );
-            ui.label(RichText::new("Hub").size(13.0).color(pal.text_secondary));
+            ui.label(
+                RichText::new(tr.tr("app_subtitle"))
+                    .size(13.0)
+                    .color(pal.text_secondary),
+            );
         });
     });
     ui.add_space(16.0);
 
-    for (label, page) in [
-        ("Projects", HubPage::Projects),
-        ("Installs", HubPage::Installs),
-        ("Settings", HubPage::Settings),
+    for (label_key, page) in [
+        ("sidebar_projects", HubPage::Projects),
+        ("sidebar_installs", HubPage::Installs),
+        ("sidebar_settings", HubPage::Settings),
     ] {
         let active = hub.page() == page;
-        nav_item(ui, label, active, pal, || hub.set_page(page));
+        nav_item(ui, tr.tr(label_key), active, pal, || hub.set_page(page));
     }
 
     let remaining = ui.available_height() - 60.0;
@@ -166,7 +180,7 @@ fn draw_sidebar(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette, _close: &m
     ui.horizontal(|ui| {
         ui.add_space(20.0);
         ui.label(
-            RichText::new("Dark Mode")
+            RichText::new(tr.tr("sidebar_dark_mode"))
                 .size(14.0)
                 .color(pal.text_secondary),
         );
@@ -210,12 +224,13 @@ fn nav_item(ui: &mut egui::Ui, label: &str, active: bool, pal: &Palette, on_clic
     } else {
         pal.text_secondary
     };
-    ui.painter().text(
-        rect.min + Vec2::new(20.0, rect.height() / 2.0),
-        egui::Align2::LEFT_CENTER,
+    paint_text_in_rect(
+        ui,
+        rect.shrink2(Vec2::new(20.0, 0.0)),
         label,
-        egui::FontId::proportional(15.0),
+        FontId::proportional(15.0),
         color,
+        Align2::LEFT_CENTER,
     );
 
     if response.clicked() {
@@ -225,7 +240,7 @@ fn nav_item(ui: &mut egui::Ui, label: &str, active: bool, pal: &Palette, on_clic
 
 // ── projects page ─────────────────────────────────────────────────────────────
 
-fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
+fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette, tr: &Translations) {
     // Collect data before borrowing hub mutably for actions
     let projects: Vec<_> = hub
         .filtered_projects()
@@ -250,7 +265,7 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new("Projects")
+                    RichText::new(tr.tr("hub_projects_title"))
                         .size(24.0)
                         .strong()
                         .color(pal.text_primary),
@@ -261,7 +276,10 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
                     // Launch button
                     let can_launch = selected_path.is_some();
                     ui.add_enabled_ui(can_launch, |ui| {
-                        if ui.button(RichText::new("▶  Launch").size(14.0)).clicked() {
+                        if ui
+                            .button(RichText::new(tr.tr("hub_launch")).size(14.0))
+                            .clicked()
+                        {
                             if let Some(ref path) = selected_path {
                                 if let Some(proj) = hub
                                     .filtered_projects()
@@ -279,7 +297,11 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
                     // Delete button
                     ui.add_enabled_ui(can_launch, |ui| {
                         if ui
-                            .button(RichText::new("Delete").color(pal.danger).size(14.0))
+                            .button(
+                                RichText::new(tr.tr("hub_delete"))
+                                    .color(pal.danger)
+                                    .size(14.0),
+                            )
                             .clicked()
                         {
                             if let Some(ref path) = selected_path {
@@ -295,7 +317,7 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
 
                     // New Project button
                     if ui
-                        .button(RichText::new("+ New Project").size(14.0))
+                        .button(RichText::new(tr.tr("hub_new_project")).size(14.0))
                         .clicked()
                     {
                         let last_loc = hub
@@ -328,8 +350,8 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
                 let mut search = hub.search.clone();
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut search)
-                        .hint_text("Search projects…")
-                        .desired_width(ui.available_width() - 56.0),
+                        .hint_text(tr.tr("hub_search"))
+                        .desired_width((ui.available_width() - 56.0).max(120.0)),
                 );
                 if resp.changed() {
                     hub.set_search(&search);
@@ -343,10 +365,13 @@ fn draw_projects_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
                 ui.add_space(40.0);
                 ui.horizontal(|ui| {
                     ui.add_space(28.0);
-                    ui.label(
-                        RichText::new("No projects yet. Click '+ New Project' to create one.")
-                            .size(14.0)
-                            .color(pal.text_secondary),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tr.tr("hub_empty"))
+                                .size(14.0)
+                                .color(pal.text_secondary),
+                        )
+                        .wrap(),
                     );
                 });
             } else {
@@ -446,64 +471,80 @@ fn project_card(
         pal.accent_text,
     );
 
-    // Name
-    ui.painter().text(
-        rect.min + Vec2::new(70.0, 18.0),
-        egui::Align2::LEFT_TOP,
+    let folder_btn_rect =
+        egui::Rect::from_min_size(rect.max - Vec2::new(40.0, 52.0), Vec2::new(32.0, 32.0));
+    let meta_width = 88.0_f32.min((rect.width() * 0.24).max(54.0));
+    let text_right = (folder_btn_rect.left() - meta_width - 8.0).max(rect.min.x + 96.0);
+    let name_rect = Rect::from_min_max(
+        rect.min + Vec2::new(70.0, 14.0),
+        egui::pos2(text_right, rect.min.y + 33.0),
+    );
+    paint_text_in_rect(
+        ui,
+        name_rect,
         name,
-        egui::FontId::proportional(15.0),
+        FontId::proportional(15.0),
         pal.text_primary,
+        Align2::LEFT_CENTER,
     );
 
-    // Path (truncated)
-    let short = if path.len() > 50 {
-        format!("…{}", &path[path.len() - 47..])
-    } else {
-        path.to_owned()
-    };
-    ui.painter().text(
-        rect.min + Vec2::new(70.0, 38.0),
-        egui::Align2::LEFT_TOP,
-        &short,
-        egui::FontId::proportional(12.0),
+    let path_rect = Rect::from_min_max(
+        rect.min + Vec2::new(70.0, 34.0),
+        egui::pos2(text_right, rect.min.y + 55.0),
+    );
+    paint_text_in_rect(
+        ui,
+        path_rect,
+        path,
+        FontId::proportional(12.0),
         pal.text_secondary,
+        Align2::LEFT_CENTER,
     );
 
     // Version + date (right side)
-    ui.painter().text(
-        rect.right_center() + Vec2::new(-52.0, -10.0),
-        egui::Align2::LEFT_CENTER,
+    let meta_rect = Rect::from_min_max(
+        egui::pos2(text_right + 8.0, rect.min.y + 18.0),
+        egui::pos2(folder_btn_rect.left() - 4.0, rect.min.y + 34.0),
+    );
+    paint_text_in_rect(
+        ui,
+        meta_rect,
         version,
-        egui::FontId::proportional(12.0),
+        FontId::proportional(12.0),
         pal.text_secondary,
+        Align2::LEFT_CENTER,
     );
     let date = if touched.len() >= 10 {
         &touched[..10]
     } else {
         touched
     };
-    ui.painter().text(
-        rect.right_center() + Vec2::new(-52.0, 8.0),
-        egui::Align2::LEFT_CENTER,
+    let date_rect = Rect::from_min_max(
+        egui::pos2(text_right + 8.0, rect.min.y + 36.0),
+        egui::pos2(folder_btn_rect.left() - 4.0, rect.min.y + 52.0),
+    );
+    paint_text_in_rect(
+        ui,
+        date_rect,
         date,
-        egui::FontId::proportional(11.0),
+        FontId::proportional(11.0),
         pal.text_secondary,
+        Align2::LEFT_CENTER,
     );
 
     // Open-folder button (⌂)
-    let btn_rect =
-        egui::Rect::from_min_size(rect.max - Vec2::new(40.0, 52.0), Vec2::new(32.0, 32.0));
-    let btn_resp = ui.allocate_rect(btn_rect, egui::Sense::click());
+    let btn_resp = ui.allocate_rect(folder_btn_rect, egui::Sense::click());
     if btn_resp.hovered() {
         ui.painter()
-            .rect_filled(btn_rect, CornerRadius::same(6), pal.surface_hover);
+            .rect_filled(folder_btn_rect, CornerRadius::same(6), pal.surface_hover);
     }
-    ui.painter().text(
-        btn_rect.center(),
-        egui::Align2::CENTER_CENTER,
+    paint_text_in_rect(
+        ui,
+        folder_btn_rect,
         "⌂",
-        egui::FontId::proportional(16.0),
+        FontId::proportional(16.0),
         pal.text_secondary,
+        Align2::CENTER_CENTER,
     );
 
     if btn_resp.clicked() {
@@ -520,7 +561,7 @@ fn project_card(
 
 // ── installs page ─────────────────────────────────────────────────────────────
 
-fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
+fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette, tr: &Translations) {
     egui::ScrollArea::vertical()
         .id_salt("hub_installs_scroll")
         .show(ui, |ui| {
@@ -528,7 +569,7 @@ fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new("Installs")
+                    RichText::new(tr.tr("hub_installs_title"))
                         .size(24.0)
                         .strong()
                         .color(pal.text_primary),
@@ -540,10 +581,13 @@ fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
             if installs.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(28.0);
-                    ui.label(
-                        RichText::new("No engine installations found.")
-                            .size(14.0)
-                            .color(pal.text_secondary),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tr.tr("hub_installs_empty"))
+                                .size(14.0)
+                                .color(pal.text_secondary),
+                        )
+                        .wrap(),
                     );
                 });
             } else {
@@ -562,20 +606,28 @@ fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
                             StrokeKind::Outside,
                         );
 
-                        ui.painter().text(
-                            rect.min + Vec2::new(16.0, 18.0),
-                            egui::Align2::LEFT_TOP,
+                        paint_text_in_rect(
+                            ui,
+                            Rect::from_min_max(
+                                rect.min + Vec2::new(16.0, 8.0),
+                                rect.max - Vec2::new(16.0, 28.0),
+                            ),
                             &install.version,
-                            egui::FontId::proportional(15.0),
+                            FontId::proportional(15.0),
                             pal.text_primary,
+                            Align2::LEFT_CENTER,
                         );
 
-                        ui.painter().text(
-                            rect.min + Vec2::new(16.0, 36.0),
-                            egui::Align2::LEFT_TOP,
-                            install.path.to_string_lossy(),
-                            egui::FontId::proportional(12.0),
+                        paint_text_in_rect(
+                            ui,
+                            Rect::from_min_max(
+                                rect.min + Vec2::new(16.0, 29.0),
+                                rect.max - Vec2::new(16.0, 8.0),
+                            ),
+                            install.path.to_string_lossy().as_ref(),
+                            FontId::proportional(12.0),
                             pal.text_secondary,
+                            Align2::LEFT_CENTER,
                         );
                     });
                 }
@@ -585,7 +637,7 @@ fn draw_installs_page(ui: &mut egui::Ui, hub: &mut HubState, pal: &Palette) {
 
 // ── settings page ─────────────────────────────────────────────────────────────
 
-fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette) {
+fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette, tr: &Translations) {
     egui::ScrollArea::vertical()
         .id_salt("hub_settings_scroll")
         .show(ui, |ui| {
@@ -593,7 +645,7 @@ fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette) {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new("Settings")
+                    RichText::new(tr.tr("hub_settings_title"))
                         .size(24.0)
                         .strong()
                         .color(pal.text_primary),
@@ -604,21 +656,41 @@ fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette) {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new("Preferences")
+                    RichText::new(tr.tr("hub_settings_preferences"))
                         .size(16.0)
                         .strong()
                         .color(pal.text_primary),
                 );
             });
             ui.add_space(12.0);
+
+            // Language selector
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new(
-                        "Settings are currently limited to theme toggles in the sidebar.",
+                    RichText::new("Language")
+                        .size(14.0)
+                        .color(pal.text_secondary),
+                );
+                let current = _hub.preferences().locale;
+                for locale in engine_i18n::Locale::VARIANTS {
+                    let selected = *locale == current;
+                    if ui.selectable_label(selected, locale.label()).clicked() {
+                        _hub.set_locale(*locale);
+                    }
+                }
+            });
+            ui.add_space(12.0);
+
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(tr.tr("hub_settings_limited"))
+                            .size(14.0)
+                            .color(pal.text_secondary),
                     )
-                    .size(14.0)
-                    .color(pal.text_secondary),
+                    .wrap(),
                 );
             });
         });
@@ -626,30 +698,27 @@ fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette) {
 
 // ── dialogs ───────────────────────────────────────────────────────────────────
 
-fn draw_new_project_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palette) {
+fn draw_new_project_dialog(
+    ctx: &egui::Context,
+    hub: &mut HubState,
+    pal: &Palette,
+    tr: &Translations,
+) {
     if hub.new_project_dialog.is_none() {
         return;
     }
 
     let installs = hub.installs().to_vec();
     let templates = [
-        (
-            "3D",
-            "three_d",
-            "Perspective camera, lighting, 3D transform defaults.",
-        ),
-        (
-            "2D",
-            "two_d",
-            "Orthographic camera, pixel-friendly scene defaults.",
-        ),
+        (tr.tr("template_3d"), "three_d", tr.tr("template_3d_desc")),
+        (tr.tr("template_2d"), "two_d", tr.tr("template_2d_desc")),
     ];
     let mut dialog = hub.new_project_dialog.take().unwrap();
     let mut is_open = true;
     let mut submit_req = None;
     let mut close_dialog = false;
 
-    egui::Window::new("Create Project")
+    egui::Window::new(tr.tr("dialog_new_project"))
         .id(egui::Id::new("hub_new_project_dialog"))
         .collapsible(false)
         .resizable(false)
@@ -665,70 +734,90 @@ fn draw_new_project_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palett
             ui.set_width(528.0);
             ui.add_space(8.0);
 
-            ui.label(
-                RichText::new("Start with the right scene preset.")
-                    .size(13.0)
-                    .color(pal.text_secondary),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tr.tr("dialog_preset_hint"))
+                        .size(13.0)
+                        .color(pal.text_secondary),
+                )
+                .wrap(),
             );
             ui.add_space(16.0);
 
             ui.label(
-                RichText::new("Template")
+                RichText::new(tr.tr("dialog_template"))
                     .size(12.0)
                     .strong()
                     .color(pal.text_secondary),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                let card_gap = 8.0;
+                let card_width = (ui.available_width() - card_gap) / templates.len() as f32;
                 for (idx, (title, _, description)) in templates.iter().enumerate() {
                     let selected = dialog.template_idx == idx;
-                    if template_choice(ui, title, description, selected, pal).clicked() {
+                    if template_choice(ui, title, description, selected, card_width, pal).clicked()
+                    {
                         dialog.template_idx = idx;
                     }
                     if idx + 1 != templates.len() {
-                        ui.add_space(8.0);
+                        ui.add_space(card_gap);
                     }
                 }
             });
             ui.add_space(16.0);
 
             ui.label(
-                RichText::new("Project Name")
+                RichText::new(tr.tr("dialog_project_name"))
                     .size(12.0)
                     .strong()
                     .color(pal.text_secondary),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut dialog.name)
-                    .hint_text("My Aster Project")
+                    .hint_text(tr.tr("dialog_name_hint"))
                     .desired_width(ui.available_width()),
             );
             ui.add_space(12.0);
 
             ui.label(
-                RichText::new("Location")
+                RichText::new(tr.tr("dialog_location"))
                     .size(12.0)
                     .strong()
                     .color(pal.text_secondary),
             );
             ui.horizontal(|ui| {
+                let browse_width = 72.0;
+                let gap_width = ui.spacing().item_spacing.x;
+                let input_width = (ui.available_width() - browse_width - gap_width).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut dialog.location)
-                        .hint_text("Choose a parent folder")
-                        .desired_width(ui.available_width() - 92.0),
+                        .hint_text(tr.tr("dialog_location_hint"))
+                        .desired_width(input_width),
                 );
-                if ui.button("Browse").clicked() {
+                if ui
+                    .add_sized(
+                        [browse_width, 22.0],
+                        egui::Button::new(tr.tr("dialog_browse")),
+                    )
+                    .clicked()
+                {
                     hub.pending_action = Some(HubAction::SelectProjectLocation);
                 }
             });
             ui.add_space(12.0);
 
             if installs.is_empty() {
-                ui.label(RichText::new("Warning: No toolchains installed.").color(pal.danger));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(tr.tr("dialog_warning_no_toolchain")).color(pal.danger),
+                    )
+                    .wrap(),
+                );
             } else {
                 dialog.version_idx = dialog.version_idx.min(installs.len().saturating_sub(1));
                 ui.label(
-                    RichText::new("Toolchain")
+                    RichText::new(tr.tr("dialog_toolchain"))
                         .size(12.0)
                         .strong()
                         .color(pal.text_secondary),
@@ -745,13 +834,13 @@ fn draw_new_project_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palett
             ui.add_space(12.0);
 
             if let Some(err) = &dialog.error {
-                ui.label(RichText::new(err).color(pal.danger));
+                ui.add(egui::Label::new(RichText::new(err).color(pal.danger)).wrap());
                 ui.add_space(8.0);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(RichText::new("Create").size(14.0).strong())
+                    .button(RichText::new(tr.tr("dialog_create")).size(14.0).strong())
                     .clicked()
                 {
                     dialog.template_idx =
@@ -770,7 +859,7 @@ fn draw_new_project_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palett
                     });
                 }
                 ui.add_space(8.0);
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr.tr("dialog_cancel")).clicked() {
                     close_dialog = true;
                 }
             });
@@ -782,15 +871,20 @@ fn draw_new_project_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palett
 
     if let Some(req) = submit_req {
         match hub.create_project_plan(&req) {
-            Ok(plan) => {
-                hub.upsert_project(ProjectMetadata::new(
-                    &plan.name,
-                    &plan.path,
-                    "just now",
-                    &plan.toolchain_version,
-                ));
-                is_open = false;
-            }
+            Ok(plan) => match hub.create_project_files(&plan) {
+                Ok(()) => {
+                    hub.upsert_project(ProjectMetadata::new(
+                        &plan.name,
+                        &plan.path,
+                        "just now",
+                        &plan.toolchain_version,
+                    ));
+                    is_open = false;
+                }
+                Err(e) => {
+                    dialog.error = Some(e.to_string());
+                }
+            },
             Err(e) => {
                 dialog.error = Some(e.to_string());
             }
@@ -809,9 +903,9 @@ fn template_choice(
     title: &str,
     description: &str,
     selected: bool,
+    width: f32,
     pal: &Palette,
 ) -> egui::Response {
-    let width = (ui.available_width() - 8.0) / 2.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 92.0), egui::Sense::click());
     let bg = if selected {
         pal.surface_selected
@@ -827,24 +921,124 @@ fn template_choice(
         Stroke::new(1.0, if selected { pal.accent } else { pal.border }),
         StrokeKind::Outside,
     );
-    ui.painter().text(
-        rect.min + Vec2::new(14.0, 14.0),
-        egui::Align2::LEFT_TOP,
+    paint_text_in_rect(
+        ui,
+        Rect::from_min_max(
+            rect.min + Vec2::new(14.0, 10.0),
+            rect.max - Vec2::new(14.0, 56.0),
+        ),
         title,
-        egui::FontId::proportional(18.0),
+        FontId::proportional(18.0),
         pal.text_primary,
+        Align2::LEFT_CENTER,
     );
-    ui.painter().text(
-        rect.min + Vec2::new(14.0, 46.0),
-        egui::Align2::LEFT_TOP,
+    paint_wrapped_text_in_rect(
+        ui,
+        Rect::from_min_max(
+            rect.min + Vec2::new(14.0, 42.0),
+            rect.max - Vec2::new(14.0, 10.0),
+        ),
         description,
-        egui::FontId::proportional(12.0),
+        FontId::proportional(12.0),
         pal.text_secondary,
     );
     response
 }
 
-fn draw_confirm_delete_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Palette) {
+fn paint_text_in_rect(
+    ui: &egui::Ui,
+    rect: Rect,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    align: Align2,
+) {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 {
+        return;
+    }
+    let text = elide_to_width(ui, text, font.clone(), color, rect.width());
+    let galley = ui.painter().layout_no_wrap(text, font, color);
+    let text_rect = align.align_size_within_rect(galley.size(), rect);
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(text_rect.min, galley, color);
+}
+
+fn paint_wrapped_text_in_rect(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 {
+        return;
+    }
+    let galley = ui
+        .painter()
+        .layout(text.to_owned(), font, color, rect.width());
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(rect.min, galley, color);
+}
+
+fn elide_to_width(
+    ui: &egui::Ui,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> String {
+    if ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), color)
+        .size()
+        .x
+        <= max_width
+    {
+        return text.to_owned();
+    }
+
+    let ellipsis = "...";
+    if ui
+        .painter()
+        .layout_no_wrap(ellipsis.to_owned(), font.clone(), color)
+        .size()
+        .x
+        > max_width
+    {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut low = 0;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let candidate = chars
+            .iter()
+            .take(mid)
+            .chain(ellipsis.chars().collect::<Vec<_>>().iter())
+            .collect::<String>();
+        let width = ui
+            .painter()
+            .layout_no_wrap(candidate, font.clone(), color)
+            .size()
+            .x;
+        if width <= max_width {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    chars
+        .into_iter()
+        .take(low)
+        .chain(ellipsis.chars())
+        .collect()
+}
+
+fn draw_confirm_delete_dialog(
+    ctx: &egui::Context,
+    hub: &mut HubState,
+    pal: &Palette,
+    tr: &Translations,
+) {
     if hub.confirm_delete.is_none() {
         return;
     }
@@ -855,7 +1049,7 @@ fn draw_confirm_delete_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Pal
     let mut delete_files = false;
     let mut close_dialog = false;
 
-    egui::Window::new("Confirm Delete")
+    egui::Window::new(tr.tr("dialog_confirm_delete"))
         .id(egui::Id::new("hub_confirm_delete_dialog"))
         .collapsible(false)
         .resizable(false)
@@ -868,28 +1062,31 @@ fn draw_confirm_delete_dialog(ctx: &egui::Context, hub: &mut HubState, pal: &Pal
         .open(&mut is_open)
         .show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!(
-                    "Are you sure you want to remove '{}'?",
-                    dialog.path.display()
-                ))
-                .color(pal.text_primary),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tr.tr_fmt(
+                        "dialog_confirm_message",
+                        &[&dialog.path.display().to_string()],
+                    ))
+                    .color(pal.text_primary),
+                )
+                .wrap(),
             );
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
-                if ui.button("Remove from Recents").clicked() {
+                if ui.button(tr.tr("dialog_remove_recents")).clicked() {
                     remove_recent = true;
                     close_dialog = true;
                 }
                 if ui
-                    .button(RichText::new("Delete Files").color(pal.danger))
+                    .button(RichText::new(tr.tr("dialog_delete_files")).color(pal.danger))
                     .clicked()
                 {
                     delete_files = true;
                     close_dialog = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr.tr("dialog_cancel")).clicked() {
                     close_dialog = true;
                 }
             });

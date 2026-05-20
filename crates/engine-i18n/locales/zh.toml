@@ -1,0 +1,161 @@
+app_name = "Aster"
+app_subtitle = "集线器"
+
+# Sidebar
+sidebar_projects = "项目"
+sidebar_installs = "安装"
+sidebar_settings = "设置"
+sidebar_dark_mode = "深色模式"
+
+# Menu bar
+menu_file = "文件"
+menu_edit = "编辑"
+menu_assets = "资源"
+menu_gameobject = "游戏对象"
+menu_component = "组件"
+menu_window = "窗口"
+menu_help = "帮助"
+
+# Toolbar
+tool_view = "视图工具"
+tool_move = "移动工具"
+tool_rotate = "旋转工具"
+tool_scale = "缩放工具"
+tool_global = "全局"
+tool_pivot = "轴心"
+tool_save = "保存"
+panel_hierarchy = "层级"
+panel_inspector = "检视"
+panel_project = "项目"
+panel_console = "控制台"
+panel_scene_view = "场景"
+panel_game_view = "游戏"
+
+# Status bar
+status_play_mode = "播放模式"
+status_ready = "就绪"
+status_no_project = "未加载项目"
+status_console_count = "控制台: {}"
+status_asset_indexing = "资源索引中"
+
+# Viewport
+viewport_scene = "场景"
+viewport_game = "游戏"
+viewport_no_viewport = "未打开视口"
+viewport_hint_open = "打开项目以预览场景"
+viewport_hint_empty = "场景为空"
+viewport_stats = "{} 个对象  |  {} 网格  {} 相机  {} 灯光  {} 物理"
+
+# Hierarchy
+hierarchy_create_hint = "创建空游戏对象"
+hierarchy_search = "搜索"
+hierarchy_no_scene = "未加载场景"
+hierarchy_sample_scene = "示例场景"
+
+# Inspector
+inspector_select_hint = "选择一个游戏对象进行检视"
+inspector_no_project = "未打开项目"
+inspector_gone = "所选对象不存在"
+inspector_tag = "标签"
+inspector_tag_value = "未标记"
+inspector_layer = "层级"
+inspector_layer_value = "默认"
+inspector_transform = "变换"
+inspector_position = "位置"
+inspector_rotation = "旋转"
+inspector_scale = "缩放"
+inspector_add_component = "添加组件"
+
+# Components
+component_camera = "相机"
+component_mesh_renderer = "网格渲染器"
+component_light = "灯光"
+component_rigidbody = "刚体"
+component_collider = "碰撞体"
+component_audio_source = "音频源"
+component_script = "脚本"
+property_projection = "投影"
+property_projection_value = "透视"
+property_fov = "视场角"
+property_near = "近平面"
+property_mesh = "网格"
+property_material = "材质"
+property_type = "类型"
+property_intensity = "强度"
+property_body_type = "刚体类型"
+property_mass = "质量"
+property_shape = "形状"
+property_volume = "音量"
+property_backend = "后端"
+property_script_name = "脚本"
+property_mesh_asset = "资源网格"
+property_material_asset = "资源材质"
+
+# Project panel
+project_create = "创建"
+project_import = "导入"
+project_search = "搜索资源"
+project_no_project = "未打开项目"
+project_empty = "资源文件夹为空"
+project_no_match = "没有匹配当前筛选条件的资源"
+
+# Console
+console_clear = "清除"
+console_expanded = "展开"
+console_collapse = "折叠"
+console_filter = "筛选"
+
+# Resource kinds
+resource_texture = "纹理"
+resource_material = "材质"
+resource_shader = "着色器"
+resource_audio = "音频"
+resource_model = "模型"
+resource_skinned_model = "蒙皮模型"
+resource_animation = "动画"
+
+# Hub projects page
+hub_projects_title = "项目"
+hub_launch = "▶  启动"
+hub_delete = "删除"
+hub_new_project = "+ 新建项目"
+hub_search = "搜索项目…"
+hub_empty = "暂无项目。点击'+ 新建项目'创建一个。"
+
+# Hub installs page
+hub_installs_title = "安装"
+hub_installs_empty = "未找到引擎安装。"
+
+# Hub settings page
+hub_settings_title = "设置"
+hub_settings_preferences = "偏好"
+hub_settings_limited = "设置当前仅限于侧边栏中的主题切换。"
+
+# New project dialog
+dialog_new_project = "创建项目"
+dialog_preset_hint = "选择合适的场景预设开始。"
+dialog_template = "模板"
+dialog_project_name = "项目名称"
+dialog_name_hint = "我的 Aster 项目"
+dialog_location = "位置"
+dialog_location_hint = "选择父文件夹"
+dialog_browse = "浏览"
+dialog_toolchain = "工具链"
+dialog_warning_no_toolchain = "警告: 未安装工具链。"
+dialog_create = "创建"
+dialog_cancel = "取消"
+template_3d = "3D"
+template_3d_desc = "透视相机，光照，3D变换默认值。"
+template_2d = "2D"
+template_2d_desc = "正交相机，像素友好的场景默认值。"
+
+# Confirm delete dialog
+dialog_confirm_delete = "确认删除"
+dialog_confirm_message = "确定要移除 '{}' 吗?"
+dialog_remove_recents = "从最近项目中移除"
+dialog_delete_files = "删除文件"
+
+# Editor title
+editor_title_format = "Aster 编辑器 - {}"
+editor_untitled = "未命名"
+editor_brand = "Infernux 风格编辑器"

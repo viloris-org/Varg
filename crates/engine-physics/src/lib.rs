@@ -4,8 +4,8 @@
 //! Physics abstraction and null backend for the Aster engine.
 //!
 //! The null backend compiles everywhere and satisfies the trait contract without
-//! linking any physics library. A real backend (Rapier, Jolt, …) replaces it by
-//! implementing [`PhysicsBackend`] and registering it at startup.
+//! linking any physics library. The `rapier` feature enables [`RapierPhysicsBackend`],
+//! the production backend used by runtime-game builds.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -144,6 +144,8 @@ pub struct ContactEvent {
     pub normal: Vec3,
     /// Whether this is an enter (true) or exit (false) event.
     pub entered: bool,
+    /// Whether at least one collider in the pair is a trigger/sensor.
+    pub is_trigger: bool,
 }
 
 // ── Query types ──────────────────────────────────────────────────────────────
@@ -173,10 +175,65 @@ pub struct OverlapResult {
 }
 
 /// Query filter controlling which layers are tested.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct QueryFilter {
     /// Layer mask; zero means test all layers.
     pub mask: u32,
+}
+
+/// Kinematic character movement request.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CharacterControllerDesc {
+    /// Character collider shape used for sweeps.
+    pub shape: ColliderShapeRef,
+    /// Desired world-space translation for this step.
+    pub translation: Vec3,
+    /// Step time in seconds.
+    pub dt: f32,
+    /// Layers considered solid for the controller.
+    pub filter: QueryFilter,
+}
+
+/// Borrowable collider shape for query/controller APIs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColliderShapeRef {
+    /// Axis-aligned box.
+    Box {
+        /// Half-extents on each axis.
+        half_extents: Vec3,
+    },
+    /// Sphere.
+    Sphere {
+        /// Radius.
+        radius: f32,
+    },
+    /// Capsule aligned along the Y axis.
+    Capsule {
+        /// Half-height of the cylindrical section.
+        half_height: f32,
+        /// Radius of the end caps.
+        radius: f32,
+    },
+}
+
+impl Default for ColliderShapeRef {
+    fn default() -> Self {
+        Self::Capsule {
+            half_height: 0.5,
+            radius: 0.25,
+        }
+    }
+}
+
+/// Result of a kinematic character movement.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CharacterControllerOutput {
+    /// Effective translation applied after collisions/sliding.
+    pub translation: Vec3,
+    /// True when the controller ended grounded.
+    pub grounded: bool,
+    /// Number of collision callbacks observed during the move.
+    pub collisions: usize,
 }
 
 // ── Layer matrix ─────────────────────────────────────────────────────────────
@@ -275,6 +332,13 @@ pub trait PhysicsBackend: Send + Sync {
 
     /// Drains pending contact events since the last call.
     fn drain_contacts(&mut self) -> Vec<ContactEvent>;
+
+    /// Moves a kinematic body with a basic character controller.
+    fn move_character(
+        &mut self,
+        body: BodyHandle,
+        desc: CharacterControllerDesc,
+    ) -> EngineResult<CharacterControllerOutput>;
 }
 
 // ── Null backend ─────────────────────────────────────────────────────────────
@@ -350,6 +414,14 @@ impl PhysicsBackend for NullPhysicsBackend {
 
     fn drain_contacts(&mut self) -> Vec<ContactEvent> {
         Vec::new()
+    }
+
+    fn move_character(
+        &mut self,
+        _body: BodyHandle,
+        _desc: CharacterControllerDesc,
+    ) -> EngineResult<CharacterControllerOutput> {
+        Err(EngineError::other("null physics backend"))
     }
 }
 
@@ -514,6 +586,7 @@ impl SimplePhysicsBackend {
             point: center_b + normal * radius_b,
             normal,
             entered: true,
+            is_trigger: collider_a.desc.is_trigger || collider_b.desc.is_trigger,
         })
     }
 
@@ -542,10 +615,99 @@ impl SimplePhysicsBackend {
                     point: Vec3::ZERO,
                     normal: Vec3::ZERO,
                     entered: false,
+                    is_trigger: left.desc.is_trigger || right.desc.is_trigger,
                 });
             }
         }
         self.active_pairs = current_pairs;
+    }
+
+    fn resolve_contacts(&mut self) {
+        let handles = self.colliders.keys().copied().collect::<Vec<_>>();
+        for (index, left) in handles.iter().enumerate() {
+            for right in handles.iter().skip(index + 1) {
+                let Some((normal, penetration)) = self.collision_penetration(*left, *right) else {
+                    continue;
+                };
+                let Some(left_collider) = self.colliders.get(left) else {
+                    continue;
+                };
+                let Some(right_collider) = self.colliders.get(right) else {
+                    continue;
+                };
+                if left_collider.desc.is_trigger || right_collider.desc.is_trigger {
+                    continue;
+                }
+                self.apply_separation(left_collider.body, right_collider.body, normal, penetration);
+            }
+        }
+    }
+
+    fn collision_penetration(&self, a: ColliderHandle, b: ColliderHandle) -> Option<(Vec3, f32)> {
+        let collider_a = self.colliders.get(&a)?;
+        let collider_b = self.colliders.get(&b)?;
+        if collider_a.body == collider_b.body || !layers_match(&collider_a.desc, &collider_b.desc) {
+            return None;
+        }
+        let (center_a, radius_a) = self.collider_world_sphere(a)?;
+        let (center_b, radius_b) = self.collider_world_sphere(b)?;
+        let delta = center_a - center_b;
+        let distance = delta.length();
+        let penetration = radius_a + radius_b - distance;
+        if penetration <= 0.0 {
+            return None;
+        }
+        let normal = if distance <= f32::EPSILON {
+            Vec3::new(0.0, 1.0, 0.0)
+        } else {
+            delta / distance
+        };
+        Some((normal, penetration))
+    }
+
+    fn apply_separation(
+        &mut self,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        normal: Vec3,
+        penetration: f32,
+    ) {
+        let (kind_a, kind_b) = match (self.bodies.get(&body_a), self.bodies.get(&body_b)) {
+            (Some(a), Some(b)) => (a.desc.kind, b.desc.kind),
+            _ => return,
+        };
+        match (kind_a, kind_b) {
+            (BodyKind::Dynamic, BodyKind::Dynamic) => {
+                self.translate_body(body_a, normal * (penetration * 0.5));
+                self.translate_body(body_b, normal * (-penetration * 0.5));
+                self.cancel_velocity(body_a, normal);
+                self.cancel_velocity(body_b, normal * -1.0);
+            }
+            (BodyKind::Dynamic, _) => {
+                self.translate_body(body_a, normal * penetration);
+                self.cancel_velocity(body_a, normal);
+            }
+            (_, BodyKind::Dynamic) => {
+                self.translate_body(body_b, normal * -penetration);
+                self.cancel_velocity(body_b, normal * -1.0);
+            }
+            _ => {}
+        }
+    }
+
+    fn translate_body(&mut self, body: BodyHandle, delta: Vec3) {
+        if let Some(body) = self.bodies.get_mut(&body) {
+            body.transform.translation += delta;
+        }
+    }
+
+    fn cancel_velocity(&mut self, body: BodyHandle, normal: Vec3) {
+        if let Some(body) = self.bodies.get_mut(&body) {
+            let into_surface = body.velocity.dot(normal);
+            if into_surface < 0.0 {
+                body.velocity -= normal * into_surface;
+            }
+        }
     }
 }
 
@@ -558,6 +720,7 @@ impl PhysicsBackend for SimplePhysicsBackend {
             }
         }
         self.update_contacts();
+        self.resolve_contacts();
     }
 
     fn create_body(&mut self, desc: &RigidbodyDesc) -> EngineResult<BodyHandle> {
@@ -718,6 +881,54 @@ impl PhysicsBackend for SimplePhysicsBackend {
     fn drain_contacts(&mut self) -> Vec<ContactEvent> {
         std::mem::take(&mut self.contacts)
     }
+
+    fn move_character(
+        &mut self,
+        body: BodyHandle,
+        desc: CharacterControllerDesc,
+    ) -> EngineResult<CharacterControllerOutput> {
+        let radius = match desc.shape {
+            ColliderShapeRef::Box { half_extents } => half_extents.length(),
+            ColliderShapeRef::Sphere { radius } => radius,
+            ColliderShapeRef::Capsule {
+                half_height,
+                radius,
+            } => half_height + radius,
+        };
+        let transform = self.body(body)?.transform;
+        let distance = desc.translation.length();
+        let direction = desc.translation.normalized();
+        let hit = if distance > f32::EPSILON {
+            self.sweep_sphere(
+                transform.translation,
+                radius,
+                direction,
+                distance,
+                desc.filter,
+            )
+        } else {
+            None
+        };
+        let translation = hit
+            .as_ref()
+            .map(|hit| direction * hit.distance.max(0.0))
+            .unwrap_or(desc.translation);
+        self.body_mut(body)?.transform.translation += translation;
+        Ok(CharacterControllerOutput {
+            translation,
+            grounded: translation.y <= f32::EPSILON
+                && self
+                    .sweep_sphere(
+                        transform.translation + translation,
+                        radius,
+                        Vec3::new(0.0, -1.0, 0.0),
+                        0.08,
+                        desc.filter,
+                    )
+                    .is_some(),
+            collisions: usize::from(hit.is_some()),
+        })
+    }
 }
 
 fn ordered_pair(left: ColliderHandle, right: ColliderHandle) -> (ColliderHandle, ColliderHandle) {
@@ -774,6 +985,525 @@ fn ray_sphere(
     };
     (distance >= 0.0 && distance <= max_distance).then_some(distance)
 }
+
+// ── Rapier backend ───────────────────────────────────────────────────────────
+
+#[cfg(feature = "rapier")]
+mod rapier_backend {
+    use std::collections::HashMap;
+
+    use rapier3d::{
+        control as rpc,
+        crossbeam::channel::{unbounded, Receiver},
+        na::{Point3, Quaternion, Translation3, UnitQuaternion, Vector3},
+        parry::query::ShapeCastOptions,
+        prelude as rp,
+    };
+
+    use super::*;
+
+    /// Rapier-backed physics implementation for runtime-game builds.
+    pub struct RapierPhysicsBackend {
+        pipeline: rp::PhysicsPipeline,
+        gravity: rp::Vector<rp::Real>,
+        integration: rp::IntegrationParameters,
+        islands: rp::IslandManager,
+        broad_phase: rp::BroadPhaseMultiSap,
+        narrow_phase: rp::NarrowPhase,
+        bodies: rp::RigidBodySet,
+        colliders: rp::ColliderSet,
+        impulse_joints: rp::ImpulseJointSet,
+        multibody_joints: rp::MultibodyJointSet,
+        ccd_solver: rp::CCDSolver,
+        query_pipeline: rp::QueryPipeline,
+        collision_events: Receiver<rp::CollisionEvent>,
+        contact_force_events: Receiver<rp::ContactForceEvent>,
+        event_handler: rp::ChannelEventCollector,
+        next_body: u64,
+        next_collider: u64,
+        body_handles: HashMap<BodyHandle, rp::RigidBodyHandle>,
+        collider_handles: HashMap<ColliderHandle, rp::ColliderHandle>,
+        rapier_bodies: HashMap<rp::RigidBodyHandle, BodyHandle>,
+        rapier_colliders: HashMap<rp::ColliderHandle, ColliderHandle>,
+        pending_contacts: Vec<ContactEvent>,
+    }
+
+    impl Default for RapierPhysicsBackend {
+        fn default() -> Self {
+            let (collision_send, collision_events) = unbounded();
+            let (contact_force_send, contact_force_events) = unbounded();
+            Self {
+                pipeline: rp::PhysicsPipeline::new(),
+                gravity: vector3(Vec3::new(0.0, -9.81, 0.0)),
+                integration: rp::IntegrationParameters::default(),
+                islands: rp::IslandManager::new(),
+                broad_phase: rp::BroadPhaseMultiSap::new(),
+                narrow_phase: rp::NarrowPhase::new(),
+                bodies: rp::RigidBodySet::new(),
+                colliders: rp::ColliderSet::new(),
+                impulse_joints: rp::ImpulseJointSet::new(),
+                multibody_joints: rp::MultibodyJointSet::new(),
+                ccd_solver: rp::CCDSolver::new(),
+                query_pipeline: rp::QueryPipeline::new(),
+                collision_events,
+                contact_force_events,
+                event_handler: rp::ChannelEventCollector::new(collision_send, contact_force_send),
+                next_body: 1,
+                next_collider: 1,
+                body_handles: HashMap::new(),
+                collider_handles: HashMap::new(),
+                rapier_bodies: HashMap::new(),
+                rapier_colliders: HashMap::new(),
+                pending_contacts: Vec::new(),
+            }
+        }
+    }
+
+    impl RapierPhysicsBackend {
+        /// Creates an empty Rapier physics backend.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Returns the number of live rigid bodies.
+        pub fn body_count(&self) -> usize {
+            self.body_handles.len()
+        }
+
+        /// Returns the number of live colliders.
+        pub fn collider_count(&self) -> usize {
+            self.collider_handles.len()
+        }
+
+        fn rapier_body(&self, body: BodyHandle) -> EngineResult<rp::RigidBodyHandle> {
+            self.body_handles
+                .get(&body)
+                .copied()
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))
+        }
+
+        fn rapier_collider(&self, collider: ColliderHandle) -> EngineResult<rp::ColliderHandle> {
+            self.collider_handles
+                .get(&collider)
+                .copied()
+                .ok_or_else(|| EngineError::invalid_handle("physics collider does not exist"))
+        }
+
+        fn collider_owner(&self, collider: rp::ColliderHandle) -> Option<BodyHandle> {
+            self.colliders
+                .get(collider)
+                .and_then(|collider| collider.parent())
+                .and_then(|parent| self.rapier_bodies.get(&parent).copied())
+        }
+
+        fn drain_rapier_events(&mut self) {
+            while let Ok(event) = self.collision_events.try_recv() {
+                let Some(body_a) = self.collider_owner(event.collider1()) else {
+                    continue;
+                };
+                let Some(body_b) = self.collider_owner(event.collider2()) else {
+                    continue;
+                };
+                self.pending_contacts.push(ContactEvent {
+                    body_a,
+                    body_b,
+                    point: Vec3::ZERO,
+                    normal: Vec3::ZERO,
+                    entered: event.started(),
+                    is_trigger: event.sensor(),
+                });
+            }
+            while self.contact_force_events.try_recv().is_ok() {}
+        }
+    }
+
+    impl PhysicsBackend for RapierPhysicsBackend {
+        fn fixed_update(&mut self, dt: f32) {
+            self.integration.dt = dt.max(0.0);
+            self.pipeline.step(
+                &self.gravity,
+                &self.integration,
+                &mut self.islands,
+                &mut self.broad_phase,
+                &mut self.narrow_phase,
+                &mut self.bodies,
+                &mut self.colliders,
+                &mut self.impulse_joints,
+                &mut self.multibody_joints,
+                &mut self.ccd_solver,
+                Some(&mut self.query_pipeline),
+                &(),
+                &self.event_handler,
+            );
+            self.drain_rapier_events();
+        }
+
+        fn create_body(&mut self, desc: &RigidbodyDesc) -> EngineResult<BodyHandle> {
+            let builder = match desc.kind {
+                BodyKind::Dynamic => rp::RigidBodyBuilder::dynamic(),
+                BodyKind::Kinematic => rp::RigidBodyBuilder::kinematic_position_based(),
+                BodyKind::Static => rp::RigidBodyBuilder::fixed(),
+            }
+            .position(isometry(desc.transform))
+            .linear_damping(desc.linear_damping)
+            .angular_damping(desc.angular_damping)
+            .gravity_scale(desc.gravity_scale);
+            let rapier = self.bodies.insert(builder.build());
+            let handle = BodyHandle(self.next_body);
+            self.next_body = self.next_body.saturating_add(1).max(1);
+            self.body_handles.insert(handle, rapier);
+            self.rapier_bodies.insert(rapier, handle);
+            Ok(handle)
+        }
+
+        fn destroy_body(&mut self, body: BodyHandle) -> EngineResult<()> {
+            let rapier = self.rapier_body(body)?;
+            self.bodies.remove(
+                rapier,
+                &mut self.islands,
+                &mut self.colliders,
+                &mut self.impulse_joints,
+                &mut self.multibody_joints,
+                true,
+            );
+            self.body_handles.remove(&body);
+            self.rapier_bodies.remove(&rapier);
+            self.collider_handles
+                .retain(|_, rapier_collider| self.colliders.get(*rapier_collider).is_some());
+            self.rapier_colliders
+                .retain(|rapier_collider, _| self.colliders.get(*rapier_collider).is_some());
+            self.query_pipeline.update(&self.colliders);
+            Ok(())
+        }
+
+        fn add_collider(
+            &mut self,
+            body: BodyHandle,
+            desc: &ColliderDesc,
+        ) -> EngineResult<ColliderHandle> {
+            let rapier_body = self.rapier_body(body)?;
+            let builder = collider_builder(desc)
+                .friction(desc.friction)
+                .restitution(desc.restitution)
+                .sensor(desc.is_trigger)
+                .collision_groups(interaction_groups(desc.layer, desc.mask))
+                .solver_groups(interaction_groups(desc.layer, desc.mask))
+                .active_events(rp::ActiveEvents::COLLISION_EVENTS);
+            let rapier =
+                self.colliders
+                    .insert_with_parent(builder.build(), rapier_body, &mut self.bodies);
+            let handle = ColliderHandle(self.next_collider);
+            self.next_collider = self.next_collider.saturating_add(1).max(1);
+            self.collider_handles.insert(handle, rapier);
+            self.rapier_colliders.insert(rapier, handle);
+            self.query_pipeline.update(&self.colliders);
+            Ok(handle)
+        }
+
+        fn remove_collider(&mut self, collider: ColliderHandle) -> EngineResult<()> {
+            let rapier = self.rapier_collider(collider)?;
+            self.colliders
+                .remove(rapier, &mut self.islands, &mut self.bodies, true);
+            self.collider_handles.remove(&collider);
+            self.rapier_colliders.remove(&rapier);
+            self.query_pipeline.update(&self.colliders);
+            Ok(())
+        }
+
+        fn body_transform(&self, body: BodyHandle) -> EngineResult<Transform> {
+            let rapier = self.rapier_body(body)?;
+            let body = self
+                .bodies
+                .get(rapier)
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))?;
+            Ok(transform(*body.position()))
+        }
+
+        fn set_body_transform(
+            &mut self,
+            body: BodyHandle,
+            transform: Transform,
+        ) -> EngineResult<()> {
+            let rapier = self.rapier_body(body)?;
+            let body = self
+                .bodies
+                .get_mut(rapier)
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))?;
+            let pos = isometry(transform);
+            if body.is_kinematic() {
+                body.set_next_kinematic_position(pos);
+            } else {
+                body.set_position(pos, true);
+            }
+            self.query_pipeline.update(&self.colliders);
+            Ok(())
+        }
+
+        fn apply_impulse(&mut self, body: BodyHandle, impulse: Vec3) -> EngineResult<()> {
+            let rapier = self.rapier_body(body)?;
+            let body = self
+                .bodies
+                .get_mut(rapier)
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))?;
+            if body.is_dynamic() {
+                body.apply_impulse(vector3(impulse), true);
+            }
+            Ok(())
+        }
+
+        fn raycast(
+            &self,
+            origin: Vec3,
+            direction: Vec3,
+            max_distance: f32,
+            filter: QueryFilter,
+        ) -> Option<RayHit> {
+            let direction = direction.normalized();
+            if direction == Vec3::ZERO {
+                return None;
+            }
+            let ray = rp::Ray::new(point3(origin), vector3(direction));
+            self.query_pipeline
+                .cast_ray_and_get_normal(
+                    &self.bodies,
+                    &self.colliders,
+                    &ray,
+                    max_distance,
+                    true,
+                    query_filter(filter),
+                )
+                .and_then(|(rapier_collider, hit)| {
+                    let collider = self.rapier_colliders.get(&rapier_collider).copied()?;
+                    let body = self.collider_owner(rapier_collider)?;
+                    Some(RayHit {
+                        body,
+                        collider,
+                        point: origin + direction * hit.time_of_impact,
+                        normal: vec3(hit.normal),
+                        distance: hit.time_of_impact,
+                    })
+                })
+        }
+
+        fn overlap_sphere(
+            &self,
+            center: Vec3,
+            radius: f32,
+            filter: QueryFilter,
+        ) -> Vec<OverlapResult> {
+            let shape = rp::SharedShape::ball(radius);
+            let mut results = Vec::new();
+            self.query_pipeline.intersections_with_shape(
+                &self.bodies,
+                &self.colliders,
+                &isometry(Transform {
+                    translation: center,
+                    ..Transform::IDENTITY
+                }),
+                shape.as_ref(),
+                query_filter(filter),
+                |rapier_collider| {
+                    if let (Some(collider), Some(body)) = (
+                        self.rapier_colliders.get(&rapier_collider).copied(),
+                        self.collider_owner(rapier_collider),
+                    ) {
+                        results.push(OverlapResult { body, collider });
+                    }
+                    true
+                },
+            );
+            results
+        }
+
+        fn sweep_sphere(
+            &self,
+            center: Vec3,
+            radius: f32,
+            direction: Vec3,
+            max_distance: f32,
+            filter: QueryFilter,
+        ) -> Option<RayHit> {
+            let direction = direction.normalized();
+            if direction == Vec3::ZERO {
+                return None;
+            }
+            let shape = rp::SharedShape::ball(radius);
+            self.query_pipeline
+                .cast_shape(
+                    &self.bodies,
+                    &self.colliders,
+                    &isometry(Transform {
+                        translation: center,
+                        ..Transform::IDENTITY
+                    }),
+                    &vector3(direction),
+                    shape.as_ref(),
+                    ShapeCastOptions {
+                        max_time_of_impact: max_distance,
+                        ..ShapeCastOptions::default()
+                    },
+                    query_filter(filter),
+                )
+                .and_then(|(rapier_collider, hit)| {
+                    let collider = self.rapier_colliders.get(&rapier_collider).copied()?;
+                    let body = self.collider_owner(rapier_collider)?;
+                    Some(RayHit {
+                        body,
+                        collider,
+                        point: center + direction * hit.time_of_impact,
+                        normal: vec3(*hit.normal1),
+                        distance: hit.time_of_impact,
+                    })
+                })
+        }
+
+        fn drain_contacts(&mut self) -> Vec<ContactEvent> {
+            self.drain_rapier_events();
+            std::mem::take(&mut self.pending_contacts)
+        }
+
+        fn move_character(
+            &mut self,
+            body: BodyHandle,
+            desc: CharacterControllerDesc,
+        ) -> EngineResult<CharacterControllerOutput> {
+            let rapier = self.rapier_body(body)?;
+            let body_ref = self
+                .bodies
+                .get(rapier)
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))?;
+            let shape = shared_shape(desc.shape);
+            let mut collisions = 0usize;
+            let controller = rpc::KinematicCharacterController::default();
+            let movement = controller.move_shape(
+                desc.dt,
+                &self.bodies,
+                &self.colliders,
+                &self.query_pipeline,
+                shape.as_ref(),
+                body_ref.position(),
+                vector3(desc.translation),
+                query_filter(desc.filter),
+                |_| collisions = collisions.saturating_add(1),
+            );
+            let body_mut = self
+                .bodies
+                .get_mut(rapier)
+                .ok_or_else(|| EngineError::invalid_handle("physics body does not exist"))?;
+            let next = *body_mut.position() * Translation3::from(movement.translation);
+            if body_mut.is_kinematic() {
+                body_mut.set_next_kinematic_position(next);
+            } else {
+                body_mut.set_position(next, true);
+            }
+            self.query_pipeline.update(&self.colliders);
+            Ok(CharacterControllerOutput {
+                translation: vec3(movement.translation),
+                grounded: movement.grounded,
+                collisions,
+            })
+        }
+    }
+
+    fn collider_builder(desc: &ColliderDesc) -> rp::ColliderBuilder {
+        match &desc.shape {
+            ColliderShape::Box { half_extents } => {
+                rp::ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            }
+            ColliderShape::Sphere { radius } => rp::ColliderBuilder::ball(*radius),
+            ColliderShape::Capsule {
+                half_height,
+                radius,
+            } => rp::ColliderBuilder::capsule_y(*half_height, *radius),
+            ColliderShape::Mesh { vertices } => {
+                let points = vertices
+                    .chunks_exact(3)
+                    .map(|chunk| Point3::new(chunk[0], chunk[1], chunk[2]))
+                    .collect::<Vec<_>>();
+                rp::ColliderBuilder::convex_hull(&points)
+                    .unwrap_or_else(|| rp::ColliderBuilder::ball(0.5))
+            }
+        }
+    }
+
+    fn shared_shape(shape: ColliderShapeRef) -> rp::SharedShape {
+        match shape {
+            ColliderShapeRef::Box { half_extents } => {
+                rp::SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            }
+            ColliderShapeRef::Sphere { radius } => rp::SharedShape::ball(radius),
+            ColliderShapeRef::Capsule {
+                half_height,
+                radius,
+            } => rp::SharedShape::capsule_y(half_height, radius),
+        }
+    }
+
+    fn interaction_groups(layer: u32, mask: u32) -> rp::InteractionGroups {
+        let membership = 1_u32 << layer.min(31);
+        let filter = if mask == 0 { u32::MAX } else { mask };
+        rp::InteractionGroups::new(
+            rp::Group::from_bits_truncate(membership),
+            rp::Group::from_bits_truncate(filter),
+        )
+    }
+
+    fn query_filter(filter: QueryFilter) -> rp::QueryFilter<'static> {
+        if filter.mask == 0 {
+            rp::QueryFilter::default()
+        } else {
+            rp::QueryFilter::default().groups(rp::InteractionGroups::new(
+                rp::Group::from_bits_truncate(u32::MAX),
+                rp::Group::from_bits_truncate(filter.mask),
+            ))
+        }
+    }
+
+    fn isometry(transform: Transform) -> rp::Isometry<rp::Real> {
+        rp::Isometry::from_parts(
+            Translation3::new(
+                transform.translation.x,
+                transform.translation.y,
+                transform.translation.z,
+            ),
+            UnitQuaternion::from_quaternion(Quaternion::new(
+                transform.rotation.w,
+                transform.rotation.x,
+                transform.rotation.y,
+                transform.rotation.z,
+            )),
+        )
+    }
+
+    fn transform(isometry: rp::Isometry<rp::Real>) -> Transform {
+        let rotation = isometry.rotation.quaternion();
+        Transform {
+            translation: vec3(isometry.translation.vector),
+            rotation: Quat {
+                x: rotation.i,
+                y: rotation.j,
+                z: rotation.k,
+                w: rotation.w,
+            },
+            scale: Vec3::ONE,
+        }
+    }
+
+    fn vector3(value: Vec3) -> Vector3<rp::Real> {
+        Vector3::new(value.x, value.y, value.z)
+    }
+
+    fn point3(value: Vec3) -> Point3<rp::Real> {
+        Point3::new(value.x, value.y, value.z)
+    }
+
+    fn vec3(value: Vector3<rp::Real>) -> Vec3 {
+        Vec3::new(value.x, value.y, value.z)
+    }
+}
+
+#[cfg(feature = "rapier")]
+pub use rapier_backend::RapierPhysicsBackend;
 
 #[cfg(test)]
 mod tests {
@@ -911,5 +1641,179 @@ mod tests {
         assert!(backend
             .overlap_sphere(Vec3::ZERO, 2.0, QueryFilter { mask: 1 << 2 })
             .is_empty());
+    }
+
+    #[test]
+    fn simple_backend_resolves_dynamic_body_out_of_static_contact() {
+        let mut backend = SimplePhysicsBackend::new();
+        let dynamic = backend
+            .create_body(&RigidbodyDesc {
+                transform: Transform {
+                    translation: Vec3::new(0.0, 0.5, 0.0),
+                    ..Transform::IDENTITY
+                },
+                gravity_scale: 0.0,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        let ground = backend
+            .create_body(&RigidbodyDesc {
+                kind: BodyKind::Static,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        backend
+            .add_collider(
+                dynamic,
+                &ColliderDesc {
+                    shape: ColliderShape::Sphere { radius: 0.5 },
+                    ..ColliderDesc::default()
+                },
+            )
+            .unwrap();
+        backend
+            .add_collider(
+                ground,
+                &ColliderDesc {
+                    shape: ColliderShape::Sphere { radius: 0.5 },
+                    ..ColliderDesc::default()
+                },
+            )
+            .unwrap();
+
+        backend.fixed_update(0.0);
+
+        let transform = backend.body_transform(dynamic).unwrap();
+        assert!(transform.translation.y >= 1.0);
+    }
+
+    #[cfg(feature = "rapier")]
+    #[test]
+    fn rapier_backend_raycast_hits_collider_with_layer_filter() {
+        let mut backend = RapierPhysicsBackend::new();
+        let body = backend
+            .create_body(&RigidbodyDesc {
+                transform: Transform {
+                    translation: Vec3::new(0.0, 0.0, 5.0),
+                    ..Transform::IDENTITY
+                },
+                kind: BodyKind::Static,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        backend
+            .add_collider(
+                body,
+                &ColliderDesc {
+                    layer: 4,
+                    ..ColliderDesc::default()
+                },
+            )
+            .unwrap();
+
+        assert!(backend
+            .raycast(
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 1.0),
+                10.0,
+                QueryFilter { mask: 1 << 3 },
+            )
+            .is_none());
+
+        let hit = backend
+            .raycast(
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 1.0),
+                10.0,
+                QueryFilter { mask: 1 << 4 },
+            )
+            .unwrap();
+        assert_eq!(hit.body, body);
+        assert!(hit.distance > 4.0);
+    }
+
+    #[cfg(feature = "rapier")]
+    #[test]
+    fn rapier_backend_emits_trigger_events() {
+        let mut backend = RapierPhysicsBackend::new();
+        let first = backend.create_body(&RigidbodyDesc::default()).unwrap();
+        let second = backend
+            .create_body(&RigidbodyDesc {
+                transform: Transform {
+                    translation: Vec3::new(0.25, 0.0, 0.0),
+                    ..Transform::IDENTITY
+                },
+                kind: BodyKind::Static,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        backend
+            .add_collider(
+                first,
+                &ColliderDesc {
+                    is_trigger: true,
+                    ..ColliderDesc::default()
+                },
+            )
+            .unwrap();
+        backend
+            .add_collider(second, &ColliderDesc::default())
+            .unwrap();
+
+        backend.fixed_update(1.0 / 60.0);
+        let contacts = backend.drain_contacts();
+
+        assert!(contacts
+            .iter()
+            .any(|event| event.entered && event.is_trigger));
+    }
+
+    #[cfg(feature = "rapier")]
+    #[test]
+    fn rapier_backend_moves_kinematic_character_with_slide_result() {
+        let mut backend = RapierPhysicsBackend::new();
+        let character = backend
+            .create_body(&RigidbodyDesc {
+                kind: BodyKind::Kinematic,
+                gravity_scale: 0.0,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        let wall = backend
+            .create_body(&RigidbodyDesc {
+                transform: Transform {
+                    translation: Vec3::new(0.0, 0.0, 1.0),
+                    ..Transform::IDENTITY
+                },
+                kind: BodyKind::Static,
+                ..RigidbodyDesc::default()
+            })
+            .unwrap();
+        backend
+            .add_collider(
+                wall,
+                &ColliderDesc {
+                    shape: ColliderShape::Box {
+                        half_extents: Vec3::new(0.5, 0.5, 0.5),
+                    },
+                    ..ColliderDesc::default()
+                },
+            )
+            .unwrap();
+
+        let movement = backend
+            .move_character(
+                character,
+                CharacterControllerDesc {
+                    shape: ColliderShapeRef::Sphere { radius: 0.25 },
+                    translation: Vec3::new(0.0, 0.0, 2.0),
+                    dt: 1.0 / 60.0,
+                    filter: QueryFilter::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(movement.translation.z < 2.0);
+        assert!(movement.collisions > 0);
     }
 }

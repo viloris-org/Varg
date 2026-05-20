@@ -220,6 +220,9 @@ pub struct ColliderComponentData {
     pub size: Vec3,
     /// Whether this collider is a trigger.
     pub is_trigger: bool,
+    /// Bitmask of layers this collider can interact with.
+    #[serde(default = "default_collider_mask")]
+    pub mask: u32,
 }
 
 impl Default for ColliderComponentData {
@@ -228,8 +231,13 @@ impl Default for ColliderComponentData {
             shape: "box".to_string(),
             size: Vec3::ONE,
             is_trigger: false,
+            mask: default_collider_mask(),
         }
     }
+}
+
+fn default_collider_mask() -> u32 {
+    !0
 }
 
 /// Serializable audio source component.
@@ -476,6 +484,19 @@ impl Scene {
         objects
     }
 
+    /// Iterates active object entities and metadata without allocating or sorting.
+    pub fn iter_objects(&self) -> impl Iterator<Item = (Entity, &GameObject)> {
+        self.active()
+            .objects
+            .iter()
+            .map(|(entity, object)| (*entity, object))
+    }
+
+    /// Returns the number of active objects without allocating.
+    pub fn object_count(&self) -> usize {
+        self.active().objects.len()
+    }
+
     /// Returns mutable object metadata and bumps scene version.
     pub fn object_mut(&mut self, entity: Entity) -> Option<&mut GameObject> {
         self.active_mut().bump_version();
@@ -514,6 +535,25 @@ impl Scene {
         }
         state.bump_version();
         Ok(())
+    }
+
+    /// Removes a serialized component by stable component type ID.
+    pub fn remove_component(&mut self, entity: Entity, component_type: &str) -> EngineResult<bool> {
+        let state = self.active_mut();
+        Self::ensure_alive(state, entity)?;
+        let object = state
+            .objects
+            .get_mut(&entity)
+            .ok_or_else(|| EngineError::invalid_handle("object metadata is missing"))?;
+        let before = object.components.len();
+        object
+            .components
+            .retain(|component| component.type_id() != component_type);
+        let removed = before != object.components.len();
+        if removed {
+            state.bump_version();
+        }
+        Ok(removed)
     }
 
     /// Finds the first object by name.

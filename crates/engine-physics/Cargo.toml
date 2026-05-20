@@ -10,11 +10,13 @@ rust-version.workspace = true
 [features]
 default = []
 runtime-min = []
-runtime-game = ["runtime-min"]
+runtime-game = ["runtime-min", "rapier"]
 editor = []
+rapier = ["dep:rapier3d"]
 dev-full = ["runtime-game", "editor"]
 
 [dependencies]
 engine-core.workspace = true
 bitflags.workspace = true
 serde.workspace = true
+rapier3d = { workspace = true, optional = true }

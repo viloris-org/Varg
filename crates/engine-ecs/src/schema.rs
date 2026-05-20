@@ -137,6 +137,17 @@ impl ComponentSchemaRegistry {
             evolution: SchemaEvolution::default(),
         });
         registry.register(ComponentSchema {
+            type_id: "Light".to_string(),
+            display_name: "Light".to_string(),
+            version: 1,
+            fields: vec![
+                field("kind", ComponentFieldKind::String, "directional"),
+                field("color", ComponentFieldKind::Vec3, "1,1,1"),
+                field("intensity", ComponentFieldKind::F32, "1"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
             type_id: "Rigidbody".to_string(),
             display_name: "Rigidbody".to_string(),
             version: 1,
@@ -155,6 +166,7 @@ impl ComponentSchemaRegistry {
                 field("shape", ComponentFieldKind::String, "box"),
                 field("size", ComponentFieldKind::Vec3, "1,1,1"),
                 field("is_trigger", ComponentFieldKind::Bool, "false"),
+                field("mask", ComponentFieldKind::String, "4294967295"),
             ],
             evolution: SchemaEvolution::default(),
         });
@@ -167,6 +179,17 @@ impl ComponentSchemaRegistry {
                 field("volume", ComponentFieldKind::F32, "1"),
                 field("looping", ComponentFieldKind::Bool, "false"),
                 field("play_on_start", ComponentFieldKind::Bool, "false"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "Script".to_string(),
+            display_name: "Script".to_string(),
+            version: 1,
+            fields: vec![
+                field("backend", ComponentFieldKind::String, "native"),
+                field("script", ComponentFieldKind::String, ""),
+                field("pending_recovery", ComponentFieldKind::Bool, "false"),
             ],
             evolution: SchemaEvolution::default(),
         });

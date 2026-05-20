@@ -1,0 +1,6 @@
+version = 1
+guid = "000000000000000110b31efce6d589eb"
+source_path = "materials/new_material.material.json"
+kind = "material"
+importer = "material-json"
+dependencies = ["00000000000000000000000000000000"]

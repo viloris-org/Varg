@@ -218,6 +218,10 @@ impl RenderDevice for VulkanRenderDevice {
         })
     }
 
+    fn upload_texture(&mut self, desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
+        self.create_image(desc)
+    }
+
     fn destroy_render_target(&mut self, _target: RenderTarget) {
         // Queued destruction handled by flush_destroy_queue.
     }

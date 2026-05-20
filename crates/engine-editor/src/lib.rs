@@ -5,10 +5,12 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    fs,
     path::{Path, PathBuf},
 };
 
 use engine_core::{EngineError, EngineResult};
+use engine_i18n::Locale;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "agent-tools")]
@@ -40,6 +42,9 @@ pub struct EditorPreferences {
     /// Selected theme.
     #[serde(default)]
     pub theme: ThemePreference,
+    /// UI locale.
+    #[serde(default)]
+    pub locale: Locale,
     /// Reopen the last project on editor startup when possible.
     #[serde(default = "default_reopen_last_project")]
     pub reopen_last_project: bool,
@@ -55,6 +60,7 @@ impl Default for EditorPreferences {
     fn default() -> Self {
         Self {
             theme: ThemePreference::System,
+            locale: Locale::default(),
             reopen_last_project: true,
             last_project_location: None,
             layout: default_layout(),
@@ -143,7 +149,7 @@ pub struct ProjectTemplate {
 }
 
 /// Recent project metadata shared by CLI and Hub.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ProjectMetadata {
     /// Project display name.
     pub name: String,
@@ -209,6 +215,85 @@ impl ProjectStore for MemoryProjectStore {
         let before = self.projects.len();
         self.projects.retain(|project| project.path != path);
         before != self.projects.len()
+    }
+}
+
+/// Durable editor state stored by native hosts between editor launches.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DurableEditorState {
+    /// Durable editor preferences.
+    #[serde(default)]
+    pub preferences: EditorPreferences,
+    /// Recent projects shown by the Hub.
+    #[serde(default)]
+    pub recent_projects: Vec<ProjectMetadata>,
+    /// Last successfully opened project.
+    #[serde(default)]
+    pub last_open_project: Option<PathBuf>,
+    /// Serialized editor layout identifier.
+    #[serde(default)]
+    pub layout: String,
+}
+
+impl DurableEditorState {
+    /// Creates state from preferences and a project store.
+    pub fn from_parts(
+        preferences: EditorPreferences,
+        project_store: &impl ProjectStore,
+        last_open_project: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            layout: preferences.layout.clone(),
+            preferences,
+            recent_projects: project_store.projects().to_vec(),
+            last_open_project,
+        }
+    }
+}
+
+/// File-backed store for editor preferences, recent projects, and layout metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileEditorStore {
+    path: PathBuf,
+}
+
+impl FileEditorStore {
+    /// Creates a store bound to a specific TOML file path.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Returns the backing file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Loads durable state. Missing files produce default state.
+    pub fn load(&self) -> EngineResult<DurableEditorState> {
+        if !self.path.exists() {
+            return Ok(DurableEditorState::default());
+        }
+        let input = fs::read_to_string(&self.path).map_err(|source| EngineError::Filesystem {
+            path: self.path.clone(),
+            source,
+        })?;
+        toml::from_str(&input).map_err(|error| EngineError::config(error.to_string()))
+    }
+
+    /// Saves durable state, creating the parent directory when needed.
+    pub fn save(&self, state: &DurableEditorState) -> EngineResult<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let output =
+            toml::to_string_pretty(state).map_err(|error| EngineError::other(error.to_string()))?;
+        fs::write(&self.path, output).map_err(|source| EngineError::Filesystem {
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 
@@ -311,8 +396,32 @@ pub struct EditorCommand {
     pub id: String,
     /// Display label.
     pub label: String,
+    /// Top-level menu or palette category.
+    pub category: String,
     /// Optional keyboard shortcut display text.
     pub shortcut: Option<String>,
+    /// Rule used by shells to decide whether the command is currently usable.
+    pub availability: CommandAvailability,
+}
+
+/// Runtime availability rule for an editor command.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandAvailability {
+    /// Command is always available.
+    #[default]
+    Always,
+    /// Command requires an open project.
+    ProjectOpen,
+    /// Command requires an open project with unsaved scene changes.
+    DirtyScene,
+    /// Command requires undo history.
+    CanUndo,
+    /// Command requires redo history.
+    CanRedo,
+    /// Command requires play mode.
+    Playing,
+    /// Command requires play mode to be stopped.
+    NotPlaying,
 }
 
 /// Reversible editor operation captured by the command stack.
@@ -604,22 +713,109 @@ pub fn register_core_panels(registry: &mut PanelRegistry) {
 
 /// Registers the first editor toolbar and menu commands.
 pub fn register_core_commands(registry: &mut CommandRegistry) {
-    for (id, label) in [
-        ("play", "Play"),
-        ("pause", "Pause"),
-        ("stop", "Stop"),
-        ("undo", "Undo"),
-        ("redo", "Redo"),
-        ("reload", "Reload"),
-        ("save", "Save"),
-        ("build", "Build"),
-        ("layout.reset", "Reset Layout"),
+    for command in [
+        command(
+            "project.open",
+            "Open Project",
+            "File",
+            Some("Ctrl+O"),
+            CommandAvailability::Always,
+        ),
+        command(
+            "scene.save",
+            "Save",
+            "File",
+            Some("Ctrl+S"),
+            CommandAvailability::DirtyScene,
+        ),
+        command(
+            "project.build",
+            "Build",
+            "File",
+            Some("Ctrl+B"),
+            CommandAvailability::ProjectOpen,
+        ),
+        command(
+            "edit.undo",
+            "Undo",
+            "Edit",
+            Some("Ctrl+Z"),
+            CommandAvailability::CanUndo,
+        ),
+        command(
+            "edit.redo",
+            "Redo",
+            "Edit",
+            Some("Ctrl+Y"),
+            CommandAvailability::CanRedo,
+        ),
+        command(
+            "play.toggle",
+            "Play",
+            "Play",
+            Some("Ctrl+P"),
+            CommandAvailability::Always,
+        ),
+        command(
+            "play.pause",
+            "Pause",
+            "Play",
+            Some("Ctrl+Shift+P"),
+            CommandAvailability::Playing,
+        ),
+        command(
+            "play.step",
+            "Step",
+            "Play",
+            Some("F10"),
+            CommandAvailability::Playing,
+        ),
+        command(
+            "play.stop",
+            "Stop",
+            "Play",
+            Some("Shift+F5"),
+            CommandAvailability::Playing,
+        ),
+        command(
+            "assets.reload",
+            "Reload Assets",
+            "Assets",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        command(
+            "layout.reset",
+            "Reset Layout",
+            "Window",
+            None,
+            CommandAvailability::Always,
+        ),
+        command(
+            "command.palette",
+            "Command Palette",
+            "Window",
+            Some("Ctrl+Shift+K"),
+            CommandAvailability::Always,
+        ),
     ] {
-        registry.register(EditorCommand {
-            id: id.to_owned(),
-            label: label.to_owned(),
-            shortcut: None,
-        });
+        registry.register(command);
+    }
+}
+
+fn command(
+    id: &str,
+    label: &str,
+    category: &str,
+    shortcut: Option<&str>,
+    availability: CommandAvailability,
+) -> EditorCommand {
+    EditorCommand {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        category: category.to_owned(),
+        shortcut: shortcut.map(str::to_owned),
+        availability,
     }
 }
 
@@ -686,10 +882,23 @@ mod tests {
             assert!(panels.get(id).is_some(), "missing panel {id}");
         }
         for id in [
-            "play", "pause", "stop", "undo", "redo", "reload", "save", "build",
+            "play.toggle",
+            "play.pause",
+            "play.stop",
+            "play.step",
+            "edit.undo",
+            "edit.redo",
+            "assets.reload",
+            "scene.save",
+            "project.build",
+            "command.palette",
         ] {
             assert!(commands.get(id).is_some(), "missing command {id}");
         }
+        assert_eq!(
+            commands.get("scene.save").unwrap().shortcut.as_deref(),
+            Some("Ctrl+S")
+        );
     }
 
     #[test]

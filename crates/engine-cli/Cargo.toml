@@ -22,7 +22,8 @@ rfd = { version = "0.15", optional = true }
 [features]
 default = ["runtime-game"]
 runtime-min = ["runtime-min/runtime-min"]
-runtime-game = ["runtime-min/runtime-game"]
+runtime-game = ["runtime-min/runtime-game", "wgpu"]
+wgpu = ["runtime-min/wgpu"]
 editor = [
     "runtime-min/editor",
     "engine-editor/editor",

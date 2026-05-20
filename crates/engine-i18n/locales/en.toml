@@ -1,0 +1,161 @@
+app_name = "Aster"
+app_subtitle = "Hub"
+
+# Sidebar
+sidebar_projects = "Projects"
+sidebar_installs = "Installs"
+sidebar_settings = "Settings"
+sidebar_dark_mode = "Dark Mode"
+
+# Menu bar
+menu_file = "File"
+menu_edit = "Edit"
+menu_assets = "Assets"
+menu_gameobject = "GameObject"
+menu_component = "Component"
+menu_window = "Window"
+menu_help = "Help"
+
+# Toolbar
+tool_view = "View Tool"
+tool_move = "Move Tool"
+tool_rotate = "Rotate Tool"
+tool_scale = "Scale Tool"
+tool_global = "Global"
+tool_pivot = "Pivot"
+tool_save = "Save"
+panel_hierarchy = "Hierarchy"
+panel_inspector = "Inspector"
+panel_project = "Project"
+panel_console = "Console"
+panel_scene_view = "Scene"
+panel_game_view = "Game"
+
+# Status bar
+status_play_mode = "Play Mode"
+status_ready = "Ready"
+status_no_project = "No project loaded"
+status_console_count = "Console: {}"
+status_asset_indexing = "Asset indexing"
+
+# Viewport
+viewport_scene = "Scene"
+viewport_game = "Game"
+viewport_no_viewport = "No viewport open"
+viewport_hint_open = "Open a project to preview the scene"
+viewport_hint_empty = "Scene is empty"
+viewport_stats = "{} objects  |  {} mesh  {} camera  {} light  {} physics"
+
+# Hierarchy
+hierarchy_create_hint = "Create empty GameObject"
+hierarchy_search = "Search"
+hierarchy_no_scene = "No scene loaded"
+hierarchy_sample_scene = "Sample Scene"
+
+# Inspector
+inspector_select_hint = "Select a GameObject to inspect"
+inspector_no_project = "No project open"
+inspector_gone = "Selection no longer exists"
+inspector_tag = "Tag"
+inspector_tag_value = "Untagged"
+inspector_layer = "Layer"
+inspector_layer_value = "Default"
+inspector_transform = "Transform"
+inspector_position = "Position"
+inspector_rotation = "Rotation"
+inspector_scale = "Scale"
+inspector_add_component = "Add Component"
+
+# Components
+component_camera = "Camera"
+component_mesh_renderer = "Mesh Renderer"
+component_light = "Light"
+component_rigidbody = "Rigidbody"
+component_collider = "Collider"
+component_audio_source = "Audio Source"
+component_script = "Script"
+property_projection = "Projection"
+property_projection_value = "Perspective"
+property_fov = "FOV"
+property_near = "Near"
+property_mesh = "Mesh"
+property_material = "Material"
+property_type = "Type"
+property_intensity = "Intensity"
+property_body_type = "Body Type"
+property_mass = "Mass"
+property_shape = "Shape"
+property_volume = "Volume"
+property_backend = "Backend"
+property_script = "Script"
+property_mesh_asset = "Asset Mesh"
+property_material_asset = "Asset Material"
+
+# Project panel
+project_create = "Create"
+project_import = "Import"
+project_search = "Search Assets"
+project_no_project = "No project open"
+project_empty = "Assets folder is empty"
+project_no_match = "No assets match the current filter"
+
+# Console
+console_clear = "Clear"
+console_expanded = "Expanded"
+console_collapse = "Collapse"
+console_filter = "Filter"
+
+# Resource kinds
+resource_texture = "Texture"
+resource_material = "Material"
+resource_shader = "Shader"
+resource_audio = "Audio"
+resource_model = "Model"
+resource_skinned_model = "Skinned Model"
+resource_animation = "Animation"
+
+# Hub projects page
+hub_projects_title = "Projects"
+hub_launch = "▶  Launch"
+hub_delete = "Delete"
+hub_new_project = "+ New Project"
+hub_search = "Search projects…"
+hub_empty = "No projects yet. Click '+ New Project' to create one."
+
+# Hub installs page
+hub_installs_title = "Installs"
+hub_installs_empty = "No engine installations found."
+
+# Hub settings page
+hub_settings_title = "Settings"
+hub_settings_preferences = "Preferences"
+hub_settings_limited = "Settings are currently limited to theme toggles in the sidebar."
+
+# New project dialog
+dialog_new_project = "Create Project"
+dialog_preset_hint = "Start with the right scene preset."
+dialog_template = "Template"
+dialog_project_name = "Project Name"
+dialog_name_hint = "My Aster Project"
+dialog_location = "Location"
+dialog_location_hint = "Choose a parent folder"
+dialog_browse = "Browse"
+dialog_toolchain = "Toolchain"
+dialog_warning_no_toolchain = "Warning: No toolchains installed."
+dialog_create = "Create"
+dialog_cancel = "Cancel"
+template_3d = "3D"
+template_3d_desc = "Perspective camera, lighting, 3D transform defaults."
+template_2d = "2D"
+template_2d_desc = "Orthographic camera, pixel-friendly scene defaults."
+
+# Confirm delete dialog
+dialog_confirm_delete = "Confirm Delete"
+dialog_confirm_message = "Are you sure you want to remove '{}'?"
+dialog_remove_recents = "Remove from Recents"
+dialog_delete_files = "Delete Files"
+
+# Editor title
+editor_title_format = "Aster Editor - {}"
+editor_untitled = "Untitled"
+editor_brand = "Infernux-style Editor"

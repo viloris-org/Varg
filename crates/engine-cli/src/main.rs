@@ -98,9 +98,15 @@ fn print_help() {
 #[cfg(feature = "editor")]
 fn open_editor() -> EngineResult<()> {
     use egui_wgpu::wgpu;
-    use engine_editor::{EditorPreferences, ThemePreference};
-    use engine_editor_ui::{draw_hub, draw_shell, EditorShell, HubState, ShellUiState};
-    use std::sync::Arc;
+    use engine_core::EngineConfig;
+    use engine_editor::{
+        ConsoleEntry, ConsoleLevel, ConsoleSource, EditorPreferences, ThemePreference,
+    };
+    use engine_editor_ui::{
+        draw_hub, draw_shell, EditorShell, HubState, PlayModeRequest, ShellUiState,
+    };
+    use runtime_min::RuntimeServices;
+    use std::{sync::Arc, time::Instant};
     use winit::{
         application::ApplicationHandler,
         event::WindowEvent,
@@ -131,6 +137,154 @@ fn open_editor() -> EngineResult<()> {
         hub: HubState,
         shell: EditorShell,
         shell_ui: ShellUiState,
+        play_runtime: Option<RuntimeServices>,
+        last_editor_frame: Instant,
+        runtime_diagnostic_cursor: usize,
+    }
+
+    impl App {
+        fn handle_play_mode_request(&mut self) {
+            let Some(request) = self.shell_ui.play_mode_request.take() else {
+                return;
+            };
+            match request {
+                PlayModeRequest::Enter => self.enter_play_mode(),
+                PlayModeRequest::Pause(paused) => {
+                    if let Some(runtime) = self.play_runtime.as_mut() {
+                        runtime.paused = paused;
+                    }
+                }
+                PlayModeRequest::Step => {
+                    self.shell_ui.paused = true;
+                    if let Some(runtime) = self.play_runtime.as_mut() {
+                        runtime.paused = true;
+                    }
+                    self.tick_play_runtime_once(true);
+                }
+                PlayModeRequest::Stop => self.stop_play_mode(),
+            }
+        }
+
+        fn enter_play_mode(&mut self) {
+            let Some(project) = self.shell.project_mut() else {
+                self.shell_ui.playing = false;
+                self.push_editor_error("Cannot enter Play Mode without an open project".to_owned());
+                return;
+            };
+            let root = project.root.clone();
+            if let Err(error) = project.scene.enter_play_mode() {
+                self.shell_ui.playing = false;
+                self.push_editor_error(error.to_string());
+                return;
+            }
+            match runtime_min::headless_services_from_scene(
+                EngineConfig::default(),
+                root,
+                &project.scene,
+            ) {
+                Ok(mut runtime) => {
+                    runtime.paused = self.shell_ui.paused;
+                    self.shell_ui.runtime_game_world = Some(runtime.render_world.clone());
+                    self.play_runtime = Some(runtime);
+                    self.runtime_diagnostic_cursor = 0;
+                    self.last_editor_frame = Instant::now();
+                }
+                Err(error) => {
+                    project.scene.exit_play_mode();
+                    self.shell_ui.playing = false;
+                    self.shell_ui.paused = false;
+                    self.shell_ui.runtime_game_world = None;
+                    self.push_editor_error(error.to_string());
+                }
+            }
+        }
+
+        fn stop_play_mode(&mut self) {
+            self.play_runtime = None;
+            self.runtime_diagnostic_cursor = 0;
+            self.shell_ui.playing = false;
+            self.shell_ui.paused = false;
+            self.shell_ui.runtime_game_world = None;
+            if let Some(project) = self.shell.project_mut() {
+                project.scene.exit_play_mode();
+            }
+        }
+
+        fn tick_play_runtime(&mut self) {
+            if !self.shell_ui.playing {
+                return;
+            }
+            let now = Instant::now();
+            let delta = now.saturating_duration_since(self.last_editor_frame);
+            self.last_editor_frame = now;
+            self.tick_play_runtime_delta(delta, false);
+        }
+
+        fn tick_play_runtime_once(&mut self, single_step: bool) {
+            self.last_editor_frame = Instant::now();
+            self.tick_play_runtime_delta(
+                std::time::Duration::from_secs_f32(1.0 / 60.0),
+                single_step,
+            );
+        }
+
+        fn tick_play_runtime_delta(&mut self, delta: std::time::Duration, single_step: bool) {
+            let Some(runtime) = self.play_runtime.as_mut() else {
+                return;
+            };
+            runtime.paused = self.shell_ui.paused;
+            if let Err(error) = runtime.tick_game_frame(delta, single_step) {
+                self.push_editor_error(error.to_string());
+                self.stop_play_mode();
+                return;
+            }
+            self.shell_ui.runtime_game_world = Some(runtime.render_world.clone());
+            self.sync_runtime_diagnostics();
+        }
+
+        fn sync_runtime_diagnostics(&mut self) {
+            let Some(runtime) = self.play_runtime.as_ref() else {
+                return;
+            };
+            let diagnostics = runtime
+                .diagnostics
+                .iter()
+                .skip(self.runtime_diagnostic_cursor)
+                .cloned()
+                .collect::<Vec<_>>();
+            self.runtime_diagnostic_cursor = runtime.diagnostics.len();
+            for diagnostic in diagnostics {
+                self.shell.console_mut().push(ConsoleEntry {
+                    timestamp: format!("frame {}", runtime.frame_index()),
+                    level: match diagnostic.level.as_str() {
+                        "error" => ConsoleLevel::Error,
+                        "warning" | "warn" => ConsoleLevel::Warn,
+                        "debug" => ConsoleLevel::Debug,
+                        "trace" => ConsoleLevel::Trace,
+                        _ => ConsoleLevel::Info,
+                    },
+                    source: ConsoleSource {
+                        subsystem: diagnostic.source,
+                        file: diagnostic.file,
+                        line: diagnostic.line,
+                    },
+                    message: diagnostic.message,
+                });
+            }
+        }
+
+        fn push_editor_error(&mut self, message: String) {
+            self.shell.console_mut().push(ConsoleEntry {
+                timestamp: "now".to_string(),
+                level: ConsoleLevel::Error,
+                source: ConsoleSource {
+                    subsystem: "editor".to_string(),
+                    file: None,
+                    line: None,
+                },
+                message,
+            });
+        }
     }
 
     impl ApplicationHandler for App {
@@ -208,14 +362,17 @@ fn open_editor() -> EngineResult<()> {
             _id: WindowId,
             event: WindowEvent,
         ) {
-            let (Some(window), Some(state)) = (self.window.as_ref(), self.egui_state.as_mut())
-            else {
+            let Some(window) = self.window.clone() else {
                 return;
             };
-
-            let response = state.on_window_event(window, &event);
-            if response.consumed {
-                return;
+            {
+                let Some(state) = self.egui_state.as_mut() else {
+                    return;
+                };
+                let response = state.on_window_event(&window, &event);
+                if response.consumed {
+                    return;
+                }
             }
 
             match event {
@@ -228,9 +385,15 @@ fn open_editor() -> EngineResult<()> {
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    let raw_input = state.take_egui_input(window);
+                    let raw_input = {
+                        let Some(state) = self.egui_state.as_mut() else {
+                            return;
+                        };
+                        state.take_egui_input(&window)
+                    };
                     let mut should_close = false;
-                    let full_output = self.egui_ctx.run_ui(raw_input, |ctx| match self.screen {
+                    let egui_ctx = self.egui_ctx.clone();
+                    let full_output = egui_ctx.run_ui(raw_input, |ctx| match self.screen {
                         Screen::Hub => {
                             should_close = draw_hub(ctx, &mut self.hub);
                             if let Some(action) = self.hub.pending_action.take() {
@@ -239,40 +402,40 @@ fn open_editor() -> EngineResult<()> {
                                         project_path,
                                         ..
                                     } => {
+                                        self.play_runtime = None;
+                                        self.shell_ui.playing = false;
+                                        self.shell_ui.paused = false;
+                                        self.shell_ui.runtime_game_world = None;
                                         if let Err(error) = self.shell.open_project(&project_path) {
-                                            self.shell.console_mut().push(
-                                                engine_editor::ConsoleEntry {
-                                                    timestamp: "now".to_string(),
-                                                    level: engine_editor::ConsoleLevel::Error,
-                                                    source: engine_editor::ConsoleSource {
-                                                        subsystem: "editor".to_string(),
-                                                        file: None,
-                                                        line: None,
-                                                    },
-                                                    message: error.to_string(),
+                                            self.shell.console_mut().push(ConsoleEntry {
+                                                timestamp: "now".to_string(),
+                                                level: ConsoleLevel::Error,
+                                                source: ConsoleSource {
+                                                    subsystem: "editor".to_string(),
+                                                    file: None,
+                                                    line: None,
                                                 },
-                                            );
+                                                message: error.to_string(),
+                                            });
                                         } else {
                                             self.screen = Screen::Editor;
                                             window.set_title("Aster Editor");
                                         }
                                     }
                                     engine_editor_ui::HubAction::OpenFolder(path) => {
-                                        self.shell.console_mut().push(
-                                            engine_editor::ConsoleEntry {
-                                                timestamp: "now".to_string(),
-                                                level: engine_editor::ConsoleLevel::Info,
-                                                source: engine_editor::ConsoleSource {
-                                                    subsystem: "hub".to_string(),
-                                                    file: None,
-                                                    line: None,
-                                                },
-                                                message: format!(
-                                                    "open folder requested: {}",
-                                                    path.display()
-                                                ),
+                                        self.shell.console_mut().push(ConsoleEntry {
+                                            timestamp: "now".to_string(),
+                                            level: ConsoleLevel::Info,
+                                            source: ConsoleSource {
+                                                subsystem: "hub".to_string(),
+                                                file: None,
+                                                line: None,
                                             },
-                                        );
+                                            message: format!(
+                                                "open folder requested: {}",
+                                                path.display()
+                                            ),
+                                        });
                                     }
                                     engine_editor_ui::HubAction::SelectProjectLocation => {
                                         if let Some(folder) = rfd::FileDialog::new()
@@ -291,10 +454,14 @@ fn open_editor() -> EngineResult<()> {
                             }
                         }
                         Screen::Editor => {
+                            self.tick_play_runtime();
                             should_close = draw_shell(ctx, &mut self.shell, &mut self.shell_ui);
+                            self.handle_play_mode_request();
                         }
                     });
-                    state.handle_platform_output(window, full_output.platform_output);
+                    if let Some(state) = self.egui_state.as_mut() {
+                        state.handle_platform_output(&window, full_output.platform_output);
+                    }
 
                     if let Some(rs) = self.render_state.as_mut() {
                         let clipped_primitives = self
@@ -407,15 +574,21 @@ fn open_editor() -> EngineResult<()> {
         "0.1.0",
     ));
 
+    let egui_ctx = egui::Context::default();
+    engine_editor_ui::setup_egui_fonts(&egui_ctx);
+
     let mut app = App {
         window: None,
-        egui_ctx: egui::Context::default(),
+        egui_ctx,
         egui_state: None,
         render_state: None,
         screen: Screen::Hub,
         hub,
         shell: EditorShell::with_core_services(prefs),
         shell_ui: ShellUiState::all_open(),
+        play_runtime: None,
+        last_editor_frame: Instant::now(),
+        runtime_diagnostic_cursor: 0,
     };
     event_loop
         .run_app(&mut app)

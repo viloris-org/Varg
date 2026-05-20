@@ -17,5 +17,8 @@ engine-assets.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor.workspace = true
+engine-i18n.workspace = true
+engine-render.workspace = true
 egui = { workspace = true, optional = true }
+serde_json.workspace = true
 toml.workspace = true

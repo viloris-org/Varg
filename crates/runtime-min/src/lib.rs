@@ -4,26 +4,43 @@
 //! Minimal Aster runtime and first playable game runner.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+#[cfg(feature = "script-python")]
+use std::time::Instant;
+
+use engine_assets::{
+    import_builtin_asset, scan_project_assets, AssetDatabase, AssetGuid, AssetRegistry,
+    DecodedTextureResource, GpuResource, HotReloadTracker, ImportTask, MaterialFormat,
+    ModelResource, ResourceKind,
+};
+#[cfg(feature = "audio")]
+use engine_audio::{
+    AudioContext, AudioListenerDesc, AudioSourceDesc, ClipHandle, MemoryAudioBackend, SourceHandle,
+};
 use engine_core::{logging, EngineConfig, EngineError, EngineResult, FrameCounter};
+#[cfg(feature = "script-python")]
+use engine_ecs::ScriptComponentProxy;
 use engine_ecs::{
     CameraComponentData, CameraRole, ComponentData, MeshRendererComponentData, ProjectManifest,
     Scene,
 };
 #[cfg(feature = "physics")]
 use engine_physics::{
-    BodyHandle, BodyKind, ColliderDesc, ColliderShape, PhysicsWorld, RigidbodyDesc,
-    SimplePhysicsBackend,
+    BodyHandle, BodyKind, CharacterControllerDesc, ColliderDesc, ColliderShape, ColliderShapeRef,
+    PhysicsWorld, QueryFilter, RapierPhysicsBackend, RigidbodyDesc,
 };
 use engine_platform::InputState;
 use engine_render::{
-    HeadlessRenderDevice, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder, RenderWorld,
+    HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage, RenderDevice,
+    RenderFrame, RenderGraph, RenderGraphBuilder, RenderWorld,
 };
+#[cfg(feature = "wgpu")]
+pub use engine_render_wgpu::WgpuRenderDevice;
 
 /// Explicit runtime services. There is no hidden global mutable state.
 #[derive(Debug)]
@@ -49,9 +66,37 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     #[cfg(feature = "physics")]
     /// Physics world used by runtime-game.
     pub physics: PhysicsWorld,
+    #[cfg(feature = "audio")]
+    /// Audio context used by runtime-game.
+    pub audio: AudioContext,
+    /// Project root used to resolve script and asset paths.
+    pub project_root: Option<PathBuf>,
+    /// Asset database used to resolve project GUIDs to runtime resources.
+    pub asset_database: AssetDatabase,
+    /// Runtime asset registry and cache state.
+    pub asset_registry: AssetRegistry,
+    /// Asset folder used by scan/import and hot reload.
+    pub asset_root: Option<PathBuf>,
+    /// GPU textures resolved from project asset GUIDs.
+    pub texture_resources: HashMap<engine_core::AssetId, ImageHandle>,
+    /// CPU mesh resources resolved from project asset GUIDs.
+    pub mesh_resources: HashMap<engine_core::AssetId, ModelResource>,
+    /// Material resources resolved from project asset GUIDs.
+    pub material_resources: HashMap<engine_core::AssetId, MaterialFormat>,
     fixed_timestep: FixedTimestep,
     frame_counter: FrameCounter,
     reported_script_errors: HashSet<String>,
+    hot_reload: HotReloadTracker,
+    #[cfg(feature = "script-python")]
+    script_instances: HashSet<ScriptInstanceKey>,
+    #[cfg(feature = "script-python")]
+    python_script_runtime: PythonScriptRuntimeConfig,
+    #[cfg(feature = "script-python")]
+    script_diagnostics_this_frame: usize,
+    #[cfg(feature = "audio")]
+    audio_bindings: Vec<AudioBinding>,
+    #[cfg(feature = "audio")]
+    audio_clips: HashMap<engine_core::AssetId, ClipHandle>,
     #[cfg(feature = "physics")]
     physics_bindings: Vec<PhysicsBinding>,
 }
@@ -93,6 +138,44 @@ struct PhysicsBinding {
     body: BodyHandle,
 }
 
+#[cfg(feature = "audio")]
+#[derive(Clone, Debug)]
+struct AudioBinding {
+    object: engine_core::EntityId,
+    source: SourceHandle,
+}
+
+#[cfg(feature = "script-python")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ScriptInstanceKey {
+    object: engine_core::EntityId,
+    backend: String,
+    script: String,
+}
+
+/// Configuration for the Python script subprocess backend.
+#[cfg(feature = "script-python")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PythonScriptRuntimeConfig {
+    /// Python interpreter executable.
+    pub interpreter: PathBuf,
+    /// Maximum time a single script invocation may block the frame.
+    pub invocation_timeout: Duration,
+    /// Maximum script diagnostics emitted per frame.
+    pub diagnostics_per_frame: usize,
+}
+
+#[cfg(feature = "script-python")]
+impl Default for PythonScriptRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            interpreter: PathBuf::from("python3"),
+            invocation_timeout: Duration::from_millis(100),
+            diagnostics_per_frame: 8,
+        }
+    }
+}
+
 /// Fixed timestep accumulator used by the game loop.
 #[derive(Clone, Copy, Debug)]
 pub struct FixedTimestep {
@@ -132,11 +215,41 @@ impl FixedTimestep {
 impl RuntimeServices<HeadlessRenderDevice> {
     /// Creates minimal runtime services with a headless renderer.
     pub fn minimal(config: EngineConfig) -> Self {
+        Self::with_renderer(config, HeadlessRenderDevice::default())
+    }
+}
+
+/// Creates headless runtime services from a cloned edit-time scene snapshot.
+pub fn headless_services_from_scene(
+    config: EngineConfig,
+    project_root: impl Into<PathBuf>,
+    scene: &Scene,
+) -> EngineResult<RuntimeServices> {
+    let file = scene.to_scene_file("play-copy")?;
+    let mut services = RuntimeServices::minimal(config);
+    services.set_project_root(project_root);
+    services.scene = Scene::from_scene_file(file)?;
+    services.render_world = extract_render_world(&services.scene);
+    Ok(services)
+}
+
+fn modified_time(path: &Path) -> EngineResult<std::time::SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|source| EngineError::Filesystem {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+impl<R: RenderDevice> RuntimeServices<R> {
+    /// Creates runtime services with an explicit render backend.
+    pub fn with_renderer(config: EngineConfig, renderer: R) -> Self {
         let render_graph = build_default_render_graph();
         Self {
             config,
             scene: Scene::default(),
-            renderer: HeadlessRenderDevice::default(),
+            renderer,
             render_graph,
             input: {
                 let mut input = InputState::default();
@@ -148,17 +261,35 @@ impl RuntimeServices<HeadlessRenderDevice> {
             stats: RuntimeStats::default(),
             diagnostics: Vec::new(),
             #[cfg(feature = "physics")]
-            physics: PhysicsWorld::new(SimplePhysicsBackend::new()),
+            physics: PhysicsWorld::new(RapierPhysicsBackend::new()),
+            #[cfg(feature = "audio")]
+            audio: AudioContext::new(MemoryAudioBackend::new()),
+            project_root: None,
+            asset_database: AssetDatabase::new("assets", "builtin"),
+            asset_registry: AssetRegistry::default(),
+            asset_root: None,
+            texture_resources: HashMap::new(),
+            mesh_resources: HashMap::new(),
+            material_resources: HashMap::new(),
             fixed_timestep: FixedTimestep::default(),
             frame_counter: FrameCounter::default(),
             reported_script_errors: HashSet::new(),
+            hot_reload: HotReloadTracker::default(),
+            #[cfg(feature = "script-python")]
+            script_instances: HashSet::new(),
+            #[cfg(feature = "script-python")]
+            python_script_runtime: PythonScriptRuntimeConfig::default(),
+            #[cfg(feature = "script-python")]
+            script_diagnostics_this_frame: 0,
+            #[cfg(feature = "audio")]
+            audio_bindings: Vec::new(),
+            #[cfg(feature = "audio")]
+            audio_clips: HashMap::new(),
             #[cfg(feature = "physics")]
             physics_bindings: Vec::new(),
         }
     }
-}
 
-impl<R: RenderDevice> RuntimeServices<R> {
     /// Ticks one runtime frame.
     pub fn tick(&mut self) -> EngineResult<()> {
         logging::log_frame(self.frame_counter.get());
@@ -177,11 +308,19 @@ impl<R: RenderDevice> RuntimeServices<R> {
         logging::log_frame(self.frame_counter.get());
         self.stats.frame_time_seconds = delta.as_secs_f32();
         self.stats.physics_steps = 0;
+        #[cfg(feature = "script-python")]
+        {
+            self.script_diagnostics_this_frame = 0;
+        }
         self.report_script_proxy_diagnostics();
         let should_simulate_variable = !self.paused || single_step;
         if should_simulate_variable {
             #[cfg(feature = "physics")]
             self.ensure_physics_bindings()?;
+            #[cfg(feature = "audio")]
+            self.ensure_audio_bindings()?;
+            #[cfg(feature = "script-python")]
+            self.run_python_scripts("start", delta.as_secs_f32());
             self.fixed_timestep.accumulate(delta);
             let mut fixed_steps = 0;
             while self.fixed_timestep.consume_step(fixed_steps) {
@@ -190,25 +329,34 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     self.sync_scene_to_physics()?;
                     self.physics
                         .fixed_update(self.fixed_timestep.step.as_secs_f32());
+                    self.report_physics_events();
                     self.sync_physics_to_scene()?;
                     self.stats.physics_steps = self.stats.physics_steps.saturating_add(1);
                 }
+                #[cfg(feature = "script-python")]
+                self.run_python_scripts("fixed_update", self.fixed_timestep.step.as_secs_f32());
                 self.scene.tick_fixed_frame();
                 fixed_steps += 1;
             }
             self.apply_builtin_player_controller();
+            #[cfg(feature = "script-python")]
+            self.run_python_scripts("update", delta.as_secs_f32());
             self.scene.tick_runtime_frame();
         }
+        #[cfg(feature = "audio")]
+        self.update_audio(delta.as_secs_f32())?;
         self.render_world = extract_render_world(&self.scene);
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
         };
+        self.renderer
+            .submit_render_world(&self.render_world, frame)?;
         self.renderer.execute_graph(&self.render_graph, frame)?;
         self.renderer
             .flush_destroy_queue(self.frame_counter.get().saturating_sub(2));
         self.scene.process_deferred_destroy()?;
         self.stats.draw_calls = self.render_world.objects.len();
-        self.stats.entity_count = self.scene.objects().len();
+        self.stats.entity_count = self.scene.object_count();
         self.stats.resource_count = self.render_world.objects.len()
             + self.render_world.lights.len()
             + usize::from(self.render_world.camera.is_some());
@@ -222,9 +370,156 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.frame_counter.get()
     }
 
+    /// Updates Python script subprocess configuration.
+    #[cfg(feature = "script-python")]
+    pub fn set_python_script_runtime_config(&mut self, config: PythonScriptRuntimeConfig) {
+        self.python_script_runtime = config;
+    }
+
     /// Replaces the active render graph.
     pub fn set_render_graph(&mut self, graph: RenderGraph) {
         self.render_graph = graph;
+    }
+
+    /// Sets the project root used by runtime backends to resolve relative files.
+    pub fn set_project_root(&mut self, root: impl Into<PathBuf>) {
+        self.project_root = Some(root.into());
+    }
+
+    /// Scans, imports, and binds all supported project assets for runtime use.
+    pub fn load_project_assets(&mut self, asset_root: impl Into<PathBuf>) -> EngineResult<()> {
+        let asset_root = asset_root.into();
+        self.asset_database = AssetDatabase::new(&asset_root, "builtin");
+        self.asset_root = Some(asset_root.clone());
+        let report = scan_project_assets(&asset_root, &mut self.asset_database)?;
+        for meta in report.metas {
+            self.import_runtime_asset(
+                &asset_root,
+                meta.guid,
+                &meta.source_path,
+                meta.kind,
+                &meta.importer,
+            )?;
+            if let Ok(modified) = modified_time(&asset_root.join(&meta.source_path)) {
+                self.hot_reload.observe(meta.guid, modified);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reimports files whose modification stamp changed and refreshes runtime handles.
+    pub fn reload_changed_project_assets(&mut self) -> EngineResult<Vec<engine_core::AssetId>> {
+        let asset_root = self
+            .asset_root
+            .clone()
+            .ok_or_else(|| EngineError::config("project assets are not loaded"))?;
+        let report = scan_project_assets(&asset_root, &mut self.asset_database)?;
+        let mut changed = Vec::new();
+        for meta in report.metas {
+            let path = asset_root.join(&meta.source_path);
+            let Ok(modified) = modified_time(&path) else {
+                continue;
+            };
+            if self.hot_reload.observe(meta.guid, modified) {
+                self.import_runtime_asset(
+                    &asset_root,
+                    meta.guid,
+                    &meta.source_path,
+                    meta.kind,
+                    &meta.importer,
+                )?;
+                changed.push(meta.guid.as_asset_id());
+            }
+        }
+        Ok(changed)
+    }
+
+    fn import_runtime_asset(
+        &mut self,
+        asset_root: &Path,
+        guid: AssetGuid,
+        source_path: &Path,
+        kind: ResourceKind,
+        importer: &str,
+    ) -> EngineResult<()> {
+        let outcome = import_builtin_asset(
+            asset_root,
+            &mut self.asset_registry,
+            ImportTask {
+                guid,
+                source_path: source_path.to_path_buf(),
+                kind,
+                importer: importer.to_string(),
+            },
+        )?;
+        for diagnostic in outcome.diagnostics {
+            self.diagnostics.push(RuntimeDiagnostic {
+                source: "assets".to_string(),
+                level: "warning".to_string(),
+                message: diagnostic.message,
+                file: diagnostic.path,
+                line: None,
+            });
+        }
+        let Some(handle) = self.asset_registry.handle_for_guid(guid) else {
+            return Ok(());
+        };
+        let Some(cpu) = self.asset_registry.cpu_resource(handle).cloned() else {
+            return Ok(());
+        };
+        match kind {
+            ResourceKind::Texture => {
+                let texture =
+                    DecodedTextureResource::from_bytes(&cpu.bytes).map_err(EngineError::from)?;
+                let gpu = self.renderer.upload_texture(
+                    ImageDesc {
+                        width: texture.width,
+                        height: texture.height,
+                        mip_levels: 1,
+                        samples: 1,
+                        format: ImageFormat::Rgba8Srgb,
+                        usage: ImageUsage::SAMPLED.or(ImageUsage::TRANSFER_DST),
+                        label: Some("project texture"),
+                    },
+                    &texture.pixels,
+                )?;
+                self.texture_resources.insert(guid.as_asset_id(), gpu);
+                self.asset_registry.put_gpu(
+                    handle,
+                    GpuResource {
+                        kind,
+                        backend_token: gpu.raw().slot() as u64,
+                    },
+                )?;
+            }
+            ResourceKind::Model | ResourceKind::SkinnedModel => {
+                let model = ModelResource::from_bytes(&cpu.bytes).map_err(EngineError::from)?;
+                self.mesh_resources.insert(guid.as_asset_id(), model);
+            }
+            ResourceKind::Material => {
+                let text = std::str::from_utf8(&cpu.bytes)
+                    .map_err(|error| EngineError::other(error.to_string()))?;
+                let material = if importer == "material-toml" {
+                    MaterialFormat::from_toml(text)
+                } else {
+                    MaterialFormat::from_json(text)
+                }
+                .map_err(EngineError::from)?;
+                self.material_resources.insert(guid.as_asset_id(), material);
+            }
+            ResourceKind::Audio => {
+                #[cfg(feature = "audio")]
+                {
+                    self.load_audio_clip(
+                        guid.as_asset_id(),
+                        &source_path.to_string_lossy(),
+                        &cpu.bytes,
+                    )?;
+                }
+            }
+            ResourceKind::Shader | ResourceKind::Animation => {}
+        }
+        Ok(())
     }
 
     fn apply_builtin_player_controller(&mut self) {
@@ -236,6 +531,32 @@ impl<R: RenderDevice> RuntimeServices<R> {
         if move_x == 0.0 && move_z == 0.0 {
             return;
         }
+        #[cfg(feature = "physics")]
+        if let Some(binding) = self.physics_binding_for_entity(player).cloned() {
+            let translation = engine_core::math::Vec3::new(move_x * 0.08, 0.0, move_z * 0.08);
+            if self
+                .physics
+                .backend_mut()
+                .move_character(
+                    binding.body,
+                    CharacterControllerDesc {
+                        shape: ColliderShapeRef::Capsule {
+                            half_height: 0.5,
+                            radius: 0.25,
+                        },
+                        translation,
+                        dt: self.stats.frame_time_seconds.max(1.0 / 60.0),
+                        filter: QueryFilter::default(),
+                    },
+                )
+                .is_ok()
+            {
+                if let Ok(transform) = self.physics.backend().body_transform(binding.body) {
+                    self.scene.transforms_mut().set_local(player, transform);
+                    return;
+                }
+            }
+        }
         if let Some(mut transform) = self.scene.transforms().local(player) {
             let speed = 0.08;
             transform.translation.x += move_x * speed;
@@ -244,8 +565,16 @@ impl<R: RenderDevice> RuntimeServices<R> {
         }
     }
 
+    #[cfg(feature = "physics")]
+    fn physics_binding_for_entity(&self, entity: engine_ecs::Entity) -> Option<&PhysicsBinding> {
+        let object = self.scene.object(entity)?;
+        self.physics_bindings
+            .iter()
+            .find(|binding| binding.object == object.id)
+    }
+
     fn report_script_proxy_diagnostics(&mut self) {
-        for (_, object) in self.scene.objects() {
+        for (_, object) in self.scene.iter_objects() {
             for script in object
                 .scripts
                 .iter()
@@ -259,6 +588,10 @@ impl<R: RenderDevice> RuntimeServices<R> {
                         }),
                 )
             {
+                #[cfg(feature = "script-python")]
+                if script.backend == "python" {
+                    continue;
+                }
                 let key = format!("{}:{}", script.backend, script.script);
                 if script.pending_recovery && self.reported_script_errors.insert(key) {
                     self.diagnostics.push(RuntimeDiagnostic {
@@ -278,7 +611,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
     #[cfg(feature = "physics")]
     fn ensure_physics_bindings(&mut self) -> EngineResult<()> {
-        for (entity, object) in self.scene.objects() {
+        for (entity, object) in self.scene.iter_objects() {
             if self
                 .physics_bindings
                 .iter()
@@ -351,7 +684,516 @@ impl<R: RenderDevice> RuntimeServices<R> {
         }
         Ok(())
     }
+
+    #[cfg(feature = "physics")]
+    fn report_physics_events(&mut self) {
+        for event in self.physics.backend_mut().drain_contacts() {
+            self.diagnostics.push(RuntimeDiagnostic {
+                source: "physics".to_string(),
+                level: "info".to_string(),
+                message: format!(
+                    "{} {} between body {} and body {}",
+                    if event.is_trigger {
+                        "trigger"
+                    } else {
+                        "collision"
+                    },
+                    if event.entered { "entered" } else { "exited" },
+                    event.body_a.0,
+                    event.body_b.0
+                ),
+                file: None,
+                line: None,
+            });
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    /// Loads an encoded WAV/OGG asset for scene AudioSource components.
+    pub fn load_audio_clip(
+        &mut self,
+        asset: engine_core::AssetId,
+        name: &str,
+        bytes: &[u8],
+    ) -> EngineResult<ClipHandle> {
+        let (samples, channels, sample_rate) = engine_audio::decode_audio_bytes(name, bytes)?;
+        let clip = self
+            .audio
+            .backend_mut()
+            .load_clip(name, &samples, channels, sample_rate)?;
+        self.audio_clips.insert(asset, clip);
+        Ok(clip)
+    }
+
+    #[cfg(feature = "audio")]
+    fn ensure_audio_bindings(&mut self) -> EngineResult<()> {
+        for (entity, object) in self.scene.iter_objects() {
+            if self
+                .audio_bindings
+                .iter()
+                .any(|binding| binding.object == object.id)
+            {
+                continue;
+            }
+            let Some(audio_source) =
+                object
+                    .components
+                    .iter()
+                    .find_map(|component| match component {
+                        ComponentData::AudioSource(source) => Some(source),
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            let Some(asset) = audio_source.clip else {
+                continue;
+            };
+            let Some(clip) = self.audio_clips.get(&asset).copied() else {
+                let key = format!("audio:{}", asset.as_u128());
+                if self.reported_script_errors.insert(key) {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "audio".to_string(),
+                        level: "warning".to_string(),
+                        message: format!("audio clip {} is not loaded", asset.as_u128()),
+                        file: None,
+                        line: None,
+                    });
+                }
+                continue;
+            };
+            let transform = self.scene.transforms().local(entity).unwrap_or_default();
+            let source = self.audio.backend_mut().spawn_source(&AudioSourceDesc {
+                clip,
+                volume: audio_source.volume,
+                pitch: 1.0,
+                looping: audio_source.looping,
+                position: Some(transform.translation),
+                auto_play: audio_source.play_on_start,
+            })?;
+            self.audio_bindings.push(AudioBinding {
+                object: object.id,
+                source,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "audio")]
+    fn update_audio(&mut self, dt: f32) -> EngineResult<()> {
+        if let Some(camera) = self
+            .scene
+            .main_camera()
+            .or_else(|| self.scene.game_camera())
+        {
+            let transform = self.scene.transforms().local(camera).unwrap_or_default();
+            self.audio.backend_mut().set_listener(&AudioListenerDesc {
+                position: transform.translation,
+                ..AudioListenerDesc::default()
+            });
+        }
+        for binding in &self.audio_bindings {
+            if let Some(entity) = self.scene.find_by_id(binding.object) {
+                let transform = self.scene.transforms().local(entity).unwrap_or_default();
+                let Some(object) = self.scene.object(entity) else {
+                    continue;
+                };
+                if let Some(audio_source) =
+                    object
+                        .components
+                        .iter()
+                        .find_map(|component| match component {
+                            ComponentData::AudioSource(source) => Some(source),
+                            _ => None,
+                        })
+                {
+                    self.audio
+                        .backend_mut()
+                        .set_volume(binding.source, audio_source.volume)?;
+                    self.audio
+                        .backend_mut()
+                        .set_looping(binding.source, audio_source.looping)?;
+                    let _ = transform;
+                }
+            }
+        }
+        self.audio.update(dt);
+        Ok(())
+    }
 }
+
+#[cfg(feature = "script-python")]
+#[derive(Clone, Debug)]
+struct ScriptInvocation {
+    entity: engine_ecs::Entity,
+    object: engine_core::EntityId,
+    name: String,
+    script: ScriptComponentProxy,
+}
+
+#[cfg(feature = "script-python")]
+impl<R: RenderDevice> RuntimeServices<R> {
+    fn run_python_scripts(&mut self, stage: &str, dt: f32) {
+        let invocations = self
+            .scene
+            .iter_objects()
+            .flat_map(|(entity, object)| {
+                object
+                    .scripts
+                    .iter()
+                    .chain(
+                        object
+                            .components
+                            .iter()
+                            .filter_map(|component| match component {
+                                ComponentData::Script(script) => Some(script),
+                                _ => None,
+                            }),
+                    )
+                    .filter(|script| script.backend == "python")
+                    .cloned()
+                    .map(move |script| ScriptInvocation {
+                        entity,
+                        object: object.id,
+                        name: object.name.clone(),
+                        script,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        for invocation in invocations {
+            let key = ScriptInstanceKey {
+                object: invocation.object,
+                backend: invocation.script.backend.clone(),
+                script: invocation.script.script.clone(),
+            };
+            if stage == "start" {
+                if !self.script_instances.insert(key) {
+                    continue;
+                }
+            } else if !self.script_instances.contains(&key) {
+                continue;
+            }
+            if let Err(error) = self.run_python_script(invocation, stage, dt) {
+                self.push_script_diagnostic(error.to_string(), None);
+            }
+        }
+    }
+
+    fn push_script_diagnostic(&mut self, message: String, file: Option<PathBuf>) {
+        if self.script_diagnostics_this_frame >= self.python_script_runtime.diagnostics_per_frame {
+            return;
+        }
+        self.script_diagnostics_this_frame = self.script_diagnostics_this_frame.saturating_add(1);
+        self.diagnostics.push(RuntimeDiagnostic {
+            source: "script".to_string(),
+            level: "error".to_string(),
+            message,
+            file,
+            line: None,
+        });
+    }
+
+    fn run_python_script(
+        &mut self,
+        invocation: ScriptInvocation,
+        stage: &str,
+        dt: f32,
+    ) -> EngineResult<()> {
+        let script_path = self.resolve_project_path(&invocation.script.script);
+        let transform = self
+            .scene
+            .transforms()
+            .local(invocation.entity)
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "stage": stage,
+            "dt": dt,
+            "entity_id": invocation.object.as_u128(),
+            "name": invocation.name,
+            "transform": transform_to_json(transform),
+            "input": {
+                "actions": {
+                    "MoveX": self.input.action_value("MoveX"),
+                    "MoveY": self.input.action_value("MoveY"),
+                    "MoveForward": self.input.action_value("MoveForward"),
+                    "MoveBackward": self.input.action_value("MoveBackward"),
+                    "MoveLeft": self.input.action_value("MoveLeft"),
+                    "MoveRight": self.input.action_value("MoveRight")
+                }
+            },
+            "state": invocation
+                .script
+                .state_json
+                .as_deref()
+                .and_then(|state| serde_json::from_str::<serde_json::Value>(state).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        });
+        let mut child = std::process::Command::new(&self.python_script_runtime.interpreter)
+            .arg("-c")
+            .arg(PYTHON_SCRIPT_SHIM)
+            .arg(&script_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|source| EngineError::Filesystem {
+                path: script_path.clone(),
+                source,
+            })?;
+        {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin
+                    .write_all(payload.to_string().as_bytes())
+                    .map_err(|source| EngineError::Filesystem {
+                        path: script_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+        drop(child.stdin.take());
+
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|source| EngineError::Filesystem {
+                path: script_path.clone(),
+                source,
+            })? {
+                break status;
+            }
+            if started.elapsed() >= self.python_script_runtime.invocation_timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(EngineError::other(format!(
+                    "python script `{}` timed out after {:?}",
+                    invocation.script.script, self.python_script_runtime.invocation_timeout
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            use std::io::Read;
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)
+                    .map_err(|source| EngineError::Filesystem {
+                        path: script_path.clone(),
+                        source,
+                    })?;
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)
+                    .map_err(|source| EngineError::Filesystem {
+                        path: script_path.clone(),
+                        source,
+                    })?;
+            }
+        }
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            return Err(EngineError::other(format!(
+                "python script `{}` failed: {}",
+                invocation.script.script,
+                stderr.trim()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&stdout);
+        let result = serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|error| {
+            EngineError::other(format!(
+                "python script `{}` returned invalid json: {error}",
+                invocation.script.script
+            ))
+        })?;
+        self.apply_script_result(invocation.entity, &invocation.script, &result)
+    }
+
+    fn apply_script_result(
+        &mut self,
+        entity: engine_ecs::Entity,
+        script: &ScriptComponentProxy,
+        result: &serde_json::Value,
+    ) -> EngineResult<()> {
+        if let Some(state) = result.get("state") {
+            let state_json = state.to_string();
+            if let Some(object) = self.scene.object_mut(entity) {
+                for candidate in &mut object.scripts {
+                    if candidate.backend == script.backend && candidate.script == script.script {
+                        candidate.state_json = Some(state_json.clone());
+                        candidate.pending_recovery = false;
+                    }
+                }
+                for component in &mut object.components {
+                    if let ComponentData::Script(candidate) = component {
+                        if candidate.backend == script.backend && candidate.script == script.script
+                        {
+                            candidate.state_json = Some(state_json.clone());
+                            candidate.pending_recovery = false;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(transform) = result.get("transform").and_then(json_to_transform) {
+            self.scene.transforms_mut().set_local(entity, transform);
+        }
+        if let Some(commands) = result.get("commands").and_then(serde_json::Value::as_array) {
+            for command in commands {
+                match command.get("type").and_then(serde_json::Value::as_str) {
+                    Some("spawn") => {
+                        let name = command
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Script Object");
+                        let spawned = self.scene.create_object(name)?;
+                        if let Some(transform) =
+                            command.get("transform").and_then(json_to_transform)
+                        {
+                            self.scene.transforms_mut().set_local(spawned, transform);
+                        }
+                    }
+                    Some("destroy") => {
+                        if let Some(id) = command.get("id").and_then(serde_json::Value::as_u64) {
+                            let id = engine_core::EntityId::from_u128(id as u128);
+                            if let Some(target) = self.scene.find_by_id(id) {
+                                self.scene.destroy_deferred(target)?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_project_path(&self, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            self.project_root
+                .as_ref()
+                .map(|root| root.join(&path))
+                .unwrap_or(path)
+        }
+    }
+}
+
+#[cfg(feature = "script-python")]
+fn transform_to_json(transform: engine_core::math::Transform) -> serde_json::Value {
+    serde_json::json!({
+        "translation": {
+            "x": transform.translation.x,
+            "y": transform.translation.y,
+            "z": transform.translation.z
+        },
+        "rotation": {
+            "x": transform.rotation.x,
+            "y": transform.rotation.y,
+            "z": transform.rotation.z,
+            "w": transform.rotation.w
+        },
+        "scale": {
+            "x": transform.scale.x,
+            "y": transform.scale.y,
+            "z": transform.scale.z
+        }
+    })
+}
+
+#[cfg(feature = "script-python")]
+fn json_to_transform(value: &serde_json::Value) -> Option<engine_core::math::Transform> {
+    Some(engine_core::math::Transform {
+        translation: json_to_vec3(value.get("translation")?)?,
+        rotation: engine_core::math::Quat {
+            x: value.get("rotation")?.get("x")?.as_f64()? as f32,
+            y: value.get("rotation")?.get("y")?.as_f64()? as f32,
+            z: value.get("rotation")?.get("z")?.as_f64()? as f32,
+            w: value.get("rotation")?.get("w")?.as_f64()? as f32,
+        },
+        scale: json_to_vec3(value.get("scale")?)?,
+    })
+}
+
+#[cfg(feature = "script-python")]
+fn json_to_vec3(value: &serde_json::Value) -> Option<engine_core::math::Vec3> {
+    Some(engine_core::math::Vec3::new(
+        value.get("x")?.as_f64()? as f32,
+        value.get("y")?.as_f64()? as f32,
+        value.get("z")?.as_f64()? as f32,
+    ))
+}
+
+#[cfg(feature = "script-python")]
+const PYTHON_SCRIPT_SHIM: &str = r#"
+import importlib.util
+import json
+import sys
+import traceback
+
+script_path = sys.argv[1]
+payload = json.load(sys.stdin)
+
+class Vec3:
+    def __init__(self, data):
+        self.x = float(data.get("x", 0.0))
+        self.y = float(data.get("y", 0.0))
+        self.z = float(data.get("z", 0.0))
+    def to_json(self):
+        return {"x": self.x, "y": self.y, "z": self.z}
+
+class Transform:
+    def __init__(self, data):
+        self.translation = Vec3(data.get("translation", {}))
+        self.rotation = data.get("rotation", {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})
+        self.scale = Vec3(data.get("scale", {"x": 1.0, "y": 1.0, "z": 1.0}))
+    def to_json(self):
+        return {"translation": self.translation.to_json(), "rotation": self.rotation, "scale": self.scale.to_json()}
+
+class Input:
+    def __init__(self, data):
+        self.actions = data.get("actions", {})
+    def action_value(self, name):
+        return float(self.actions.get(name, 0.0))
+    def action_down(self, name):
+        return self.action_value(name) > 0.0
+
+class Scene:
+    def __init__(self):
+        self.commands = []
+    def spawn(self, name, transform=None):
+        command = {"type": "spawn", "name": name}
+        if transform is not None:
+            command["transform"] = transform.to_json()
+        self.commands.append(command)
+    def destroy(self, entity_id):
+        self.commands.append({"type": "destroy", "id": int(entity_id)})
+
+class Context:
+    def __init__(self, payload):
+        self.entity_id = int(payload["entity_id"])
+        self.name = payload["name"]
+        self.dt = float(payload["dt"])
+        self.transform = Transform(payload["transform"])
+        self.input = Input(payload.get("input", {}))
+        self.scene = Scene()
+        self.state = payload.get("state", {})
+
+try:
+    spec = importlib.util.spec_from_file_location("aster_script_module", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ctx = Context(payload)
+    fn = getattr(module, payload["stage"], None)
+    if callable(fn):
+        fn(ctx)
+    print(json.dumps({"transform": ctx.transform.to_json(), "state": ctx.state, "commands": ctx.scene.commands}))
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"#;
 
 #[cfg(feature = "physics")]
 fn collider_desc_from_scene(
@@ -372,6 +1214,7 @@ fn collider_desc_from_scene(
         },
         is_trigger: collider.is_trigger,
         layer,
+        mask: collider.mask,
         ..ColliderDesc::default()
     }
 }
@@ -428,7 +1271,7 @@ pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimePr
 /// Extracts the active scene into a minimal render queue.
 pub fn extract_render_world(scene: &Scene) -> RenderWorld {
     let mut world = RenderWorld::default();
-    for (entity, object) in scene.objects() {
+    for (entity, object) in scene.iter_objects() {
         let transform = scene.transforms().local(entity).unwrap_or_default();
         for component in &object.components {
             match component {
@@ -497,13 +1340,15 @@ fn mesh_to_render(
         object,
         transform,
         mesh: renderer
-            .builtin_mesh
-            .clone()
+            .mesh
+            .map(|asset| format!("asset:{:032x}", asset.as_u128()))
+            .or_else(|| renderer.builtin_mesh.clone())
             .unwrap_or_else(|| "asset-mesh".to_string()),
         material: renderer
             .material
-            .builtin
-            .clone()
+            .asset
+            .map(|asset| format!("asset:{:032x}", asset.as_u128()))
+            .or_else(|| renderer.material.builtin.clone())
             .unwrap_or_else(|| "asset-material".to_string()),
     }
 }
@@ -541,8 +1386,14 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
         window::{Window, WindowId},
     };
 
+    #[cfg(feature = "wgpu")]
+    type GameServices = RuntimeServices<WgpuRenderDevice>;
+    #[cfg(not(feature = "wgpu"))]
+    type GameServices = RuntimeServices;
+
     struct GameApp {
-        services: RuntimeServices,
+        services: Option<GameServices>,
+        project: Option<RuntimeProject>,
         window: Option<Arc<Window>>,
         last_frame: Instant,
         single_step: bool,
@@ -560,7 +1411,22 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                         .with_inner_size(winit::dpi::LogicalSize::new(960_u32, 540_u32)),
                 )
                 .expect("create runtime window");
-            self.window = Some(Arc::new(window));
+            let window = Arc::new(window);
+            let size = window.inner_size();
+            let Some(project) = self.project.take() else {
+                eprintln!("runtime error: project was already consumed");
+                event_loop.exit();
+                return;
+            };
+            match create_game_services(EngineConfig::default(), window.clone(), size, project) {
+                Ok(services) => self.services = Some(services),
+                Err(error) => {
+                    eprintln!("runtime error: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            }
+            self.window = Some(window);
         }
 
         fn window_event(
@@ -572,29 +1438,34 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
                 WindowEvent::KeyboardInput { event, .. } => {
+                    let Some(services) = self.services.as_mut() else {
+                        return;
+                    };
                     if let Some(key) = convert_winit_key(event.physical_key) {
                         match event.state {
                             ElementState::Pressed => {
-                                self.services.input.apply_event(InputEvent::KeyDown(key));
+                                services.input.apply_event(InputEvent::KeyDown(key));
                                 if key == KeyCode::Escape {
                                     event_loop.exit();
                                 } else if key == KeyCode::Space {
-                                    self.services.paused = !self.services.paused;
+                                    services.paused = !services.paused;
                                 } else if key == KeyCode::Enter {
                                     self.single_step = true;
                                 }
                             }
                             ElementState::Released => {
-                                self.services.input.apply_event(InputEvent::KeyUp(key));
+                                services.input.apply_event(InputEvent::KeyUp(key));
                             }
                         }
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.services.input.apply_event(InputEvent::MouseMove {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    });
+                    if let Some(services) = self.services.as_mut() {
+                        services.input.apply_event(InputEvent::MouseMove {
+                            x: position.x as f32,
+                            y: position.y as f32,
+                        });
+                    }
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
                     let (x, y) = match delta {
@@ -603,11 +1474,17 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                             (position.x as f32, position.y as f32)
                         }
                     };
-                    self.services
-                        .input
-                        .apply_event(InputEvent::MouseWheel { x, y });
+                    if let Some(services) = self.services.as_mut() {
+                        services.input.apply_event(InputEvent::MouseWheel { x, y });
+                    }
                 }
                 WindowEvent::Resized(size) => {
+                    #[cfg(feature = "wgpu")]
+                    if let Some(services) = self.services.as_mut() {
+                        services
+                            .renderer
+                            .resize_surface(size.width.max(1), size.height.max(1));
+                    }
                     let title = format!(
                         "Aster Runtime - {}x{}",
                         size.width.max(1),
@@ -618,24 +1495,27 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    let Some(services) = self.services.as_mut() else {
+                        return;
+                    };
                     let now = Instant::now();
                     let delta = now.saturating_duration_since(self.last_frame);
                     self.last_frame = now;
-                    if let Err(error) = self.services.tick_game_frame(delta, self.single_step) {
+                    if let Err(error) = services.tick_game_frame(delta, self.single_step) {
                         eprintln!("runtime error: {error}");
                         event_loop.exit();
                         return;
                     }
                     self.single_step = false;
                     if let Some(window) = &self.window {
-                        let status = if self.services.render_world.is_visible() {
+                        let status = if services.render_world.is_visible() {
                             "rendering"
                         } else {
                             "empty"
                         };
                         window.set_title(&format!(
                             "Aster Runtime - frame {} - {status}",
-                            self.services.frame_index()
+                            services.frame_index()
                         ));
                     }
                 }
@@ -668,12 +1548,10 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
     }
 
     let project = load_runtime_project(project)?;
-    let mut services = RuntimeServices::minimal(EngineConfig::default());
-    services.scene = project.scene;
-    services.render_world = extract_render_world(&services.scene);
     let event_loop = EventLoop::new().map_err(|error| EngineError::other(error.to_string()))?;
     let mut app = GameApp {
-        services,
+        services: None,
+        project: Some(project),
         window: None,
         last_frame: Instant::now(),
         single_step: false,
@@ -681,6 +1559,43 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
     event_loop
         .run_app(&mut app)
         .map_err(|error| EngineError::other(error.to_string()))
+}
+
+#[cfg(all(feature = "runtime-game", feature = "wgpu"))]
+fn create_game_services(
+    config: EngineConfig,
+    window: std::sync::Arc<winit::window::Window>,
+    size: winit::dpi::PhysicalSize<u32>,
+    project: RuntimeProject,
+) -> EngineResult<RuntimeServices<WgpuRenderDevice>> {
+    let instance = engine_render_wgpu::wgpu::Instance::default();
+    let surface = instance
+        .create_surface(window)
+        .map_err(|error| EngineError::other(format!("create wgpu surface failed: {error}")))?;
+    let renderer = WgpuRenderDevice::new_surface(surface, size.width.max(1), size.height.max(1))?;
+    let mut services = RuntimeServices::with_renderer(config, renderer);
+    services.set_project_root(project.root.clone());
+    let asset_root = project.root.join(&project.manifest.asset_root);
+    services.load_project_assets(asset_root)?;
+    services.scene = project.scene;
+    services.render_world = extract_render_world(&services.scene);
+    Ok(services)
+}
+
+#[cfg(all(feature = "runtime-game", not(feature = "wgpu")))]
+fn create_game_services(
+    config: EngineConfig,
+    _window: std::sync::Arc<winit::window::Window>,
+    _size: winit::dpi::PhysicalSize<u32>,
+    project: RuntimeProject,
+) -> EngineResult<RuntimeServices> {
+    let mut services = RuntimeServices::minimal(config);
+    services.set_project_root(project.root.clone());
+    let asset_root = project.root.join(&project.manifest.asset_root);
+    services.load_project_assets(asset_root)?;
+    services.scene = project.scene;
+    services.render_world = extract_render_world(&services.scene);
+    Ok(services)
 }
 
 /// Reports that runtime-game support is not compiled into this binary.
@@ -752,6 +1667,146 @@ mod tests {
             .any(|diagnostic| diagnostic.source == "script"));
     }
 
+    #[cfg(feature = "script-python")]
+    #[test]
+    fn python_script_update_can_move_transform() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("aster-script-test-{}", std::process::id()));
+        let scripts = root.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("move.py"),
+            "def start(ctx):\n    ctx.transform.translation.x += 2.0\n    ctx.state['started'] = True\n\ndef update(ctx):\n    ctx.transform.translation.z += ctx.input.action_value('MoveY')\n",
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(&root);
+        let entity = services.scene.create_object("Scripted").unwrap();
+        services
+            .scene
+            .object_mut(entity)
+            .unwrap()
+            .scripts
+            .push(ScriptComponentProxy {
+                backend: "python".to_string(),
+                script: "scripts/move.py".to_string(),
+                state_json: None,
+                pending_recovery: true,
+            });
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Character('w'),
+            ));
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let transform = services.scene.transforms().local(entity).unwrap();
+        assert_eq!(transform.translation.x, 2.0);
+        assert_eq!(transform.translation.z, 1.0);
+        assert!(services
+            .scene
+            .object(entity)
+            .unwrap()
+            .scripts
+            .first()
+            .unwrap()
+            .state_json
+            .as_ref()
+            .unwrap()
+            .contains("started"));
+    }
+
+    #[cfg(feature = "script-python")]
+    #[test]
+    fn python_script_timeout_reports_diagnostic() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("aster-script-timeout-test-{}", std::process::id()));
+        let scripts = root.join("scripts");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("hang.py"),
+            "import time\n\ndef start(ctx):\n    time.sleep(1.0)\n",
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_python_script_runtime_config(PythonScriptRuntimeConfig {
+            invocation_timeout: Duration::from_millis(10),
+            ..PythonScriptRuntimeConfig::default()
+        });
+        services.set_project_root(&root);
+        let entity = services.scene.create_object("Scripted").unwrap();
+        services
+            .scene
+            .object_mut(entity)
+            .unwrap()
+            .scripts
+            .push(ScriptComponentProxy {
+                backend: "python".to_string(),
+                script: "scripts/hang.py".to_string(),
+                state_json: None,
+                pending_recovery: true,
+            });
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("timed out")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn game_frame_spawns_loaded_audio_source() {
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        let asset = engine_core::AssetId::from_u128(7);
+        services
+            .load_audio_clip(asset, "tone.wav", &test_wav_bytes())
+            .unwrap();
+        let entity = services.scene.create_object("Speaker").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::AudioSource(engine_ecs::AudioSourceComponentData {
+                    clip: Some(asset),
+                    volume: 0.5,
+                    looping: true,
+                    play_on_start: true,
+                }),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(services.audio_bindings.len(), 1);
+    }
+
     #[cfg(feature = "physics")]
     #[test]
     fn game_frame_creates_physics_bindings_for_scene_components() {
@@ -768,5 +1823,25 @@ mod tests {
 
         assert_eq!(services.physics_bindings.len(), 1);
         assert!(services.stats.physics_steps >= 1);
+    }
+
+    #[cfg(feature = "audio")]
+    fn test_wav_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&44_100u32.to_le_bytes());
+        bytes.extend_from_slice(&88_200u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&0i16.to_le_bytes());
+        bytes.extend_from_slice(&i16::MAX.to_le_bytes());
+        bytes
     }
 }

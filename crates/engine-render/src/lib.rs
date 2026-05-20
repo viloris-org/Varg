@@ -112,6 +112,12 @@ pub trait RenderDevice {
     /// Renders one frame using the compiled graph.
     fn render(&mut self, frame: RenderFrame) -> EngineResult<()>;
 
+    /// Submits a scene extraction to the backend for rendering.
+    fn submit_render_world(&mut self, world: &RenderWorld, frame: RenderFrame) -> EngineResult<()> {
+        let _ = world;
+        self.render(frame)
+    }
+
     /// Executes a compiled render graph.
     fn execute_graph(&mut self, graph: &RenderGraph, frame: RenderFrame) -> EngineResult<()>;
 
@@ -123,6 +129,12 @@ pub trait RenderDevice {
 
     /// Creates a GPU image.
     fn create_image(&mut self, desc: ImageDesc) -> EngineResult<ImageHandle>;
+
+    /// Creates a GPU image and uploads tightly packed pixel data into mip 0.
+    fn upload_texture(&mut self, desc: ImageDesc, data: &[u8]) -> EngineResult<ImageHandle> {
+        let _ = data;
+        self.create_image(desc)
+    }
 
     /// Destroys a GPU image.
     fn destroy_image(&mut self, handle: ImageHandle);
@@ -177,6 +189,10 @@ impl RenderDevice for HeadlessRenderDevice {
         Ok(ImageHandle(Handle::new(0, engine_core::Generation::FIRST)))
     }
 
+    fn upload_texture(&mut self, desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
+        self.create_image(desc)
+    }
+
     fn destroy_image(&mut self, _handle: ImageHandle) {}
 
     fn create_buffer(&mut self, _desc: BufferDesc) -> EngineResult<BufferHandle> {
@@ -226,6 +242,12 @@ impl RenderDevice for MissingRenderDevice {
     fn destroy_render_target(&mut self, _target: RenderTarget) {}
 
     fn create_image(&mut self, _desc: ImageDesc) -> EngineResult<ImageHandle> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "render-backend",
+        })
+    }
+
+    fn upload_texture(&mut self, _desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
         Err(EngineError::UnsupportedCapability {
             capability: "render-backend",
         })

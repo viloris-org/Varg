@@ -25,6 +25,10 @@ runtime-game = [
     "engine-render/runtime-game",
     "dep:winit",
 ]
+wgpu = [
+    "runtime-game",
+    "dep:engine-render-wgpu",
+]
 physics = [
     "dep:engine-physics",
     "engine-physics/runtime-game",
@@ -74,5 +78,7 @@ engine-editor-ui = { workspace = true, optional = true }
 engine-physics = { workspace = true, optional = true }
 engine-platform.workspace = true
 engine-render.workspace = true
+engine-render-wgpu = { workspace = true, optional = true }
+serde_json.workspace = true
 toml.workspace = true
 winit = { workspace = true, optional = true }

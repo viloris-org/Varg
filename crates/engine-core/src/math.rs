@@ -88,6 +88,12 @@ impl std::ops::Sub for Vec3 {
     }
 }
 
+impl std::ops::SubAssign for Vec3 {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
+
 impl std::ops::Mul<f32> for Vec3 {
     type Output = Self;
 
