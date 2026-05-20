@@ -225,8 +225,8 @@
         "cargo check --workspace --all-features passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added Arc<Device>/Arc<Queue> sharing to WgpuRenderDevice (from_arc_device ctor, device_arc/queue_arc accessors, render_world_offscreen, default_target_view, default_target_size). Modified CLI: RenderState uses Arc<Device>/Arc<Queue>, App stores WgpuRenderDevice. Added render_scene_view() that renders 3D world to offscreen texture and registers via update_egui_texture_from_wgpu_texture before each egui frame. ShellUiState gains ViewportTexture, editor_camera_yaw/pitch/distance/target. draw_render_viewport displays rendered texture as egui::Image via TextureId::User. viewport_panel handles right-click drag (orbit), middle-click drag (pan), scroll (zoom). build_editor_render_world+quat_look_at apply editor camera to extracted RenderWorld. Placeholder still available as fallback when no texture is registered. All tests pass, workspace compiles."
     },
     {
       "id": "US-014",

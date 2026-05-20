@@ -16,6 +16,8 @@ egui = { workspace = true, optional = true }
 egui-winit = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 egui-wgpu = { version = "0.34", optional = true }
+engine-render = { workspace = true, optional = true }
+engine-render-wgpu = { workspace = true, optional = true }
 pollster = { version = "0.4", optional = true }
 rfd = { version = "0.15", optional = true }
 
@@ -32,6 +34,8 @@ editor = [
     "dep:egui-winit",
     "dep:winit",
     "dep:egui-wgpu",
+    "dep:engine-render",
+    "dep:engine-render-wgpu",
     "dep:pollster",
     "dep:rfd"
 

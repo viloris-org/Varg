@@ -7,9 +7,15 @@ use engine_core::{EngineError, EngineResult, RuntimeProfile};
 #[cfg(feature = "editor")]
 use egui;
 #[cfg(feature = "editor")]
+use egui_wgpu;
+#[cfg(feature = "editor")]
 use egui_winit;
 #[cfg(feature = "editor")]
 use engine_editor_ui;
+#[cfg(feature = "editor")]
+use engine_render::ImageFormat;
+#[cfg(feature = "editor")]
+use engine_render_wgpu::WgpuRenderDevice;
 #[cfg(feature = "editor")]
 use winit;
 
@@ -116,8 +122,8 @@ fn open_editor() -> EngineResult<()> {
 
     struct RenderState {
         surface: wgpu::Surface<'static>,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+        device: std::sync::Arc<wgpu::Device>,
+        queue: std::sync::Arc<wgpu::Queue>,
         config: wgpu::SurfaceConfiguration,
         renderer: egui_wgpu::Renderer,
     }
@@ -133,6 +139,8 @@ fn open_editor() -> EngineResult<()> {
         egui_ctx: egui::Context,
         egui_state: Option<egui_winit::State>,
         render_state: Option<RenderState>,
+        wgpu_render_device: Option<WgpuRenderDevice>,
+        scene_view_texture_id: Option<egui::TextureId>,
         screen: Screen,
         hub: HubState,
         shell: EditorShell,
@@ -143,6 +151,62 @@ fn open_editor() -> EngineResult<()> {
     }
 
     impl App {
+        /// Renders the editor scene view to an offscreen texture and registers it
+        /// for display in the next egui frame.
+        fn render_scene_view(&mut self) {
+            let Some(wgpu_dev) = self.wgpu_render_device.as_mut() else {
+                return;
+            };
+            let Some(render_state) = self.render_state.as_mut() else {
+                return;
+            };
+
+            let world = engine_editor_ui::build_editor_render_world(&self.shell, &self.shell_ui);
+            if !world.is_visible() {
+                self.shell_ui.scene_view_texture = None;
+                return;
+            }
+
+            if let Err(e) = wgpu_dev.render_world_offscreen(&world) {
+                self.push_editor_error(format!("scene render failed: {e}"));
+                self.shell_ui.scene_view_texture = None;
+                return;
+            }
+
+            let (width, height) = wgpu_dev.default_target_size();
+            let egui_texture_id =
+                if let Some(texture_id) = self.scene_view_texture_id {
+                    render_state
+                        .renderer
+                        .update_egui_texture_from_wgpu_texture(
+                            &render_state.device,
+                            wgpu_dev.default_target_view(),
+                            wgpu::FilterMode::Linear,
+                            texture_id,
+                        );
+                    texture_id
+                } else {
+                    let texture_id = render_state.renderer.register_native_texture(
+                        &render_state.device,
+                        wgpu_dev.default_target_view(),
+                        wgpu::FilterMode::Linear,
+                    );
+                    self.scene_view_texture_id = Some(texture_id);
+                    texture_id
+                };
+
+            let egui::TextureId::User(texture_id) = egui_texture_id else {
+                return;
+            };
+
+            self.shell_ui.scene_view_texture =
+                Some(engine_editor_ui::ViewportTexture {
+                    id: texture_id,
+                    width,
+                    height,
+                });
+        }
+
         fn handle_play_mode_request(&mut self) {
             let Some(request) = self.shell_ui.play_mode_request.take() else {
                 return;
@@ -314,9 +378,12 @@ fn open_editor() -> EngineResult<()> {
                 }))
                 .expect("request wgpu adapter");
 
-            let (device, queue) =
+            let (raw_device, raw_queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                     .expect("request wgpu device");
+
+            let device = std::sync::Arc::new(raw_device);
+            let queue = std::sync::Arc::new(raw_queue);
 
             let size = window.inner_size();
             let surface_caps = surface.get_capabilities(&adapter);
@@ -347,11 +414,25 @@ fn open_editor() -> EngineResult<()> {
 
             self.render_state = Some(RenderState {
                 surface,
-                device,
-                queue,
+                device: device.clone(),
+                queue: queue.clone(),
                 config,
                 renderer,
             });
+            self.scene_view_texture_id = None;
+
+            let wgpu_render_device = WgpuRenderDevice::from_arc_device(
+                instance,
+                adapter,
+                device,
+                queue,
+                size.width.max(1),
+                size.height.max(1),
+                ImageFormat::Rgba8Srgb,
+                None,
+            )
+            .expect("create wgpu render device for offscreen rendering");
+            self.wgpu_render_device = Some(wgpu_render_device);
 
             self.window = Some(window);
         }
@@ -393,6 +474,12 @@ fn open_editor() -> EngineResult<()> {
                     };
                     let mut should_close = false;
                     let egui_ctx = self.egui_ctx.clone();
+
+                    // Render 3D scene to offscreen texture before the egui frame.
+                    if matches!(self.screen, Screen::Editor) {
+                        self.render_scene_view();
+                    }
+
                     let full_output = egui_ctx.run_ui(raw_input, |ctx| match self.screen {
                         Screen::Hub => {
                             should_close = draw_hub(ctx, &mut self.hub);
@@ -582,6 +669,8 @@ fn open_editor() -> EngineResult<()> {
         egui_ctx,
         egui_state: None,
         render_state: None,
+        wgpu_render_device: None,
+        scene_view_texture_id: None,
         screen: Screen::Hub,
         hub,
         shell: EditorShell::with_core_services(prefs),

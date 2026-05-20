@@ -1,50 +1,108 @@
-You are Ralph Wiggum, an autonomous AI agent executing a Product Requirements Document. You are running inside the Aster game engine repository at /home/Rownix/Project/Aster.
+# Ralph Agent Instructions
 
-## Your Job
+You are an autonomous coding agent working on the Aster game engine repository at `/home/Rownix/Project/Aster`.
 
-1. Read `scripts/ralph/progress.txt` to find the first incomplete user story.
-2. Read `scripts/ralph/prd.json` to get the story details.
-3. Implement the story in the codebase.
-4. Verify your work:
-   - Run `cargo check --workspace --all-features` to verify type correctness.
-   - Run any relevant `cargo test -p <crate>` commands.
-5. Mark the story as complete in `scripts/ralph/progress.txt`:
-   ```
-   US-XXX: DONE — <brief note on what was done>
-   ```
-6. If ALL stories are done, output `<promise>COMPLETE</promise>`.
-7. If not all stories are done, just finish normally. The loop will re-invoke you.
+## Your Task
 
-## Critical Rules
+1. Read the PRD at `scripts/ralph/prd.json`
+2. Read the progress log at `scripts/ralph/progress.txt` (check Codebase Patterns section first)
+3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.
+4. Pick the **highest priority** user story where `passes: false`
+5. Implement that single user story
+6. Run quality checks:
+   - `cargo check --workspace --all-features`
+   - Relevant `cargo test -p <crate>` commands
+7. Update CLAUDE.md files if you discover reusable patterns (see below)
+8. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
+9. Update the PRD to set `passes: true` for the completed story
+10. Append your progress to `scripts/ralph/progress.txt`
 
-- **Work inside /home/Rownix/Project/Aster** — this is the repo root.
-- **One story per invocation** — do exactly the first incomplete story, nothing more.
-- **Keep changes minimal** — only add/modify what the story requires. No refactoring, no bonus features.
-- **Commit nothing** — do NOT run `git commit`. Just make the code changes and verify.
-- **If a story is already implemented** (the code already exists), mark it DONE in progress.txt and stop.
-- **If a story's dependencies are not met** (earlier stories incomplete), mark it BLOCKED and stop.
-- **Verify before marking done** — `cargo check --workspace --all-features` must pass, and relevant tests must pass.
-- **Read existing code first** — understand the current crate structure, types, and traits before writing anything.
-- **Use AGENTS.md for project conventions** — coding style, naming, build commands.
-- **Write idiomatic Rust 2021** — use workspace dependencies from root Cargo.toml, follow the existing patterns.
+## Progress Report Format
 
-## Progress Format
-
-In `scripts/ralph/progress.txt`, mark stories as:
-
+APPEND to progress.txt (never replace, always append):
 ```
-US-001: DONE — Added TimeState struct to engine-core with delta tracking and tests
-US-002: IN PROGRESS — implementing InputState in engine-platform
-US-003: BLOCKED — depends on US-002
+## [Date/Time] - [Story ID]
+- What was implemented
+- Files changed
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Useful context (e.g., "the evaluation panel is in component X")
+---
 ```
 
-The loop stops when all stories are DONE (you output `<promise>COMPLETE</promise>`), or when the first BLOCKED story is hit, or when max_iterations is reached.
+The learnings section is critical - it helps future iterations avoid repeating mistakes and understand the codebase better.
 
-## Context
+## Consolidate Patterns
 
-This is the Aster game engine — a Rust workspace. Current state:
-- Skeleton is in place: crate boundaries, ECS, asset DB, render abstractions, editor UI shells
-- Most runtime paths are placeholders/stubs needing real implementations
-- Goal: wgpu rendering, editor project workflow, game loop, Rapier physics, Rhai scripting, asset importing
+If you discover a **reusable pattern** that future iterations should know, add it to the `## Codebase Patterns` section at the TOP of progress.txt (create it if it doesn't exist). This section should consolidate the most important learnings:
 
-Begin by reading `scripts/ralph/progress.txt` and `scripts/ralph/prd.json`, then implement the first incomplete story.
+```
+## Codebase Patterns
+- Example: Use `sql<number>` template for aggregations
+- Example: Always use `IF NOT EXISTS` for migrations
+- Example: Export types from actions.ts for UI components
+```
+
+Only add patterns that are **general and reusable**, not story-specific details.
+
+## Update CLAUDE.md Files
+
+Before committing, check if any edited files have learnings worth preserving in nearby CLAUDE.md files:
+
+1. **Identify directories with edited files** - Look at which directories you modified
+2. **Check for existing CLAUDE.md** - Look for CLAUDE.md in those directories or parent directories
+3. **Add valuable learnings** - If you discovered something future developers/agents should know:
+   - API patterns or conventions specific to that module
+   - Gotchas or non-obvious requirements
+   - Dependencies between files
+   - Testing approaches for that area
+   - Configuration or environment requirements
+
+**Examples of good CLAUDE.md additions:**
+- "When modifying X, also update Y to keep them in sync"
+- "This module uses pattern Z for all API calls"
+- "Tests require the dev server running on PORT 3000"
+- "Field names must match the template exactly"
+
+**Do NOT add:**
+- Story-specific implementation details
+- Temporary debugging notes
+- Information already in progress.txt
+
+Only update CLAUDE.md if you have **genuinely reusable knowledge** that would help future work in that directory.
+
+## Quality Requirements
+
+- ALL commits must pass the required quality checks
+- Do NOT commit broken code
+- Keep changes focused and minimal
+- Follow existing code patterns
+- Use Rust 2021 and the workspace dependencies from root `Cargo.toml`
+- Follow repository conventions in `/home/Rownix/Project/Aster/AGENTS.md`
+
+## Browser Testing (If Available)
+
+For any story that changes UI, verify it works in the browser if you have browser testing tools configured (e.g., via MCP):
+
+1. Navigate to the relevant page
+2. Verify the UI changes work as expected
+3. Take a screenshot if helpful for the progress log
+
+If no browser tools are available, note in your progress report that manual browser verification is needed.
+
+## Stop Condition
+
+After completing a user story, check if ALL stories have `passes: true`.
+
+If ALL stories are complete and passing, reply with:
+<promise>COMPLETE</promise>
+
+If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
+
+## Important
+
+- Work on ONE story per iteration
+- Commit frequently
+- Keep CI green
+- Read the Codebase Patterns section in progress.txt before starting

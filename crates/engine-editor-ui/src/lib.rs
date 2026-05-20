@@ -18,7 +18,7 @@ pub use fonts::setup_egui_fonts;
 #[cfg(feature = "editor")]
 pub use hub::draw_hub;
 #[cfg(feature = "editor")]
-pub use shell::{draw_shell, PlayModeRequest, ShellUiState};
+pub use shell::{build_editor_render_world, draw_shell, PlayModeRequest, ShellUiState, ViewportTexture};
 
 use std::{
     fs,

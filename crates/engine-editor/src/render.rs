@@ -1,10 +1,12 @@
 //! Editor render integration: Scene View and Game View offscreen targets,
 //! GUI draw list submission, and preview render requests.
 
-use engine_core::EngineResult;
+use std::collections::HashMap;
+
+use engine_core::{EngineError, EngineResult};
 use engine_render::{
     GuiDrawList, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder, RenderTarget,
-    RenderTargetDesc, ViewKind,
+    RenderTargetDesc, RenderWorld, ViewKind,
 };
 
 /// Manages the two editor offscreen render targets and the GUI draw list.
@@ -105,6 +107,76 @@ pub fn build_editor_render_graph() -> RenderGraph {
     builder.build()
 }
 
+/// Wraps a [`RenderDevice`] trait object and manages named offscreen render targets
+/// for editor viewports (scene_view, game_view, and previews).
+pub struct RenderService {
+    device: Box<dyn RenderDevice>,
+    targets: HashMap<String, RenderTargetDesc>,
+}
+
+impl RenderService {
+    /// Creates a new render service around the given device with default
+    /// render targets for `scene_view` and `game_view`.
+    pub fn new(device: Box<dyn RenderDevice>) -> Self {
+        let mut targets = HashMap::new();
+        targets.insert(
+            "scene_view".to_string(),
+            RenderTargetDesc::view(1920, 1080, ViewKind::SceneView),
+        );
+        targets.insert(
+            "game_view".to_string(),
+            RenderTargetDesc::view(1920, 1080, ViewKind::GameView),
+        );
+        Self { device, targets }
+    }
+
+    /// Returns the descriptor for the named render target, if it exists.
+    pub fn render_target(&self, name: &str) -> Option<&RenderTargetDesc> {
+        self.targets.get(name)
+    }
+
+    /// Updates the dimensions of a named render target.
+    /// The underlying render target resources are recreated on the next
+    /// [`render_to_target`] call.
+    pub fn resize_target(&mut self, name: &str, width: u32, height: u32) -> EngineResult<()> {
+        let desc = self
+            .targets
+            .get_mut(name)
+            .ok_or_else(|| EngineError::other(format!("unknown render target: {name}")))?;
+        desc.width = width;
+        desc.height = height;
+        Ok(())
+    }
+
+    /// Renders a [`RenderWorld`] to the named offscreen target.
+    pub fn render_to_target(
+        &mut self,
+        name: &str,
+        world: &RenderWorld,
+    ) -> EngineResult<()> {
+        let desc = self
+            .targets
+            .get(name)
+            .ok_or_else(|| EngineError::other(format!("unknown render target: {name}")))?
+            .clone();
+        let target = self.device.create_render_target(desc)?;
+        self.device
+            .submit_render_world(world, RenderFrame { frame_index: 0 })?;
+        self.device.destroy_render_target(target);
+        Ok(())
+    }
+
+    /// Returns a reference to the underlying device.
+    pub fn device(&self) -> &dyn RenderDevice {
+        self.device.as_ref()
+    }
+
+    /// Returns a mutable reference to the underlying device.
+    pub fn device_mut(&mut self) -> &mut dyn RenderDevice {
+        self.device.as_mut()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +207,49 @@ mod tests {
         renderer
             .render_frame(RenderFrame { frame_index: 0 }, &GuiDrawList::default())
             .unwrap();
+    }
+
+    // ── RenderService tests ──
+
+    #[test]
+    fn render_service_has_default_targets() {
+        let device = Box::new(HeadlessRenderDevice::default());
+        let service = RenderService::new(device);
+        assert!(service.render_target("scene_view").is_some());
+        assert!(service.render_target("game_view").is_some());
+        assert!(service.render_target("unknown").is_none());
+    }
+
+    #[test]
+    fn render_service_resize_updates_dimensions() {
+        let device = Box::new(HeadlessRenderDevice::default());
+        let mut service = RenderService::new(device);
+        service.resize_target("scene_view", 800, 600).unwrap();
+        let desc = service.render_target("scene_view").unwrap();
+        assert_eq!(desc.width, 800);
+        assert_eq!(desc.height, 600);
+    }
+
+    #[test]
+    fn render_service_resize_unknown_target_errors() {
+        let device = Box::new(HeadlessRenderDevice::default());
+        let mut service = RenderService::new(device);
+        assert!(service.resize_target("nope", 100, 100).is_err());
+    }
+
+    #[test]
+    fn render_service_renders_to_target() {
+        let device = Box::new(HeadlessRenderDevice::default());
+        let mut service = RenderService::new(device);
+        let world = RenderWorld::default();
+        service.render_to_target("scene_view", &world).unwrap();
+    }
+
+    #[test]
+    fn render_service_renders_to_unknown_target_errors() {
+        let device = Box::new(HeadlessRenderDevice::default());
+        let mut service = RenderService::new(device);
+        let world = RenderWorld::default();
+        assert!(service.render_to_target("nope", &world).is_err());
     }
 }

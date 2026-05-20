@@ -812,6 +812,8 @@ dependencies = [
  "engine-core",
  "engine-editor",
  "engine-editor-ui",
+ "engine-render",
+ "engine-render-wgpu",
  "pollster",
  "rfd",
  "runtime-min",
@@ -901,6 +903,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "engine-core",
+ "engine-ecs",
 ]
 
 [[package]]

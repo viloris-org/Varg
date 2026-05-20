@@ -82,6 +82,17 @@ impl InfernuxPalette {
     }
 }
 
+/// Info about a wgpu-rendered texture ready for display in a viewport via `egui::Image`.
+#[derive(Clone, Debug)]
+pub struct ViewportTexture {
+    /// Texture ID (wraps into `egui::TextureId`).
+    pub id: u64,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
 /// Transient UI state for the editor shell.
 #[derive(Debug, Default)]
 pub struct ShellUiState {
@@ -133,6 +144,16 @@ pub struct ShellUiState {
     pub command_filter: String,
     /// Last command dispatch status shown in the command palette.
     pub command_status: Option<String>,
+    /// Rendered scene view texture set by the native host before each egui frame.
+    pub scene_view_texture: Option<ViewportTexture>,
+    /// Editor camera orbit state: yaw angle in radians.
+    pub editor_camera_yaw: f32,
+    /// Editor camera orbit state: pitch angle in radians.
+    pub editor_camera_pitch: f32,
+    /// Editor camera orbit distance from target.
+    pub editor_camera_distance: f32,
+    /// Editor camera look-at target in world space.
+    pub editor_camera_target: [f32; 3],
 }
 
 impl ShellUiState {
@@ -163,6 +184,11 @@ impl ShellUiState {
             command_palette_open: false,
             command_filter: String::new(),
             command_status: None,
+            scene_view_texture: None,
+            editor_camera_yaw: 0.0,
+            editor_camera_pitch: 0.3,
+            editor_camera_distance: 6.0,
+            editor_camera_target: [0.0, 1.0, 0.0],
         }
     }
 }
@@ -808,7 +834,7 @@ fn viewport_panel(
     tr: &Translations,
 ) {
     let rect = ui.available_rect_before_wrap();
-    let response = ui.allocate_rect(rect, Sense::click());
+    let response = ui.allocate_rect(rect, Sense::click_and_drag());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(0), pal.viewport_bg);
     ui.painter().rect_stroke(
@@ -833,7 +859,32 @@ fn viewport_panel(
     let content_rect = rect.shrink2(Vec2::new(0.0, 26.0));
     draw_render_viewport(ui, shell, ui_state, content_rect, scene_tools, pal, tr);
 
+    // Editor camera controls for scene view
     if scene_tools {
+        // Right-click drag to orbit
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let delta = response.drag_delta();
+            ui_state.editor_camera_yaw -= delta.x * 0.005;
+            ui_state.editor_camera_pitch = (ui_state.editor_camera_pitch + delta.y * 0.005)
+                .clamp(-1.5, 1.5);
+        }
+        // Middle-click drag to pan
+        if response.dragged_by(egui::PointerButton::Middle) {
+            let delta = response.drag_delta();
+            let pan_speed = ui_state.editor_camera_distance * 0.002;
+            ui_state.editor_camera_target[0] -= delta.x * pan_speed;
+            ui_state.editor_camera_target[1] += delta.y * pan_speed;
+        }
+        // Scroll to zoom
+        if response.hovered() {
+            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                ui_state.editor_camera_distance = (ui_state.editor_camera_distance
+                    - scroll * 0.5)
+                    .clamp(0.5, 100.0);
+            }
+        }
+
         draw_scene_overlay(ui, rect, pal);
         draw_orientation_gizmo(ui, rect, pal);
     }
@@ -898,6 +949,11 @@ fn draw_render_viewport(
 
     if !state.world.is_visible() {
         draw_viewport_hint(ui, rect, tr.tr("viewport_hint_empty"), pal);
+    } else if let Some(texture) = &ui_state.scene_view_texture {
+        let texture_id = egui::TextureId::User(texture.id);
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        ui.painter()
+            .image(texture_id, rect, uv, Color32::WHITE);
     } else {
         paint_render_target_placeholder(ui, rect, &state, scene_tools, pal);
     }
@@ -2781,6 +2837,95 @@ fn extract_render_world(shell: &EditorShell, scene_view: bool) -> RenderWorld {
         }
     }
     world
+}
+
+/// Builds a [`RenderWorld`] for the scene view using the editor orbit camera.
+pub fn build_editor_render_world(shell: &EditorShell, ui_state: &ShellUiState) -> RenderWorld {
+    let mut world = extract_render_world(shell, true);
+    if let Some(ref mut camera) = world.camera {
+        let yaw = ui_state.editor_camera_yaw;
+        let pitch = ui_state.editor_camera_pitch;
+        let dist = ui_state.editor_camera_distance;
+        let target = &ui_state.editor_camera_target;
+
+        let eye_x = target[0] + dist * pitch.cos() * yaw.sin();
+        let eye_y = target[1] + dist * pitch.sin();
+        let eye_z = target[2] + dist * pitch.cos() * yaw.cos();
+
+        camera.transform.translation = EngineVec3::new(eye_x, eye_y, eye_z);
+
+        let forward = EngineVec3::new(
+            target[0] - eye_x,
+            target[1] - eye_y,
+            target[2] - eye_z,
+        )
+        .normalized();
+        camera.transform.rotation = quat_look_at(forward, EngineVec3::new(0.0, 1.0, 0.0));
+    }
+    world
+}
+
+/// Returns a quaternion that rotates from (0, 0, -1) to `forward` with the given up vector.
+fn quat_look_at(forward: EngineVec3, up: EngineVec3) -> Quat {
+    let forward = forward.normalized();
+    if forward.length_squared() < f32::EPSILON {
+        return Quat::IDENTITY;
+    }
+    // right = up x forward
+    let r_x = up.y * forward.z - up.z * forward.y;
+    let r_y = up.z * forward.x - up.x * forward.z;
+    let r_z = up.x * forward.y - up.y * forward.x;
+    let right_len = (r_x * r_x + r_y * r_y + r_z * r_z).sqrt();
+    let right = if right_len > f32::EPSILON {
+        EngineVec3::new(r_x / right_len, r_y / right_len, r_z / right_len)
+    } else {
+        return Quat::IDENTITY;
+    };
+    // Re-orthogonalize up
+    let u_x = forward.y * right.z - forward.z * right.y;
+    let u_y = forward.z * right.x - forward.x * right.z;
+    let u_z = forward.x * right.y - forward.y * right.x;
+    let up = EngineVec3::new(u_x, u_y, u_z);
+
+    // Rotation matrix columns: right, up, -forward
+    let m00 = right.x;    let m01 = right.y;    let m02 = right.z;
+    let m10 = up.x;       let m11 = up.y;       let m12 = up.z;
+    let m20 = -forward.x; let m21 = -forward.y; let m22 = -forward.z;
+
+    let trace = m00 + m11 + m22;
+    if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        Quat {
+            x: (m21 - m12) / s,
+            y: (m02 - m20) / s,
+            z: (m10 - m01) / s,
+            w: 0.25 * s,
+        }
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        Quat {
+            x: 0.25 * s,
+            y: (m01 + m10) / s,
+            z: (m02 + m20) / s,
+            w: (m21 - m12) / s,
+        }
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        Quat {
+            x: (m01 + m10) / s,
+            y: 0.25 * s,
+            z: (m12 + m21) / s,
+            w: (m02 - m20) / s,
+        }
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        Quat {
+            x: (m02 + m20) / s,
+            y: (m12 + m21) / s,
+            z: 0.25 * s,
+            w: (m10 - m01) / s,
+        }
+    }
 }
 
 fn select_first_scene_object(shell: &mut EditorShell) {

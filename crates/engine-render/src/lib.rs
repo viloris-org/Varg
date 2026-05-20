@@ -102,6 +102,77 @@ impl RenderWorld {
     pub fn is_visible(&self) -> bool {
         self.camera.is_some() && !self.objects.is_empty()
     }
+
+    /// Extracts renderable data from a [`Scene`](engine_ecs::Scene).
+    ///
+    /// Iterates all active game objects. For each object, extracts:
+    /// - `Camera` → [`RenderCamera`] (stored as `self.camera`)
+    /// - `MeshRenderer` + transform → [`RenderObject`]
+    /// - `Light` → [`RenderLight`]
+    ///
+    /// Inactive objects and objects without any renderable component are skipped.
+    pub fn extract(scene: &engine_ecs::Scene) -> Self {
+        let mut world = RenderWorld::default();
+
+        for (entity, obj) in scene.iter_objects() {
+            if !obj.active {
+                continue;
+            }
+
+            let transform = scene.transforms().local(entity).unwrap_or_default();
+
+            for component in &obj.components {
+                match component {
+                    engine_ecs::ComponentData::Camera(cam) => {
+                        world.camera = Some(RenderCamera {
+                            object: obj.id,
+                            transform,
+                            vertical_fov_degrees: cam.vertical_fov_degrees,
+                            near: cam.near,
+                            far: cam.far,
+                        });
+                    }
+                    engine_ecs::ComponentData::MeshRenderer(mesh) => {
+                        let mesh_name = mesh
+                            .builtin_mesh
+                            .clone()
+                            .or_else(|| {
+                                mesh.mesh
+                                    .map(|id| format!("asset:{:016x}", id.as_u128()))
+                            })
+                            .unwrap_or_default();
+                        let material_name = mesh
+                            .material
+                            .builtin
+                            .clone()
+                            .or_else(|| {
+                                mesh.material
+                                    .asset
+                                    .map(|id| format!("asset:{:016x}", id.as_u128()))
+                            })
+                            .unwrap_or_default();
+                        world.objects.push(RenderObject {
+                            object: obj.id,
+                            transform,
+                            mesh: mesh_name,
+                            material: material_name,
+                        });
+                    }
+                    engine_ecs::ComponentData::Light(light) => {
+                        world.lights.push(RenderLight {
+                            object: obj.id,
+                            transform,
+                            kind: light.kind.clone(),
+                            intensity: light.intensity,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        world
+    }
 }
 
 /// Render backend abstraction.
@@ -281,6 +352,7 @@ impl RenderDevice for MissingRenderDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_ecs::{ComponentData, Scene};
 
     #[test]
     fn headless_renderer_accepts_frame() {
@@ -296,5 +368,81 @@ mod tests {
         renderer
             .execute_graph(&graph, RenderFrame { frame_index: 1 })
             .unwrap();
+    }
+
+    #[test]
+    fn extract_scene_with_camera_and_meshes() {
+        let mut scene = Scene::new();
+
+        // Camera entity
+        let cam_entity = scene.create_object("Main Camera").unwrap();
+        scene
+            .upsert_component(
+                cam_entity,
+                ComponentData::Camera(engine_ecs::CameraComponentData {
+                    vertical_fov_degrees: 60.0,
+                    near: 0.1,
+                    far: 100.0,
+                    aspect_ratio: None,
+                    primary: true,
+                }),
+            )
+            .unwrap();
+
+        // First mesh entity
+        let mesh1 = scene.create_object("Cube").unwrap();
+        scene
+            .upsert_component(
+                mesh1,
+                ComponentData::MeshRenderer(engine_ecs::MeshRendererComponentData {
+                    mesh: None,
+                    builtin_mesh: Some("debug/cube".to_string()),
+                    material: engine_ecs::MaterialRef::debug(),
+                    casts_shadows: true,
+                }),
+            )
+            .unwrap();
+
+        // Second mesh entity
+        let mesh2 = scene.create_object("Sphere").unwrap();
+        scene
+            .upsert_component(
+                mesh2,
+                ComponentData::MeshRenderer(engine_ecs::MeshRendererComponentData {
+                    mesh: None,
+                    builtin_mesh: Some("debug/sphere".to_string()),
+                    material: engine_ecs::MaterialRef::debug(),
+                    casts_shadows: false,
+                }),
+            )
+            .unwrap();
+
+        // Inactive entity — should be skipped
+        let inactive = scene.create_object("Inactive").unwrap();
+        scene
+            .upsert_component(
+                inactive,
+                ComponentData::MeshRenderer(engine_ecs::MeshRendererComponentData::default()),
+            )
+            .unwrap();
+        scene.object_mut(inactive).unwrap().active = false;
+
+        let world = RenderWorld::extract(&scene);
+
+        assert!(world.camera.is_some(), "should have a camera");
+        assert_eq!(world.objects.len(), 2, "should have 2 active mesh objects");
+        assert_eq!(world.lights.len(), 0, "should have no lights");
+
+        let cam = world.camera.unwrap();
+        assert_eq!(cam.vertical_fov_degrees, 60.0);
+        assert_eq!(cam.near, 0.1);
+        assert_eq!(cam.far, 100.0);
+
+        // Verify mesh names
+        let cube = world.objects.iter().find(|o| o.mesh == "debug/cube").unwrap();
+        let sphere = world.objects.iter().find(|o| o.mesh == "debug/sphere").unwrap();
+        assert_eq!(cube.material, "debug/default");
+        assert_eq!(sphere.material, "debug/default");
+        assert_ne!(sphere.object.as_u128(), 0);
     }
 }
