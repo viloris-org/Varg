@@ -200,7 +200,7 @@ pub fn draw_shell(
     let pal = InfernuxPalette::dark();
     let tr = Translations::load(shell.preferences().locale);
     apply_visuals(ctx, &pal);
-    handle_command_shortcuts(ctx, shell, ui_state);
+    handle_command_shortcuts(ctx, shell, ui_state, &tr);
 
     let close = false;
 
@@ -266,7 +266,7 @@ pub fn draw_shell(
         .show(ctx, |ui| draw_center_dock(ui, shell, ui_state, &pal, &tr));
 
     if ui_state.command_palette_open {
-        draw_command_palette(ctx, shell, ui_state, &pal);
+        draw_command_palette(ctx, shell, ui_state, &pal, &tr);
     }
 
     close
@@ -280,8 +280,8 @@ fn draw_menu_bar(
     tr: &Translations,
 ) {
     ui.horizontal_centered(|ui| {
-        command_menu(ui, shell, ui_state, "File", tr.tr("menu_file"), 54.0, pal);
-        command_menu(ui, shell, ui_state, "Edit", tr.tr("menu_edit"), 54.0, pal);
+        command_menu(ui, shell, ui_state, "File", tr.tr("menu_file"), 54.0, pal, tr);
+        command_menu(ui, shell, ui_state, "Edit", tr.tr("menu_edit"), 54.0, pal, tr);
         command_menu(
             ui,
             shell,
@@ -290,6 +290,7 @@ fn draw_menu_bar(
             tr.tr("menu_assets"),
             54.0,
             pal,
+            tr,
         );
         ghost_button(ui, tr.tr("menu_gameobject"), 86.0, pal);
         ghost_button(ui, tr.tr("menu_component"), 86.0, pal);
@@ -301,6 +302,7 @@ fn draw_menu_bar(
             tr.tr("menu_window"),
             64.0,
             pal,
+            tr,
         );
         ghost_button(ui, tr.tr("menu_help"), 54.0, pal);
 
@@ -316,7 +318,12 @@ fn draw_menu_bar(
                 .unwrap_or_else(|| tr.tr("editor_untitled").to_owned());
             ui.label(RichText::new(title).size(12.0).color(pal.text));
             if ui_state.playing {
-                ui.label(RichText::new("PLAY").size(11.0).strong().color(pal.play));
+                ui.label(
+                    RichText::new(tr.tr("editor_play_indicator"))
+                        .size(11.0)
+                        .strong()
+                        .color(pal.play),
+                );
             }
         });
     });
@@ -344,25 +351,25 @@ fn draw_toolbar(
                 if transport_command_button(ui, shell, ui_state, "play.toggle", "▶", pal.play, pal)
                     .clicked()
                 {
-                    execute_shell_command(shell, ui_state, "play.toggle");
+                    execute_shell_command(shell, ui_state, "play.toggle", tr);
                 }
                 if transport_command_button(ui, shell, ui_state, "play.pause", "⏸", pal.pause, pal)
                     .clicked()
                 {
-                    execute_shell_command(shell, ui_state, "play.pause");
+                    execute_shell_command(shell, ui_state, "play.pause", tr);
                 }
                 if transport_command_button(ui, shell, ui_state, "play.stop", "■", pal.accent, pal)
                     .clicked()
                 {
-                    execute_shell_command(shell, ui_state, "play.stop");
+                    execute_shell_command(shell, ui_state, "play.stop", tr);
                 }
             },
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            command_text_button(ui, shell, ui_state, "scene.save", tr.tr("tool_save"), pal);
-            command_text_button(ui, shell, ui_state, "edit.redo", "Redo", pal);
-            command_text_button(ui, shell, ui_state, "edit.undo", "Undo", pal);
+            command_text_button(ui, shell, ui_state, "scene.save", tr.tr("tool_save"), pal, tr);
+            command_text_button(ui, shell, ui_state, "edit.redo", tr.tr("command_redo"), pal, tr);
+            command_text_button(ui, shell, ui_state, "edit.undo", tr.tr("command_undo"), pal, tr);
             panel_toggle(
                 ui,
                 tr.tr("panel_game_view"),
@@ -401,6 +408,7 @@ fn command_menu(
     label: &str,
     width: f32,
     pal: &InfernuxPalette,
+    tr: &Translations,
 ) {
     let commands = shell
         .commands()
@@ -415,7 +423,7 @@ fn command_menu(
 
     ui.menu_button(RichText::new(label).size(12.0).color(pal.text), |ui| {
         for command in &commands {
-            command_menu_item(ui, shell, ui_state, command);
+            command_menu_item(ui, shell, ui_state, command, tr);
         }
     });
 }
@@ -425,6 +433,7 @@ fn command_menu_item(
     shell: &mut EditorShell,
     ui_state: &mut ShellUiState,
     command: &EditorCommand,
+    tr: &Translations,
 ) {
     let enabled = command_enabled(shell, ui_state, command);
     let text = match command.shortcut.as_deref() {
@@ -435,7 +444,7 @@ fn command_menu_item(
         .add_enabled(enabled, egui::Button::new(text).frame(false))
         .clicked()
     {
-        execute_shell_command(shell, ui_state, &command.id);
+        execute_shell_command(shell, ui_state, &command.id, tr);
         ui.close();
     }
 }
@@ -447,6 +456,7 @@ fn command_text_button(
     command_id: &str,
     fallback_label: &str,
     pal: &InfernuxPalette,
+    tr: &Translations,
 ) {
     let command = shell.commands().get(command_id).cloned();
     let enabled = command
@@ -461,7 +471,7 @@ fn command_text_button(
         .add_enabled(enabled, small_text_button_widget(label, pal))
         .clicked()
     {
-        execute_shell_command(shell, ui_state, command_id);
+        execute_shell_command(shell, ui_state, command_id, tr);
     }
 }
 
@@ -507,25 +517,28 @@ fn command_enabled(shell: &EditorShell, ui_state: &ShellUiState, command: &Edito
     }
 }
 
-fn execute_shell_command(shell: &mut EditorShell, ui_state: &mut ShellUiState, command_id: &str) {
+fn execute_shell_command(
+    shell: &mut EditorShell,
+    ui_state: &mut ShellUiState,
+    command_id: &str,
+    tr: &Translations,
+) {
     let Some(command) = shell.commands().get(command_id).cloned() else {
         return;
     };
     if !command_enabled(shell, ui_state, &command) {
-        ui_state.command_status = Some(format!("{} is not available", command.label));
+        ui_state.command_status =
+            Some(tr.tr_fmt("command_status_not_available", &[&command.label]));
         return;
     }
 
     match command_id {
         "project.open" => {
-            ui_state.command_status = Some("Open Project is handled by the host shell".to_owned());
+            ui_state.command_status = Some(tr.tr("command_status_open_project").to_owned());
         }
         "scene.save" => save_scene(shell),
         "project.build" => {
-            push_info(
-                shell,
-                "Build requested; host packaging hook is not connected yet",
-            );
+            push_info(shell, tr.tr("command_status_build"));
         }
         "edit.undo" => apply_undo(shell),
         "edit.redo" => apply_redo(shell),
@@ -556,7 +569,7 @@ fn execute_shell_command(shell: &mut EditorShell, ui_state: &mut ShellUiState, c
             ui_state.play_mode_request = Some(PlayModeRequest::Stop);
         }
         "assets.reload" => match shell.project_mut().map(|project| project.rescan_assets()) {
-            Some(Ok(())) => push_info(shell, "Assets reloaded"),
+            Some(Ok(())) => push_info(shell, tr.tr("command_status_assets_reloaded")),
             Some(Err(error)) => push_error(shell, error.to_string()),
             None => {}
         },
@@ -568,7 +581,7 @@ fn execute_shell_command(shell: &mut EditorShell, ui_state: &mut ShellUiState, c
         }
         _ => {}
     }
-    ui_state.command_status = Some(format!("Ran {}", command.label));
+    ui_state.command_status = Some(tr.tr_fmt("command_status_ran", &[&command.label]));
 }
 
 fn draw_status_bar(
@@ -683,9 +696,10 @@ fn draw_command_palette(
     shell: &mut EditorShell,
     ui_state: &mut ShellUiState,
     pal: &InfernuxPalette,
+    tr: &Translations,
 ) {
     let mut open = ui_state.command_palette_open;
-    egui::Window::new("Command Palette")
+    egui::Window::new(tr.tr("command_palette_title"))
         .collapsible(false)
         .resizable(false)
         .default_width(420.0)
@@ -694,7 +708,7 @@ fn draw_command_palette(
             ui.add_sized(
                 Vec2::new(ui.available_width(), 24.0),
                 egui::TextEdit::singleline(&mut ui_state.command_filter)
-                    .hint_text("Search commands")
+                    .hint_text(tr.tr("command_palette_search"))
                     .font(FontId::proportional(13.0)),
             );
             ui.add_space(6.0);
@@ -733,7 +747,7 @@ fn draw_command_palette(
                             )
                             .clicked()
                         {
-                            execute_shell_command(shell, ui_state, &command.id);
+                            execute_shell_command(shell, ui_state, &command.id, tr);
                             ui_state.command_palette_open = false;
                         }
                     }
@@ -749,6 +763,7 @@ fn handle_command_shortcuts(
     ctx: &egui::Context,
     shell: &mut EditorShell,
     ui_state: &mut ShellUiState,
+    tr: &Translations,
 ) {
     let matched = ctx.input(|input| {
         if input.key_pressed(egui::Key::K) && input.modifiers.command && input.modifiers.shift {
@@ -779,7 +794,7 @@ fn handle_command_shortcuts(
         }
     });
     if let Some(command_id) = matched {
-        execute_shell_command(shell, ui_state, command_id);
+        execute_shell_command(shell, ui_state, command_id, tr);
     }
 }
 
@@ -1120,6 +1135,7 @@ fn draw_hierarchy(
                     selected,
                     &mut row_index,
                     pal,
+                    tr,
                 );
             }
         });
@@ -1135,6 +1151,7 @@ fn draw_hierarchy_entity(
     selected: Option<EntityId>,
     row_index: &mut usize,
     pal: &InfernuxPalette,
+    tr: &Translations,
 ) {
     let Some(project) = shell.project() else {
         return;
@@ -1210,15 +1227,15 @@ fn draw_hierarchy_entity(
             }
         }
         response.context_menu(|ui| {
-            if ui.button("Duplicate").clicked() {
+            if ui.button(tr.tr("hierarchy_duplicate")).clicked() {
                 duplicate_object(shell, id);
                 ui.close();
             }
-            if ui.button("Delete").clicked() {
+            if ui.button(tr.tr("hierarchy_delete")).clicked() {
                 delete_object(shell, id);
                 ui.close();
             }
-            if ui.button("Clear Parent").clicked() {
+            if ui.button(tr.tr("hierarchy_clear_parent")).clicked() {
                 reparent_object(shell, id, None);
                 ui.close();
             }
@@ -1237,6 +1254,7 @@ fn draw_hierarchy_entity(
             selected,
             row_index,
             pal,
+            tr,
         );
     }
 }
@@ -1318,7 +1336,9 @@ fn draw_inspector(
                     ui.add_sized(
                         Vec2::new(82.0, 20.0),
                         egui::Label::new(
-                            RichText::new("Rotation W").size(12.0).color(pal.text_dim),
+                            RichText::new(tr.tr("inspector_rotation_w"))
+                                .size(12.0)
+                                .color(pal.text_dim),
                         ),
                     );
                     dirty |= axis_drag(ui, "W", &mut rotation_w, rgb(180, 180, 180));
@@ -1342,7 +1362,7 @@ fn draw_inspector(
                 let changed = draw_component_editor(ui, &mut component, &assets, pal, tr);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
-                    if small_chip(ui, "Remove", 68.0, pal).clicked() {
+                    if small_chip(ui, tr.tr("inspector_remove_component"), 68.0, pal).clicked() {
                         remove_component = Some(component.type_id().to_owned());
                     }
                 });
@@ -1433,8 +1453,8 @@ fn draw_component_editor(
                 pal,
             );
             dirty |= f32_property_row(ui, tr.tr("property_near"), &mut camera.near, pal);
-            dirty |= f32_property_row(ui, "Far", &mut camera.far, pal);
-            dirty |= bool_property_row(ui, "Primary", &mut camera.primary, pal);
+            dirty |= f32_property_row(ui, tr.tr("property_far"), &mut camera.far, pal);
+            dirty |= bool_property_row(ui, tr.tr("property_primary"), &mut camera.primary, pal);
         }
         ComponentData::MeshRenderer(renderer) => {
             dirty |= asset_ref_row(
@@ -1453,7 +1473,8 @@ fn draw_component_editor(
                 assets,
                 pal,
             );
-            dirty |= bool_property_row(ui, "Casts Shadows", &mut renderer.casts_shadows, pal);
+            dirty |=
+                bool_property_row(ui, tr.tr("property_casts_shadows"), &mut renderer.casts_shadows, pal);
         }
         ComponentData::Light(light) => {
             dirty |= enum_property_row(
@@ -1463,7 +1484,7 @@ fn draw_component_editor(
                 &["directional", "point", "spot"],
                 pal,
             );
-            dirty |= vec3_editor(ui, "Color", &mut light.color, pal);
+            dirty |= vec3_editor(ui, tr.tr("property_color"), &mut light.color, pal);
             dirty |= f32_property_row(ui, tr.tr("property_intensity"), &mut light.intensity, pal);
         }
         ComponentData::Rigidbody(body) => {
@@ -1475,7 +1496,8 @@ fn draw_component_editor(
                 pal,
             );
             dirty |= f32_property_row(ui, tr.tr("property_mass"), &mut body.mass, pal);
-            dirty |= bool_property_row(ui, "Use Gravity", &mut body.use_gravity, pal);
+            dirty |=
+                bool_property_row(ui, tr.tr("property_use_gravity"), &mut body.use_gravity, pal);
         }
         ComponentData::Collider(collider) => {
             dirty |= enum_property_row(
@@ -1485,15 +1507,16 @@ fn draw_component_editor(
                 &["box", "sphere", "capsule"],
                 pal,
             );
-            dirty |= vec3_editor(ui, "Size", &mut collider.size, pal);
-            dirty |= bool_property_row(ui, "Is Trigger", &mut collider.is_trigger, pal);
-            dirty |= u32_property_row(ui, "Mask", &mut collider.mask, pal);
+            dirty |= vec3_editor(ui, tr.tr("property_size"), &mut collider.size, pal);
+            dirty |=
+                bool_property_row(ui, tr.tr("property_is_trigger"), &mut collider.is_trigger, pal);
+            dirty |= u32_property_row(ui, tr.tr("property_mask"), &mut collider.mask, pal);
         }
         ComponentData::AudioSource(source) => {
             let mut builtin = None;
             dirty |= asset_ref_row(
                 ui,
-                "Clip",
+                tr.tr("property_clip"),
                 &mut source.clip,
                 &mut builtin,
                 assets,
@@ -1501,14 +1524,20 @@ fn draw_component_editor(
                 pal,
             );
             dirty |= f32_property_row(ui, tr.tr("property_volume"), &mut source.volume, pal);
-            dirty |= bool_property_row(ui, "Looping", &mut source.looping, pal);
-            dirty |= bool_property_row(ui, "Play On Start", &mut source.play_on_start, pal);
+            dirty |= bool_property_row(ui, tr.tr("property_looping"), &mut source.looping, pal);
+            dirty |=
+                bool_property_row(ui, tr.tr("property_play_on_start"), &mut source.play_on_start, pal);
         }
         ComponentData::Script(script) => {
             dirty |= string_property_row(ui, tr.tr("property_backend"), &mut script.backend, pal);
             dirty |=
                 string_property_row(ui, tr.tr("property_script_name"), &mut script.script, pal);
-            dirty |= bool_property_row(ui, "Pending Recovery", &mut script.pending_recovery, pal);
+            dirty |= bool_property_row(
+                ui,
+                tr.tr("property_pending_recovery"),
+                &mut script.pending_recovery,
+                pal,
+            );
         }
     }
     dirty
@@ -1669,7 +1698,7 @@ fn draw_project_panel(
         if small_chip(ui, tr.tr("project_create"), 64.0, pal).clicked() {
             create_default_material(shell);
         }
-        if small_chip(ui, "Rescan", 56.0, pal).clicked() {
+        if small_chip(ui, tr.tr("project_rescan"), 56.0, pal).clicked() {
             match shell.project_mut().map(|project| {
                 project.rescan_assets()?;
                 Ok::<_, engine_core::EngineError>(format!("scan: {} assets", project.assets.len()))
@@ -1682,7 +1711,8 @@ fn draw_project_panel(
         if small_chip(ui, tr.tr("project_import"), 64.0, pal).clicked() {
             let path = PathBuf::from(ui_state.project_import_path.trim());
             if path.as_os_str().is_empty() {
-                ui_state.project_import_status = Some("enter a file path to import".to_owned());
+                ui_state.project_import_status =
+                    Some(tr.tr("project_import_hint").to_owned());
             } else {
                 match shell
                     .project_mut()
@@ -1701,7 +1731,7 @@ fn draw_project_panel(
         ui.add_sized(
             Vec2::new(170.0, 20.0),
             egui::TextEdit::singleline(&mut ui_state.project_import_path)
-                .hint_text("file path")
+                .hint_text(tr.tr("project_file_path_hint"))
                 .font(FontId::proportional(11.0)),
         );
         search_field(

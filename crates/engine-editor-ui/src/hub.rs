@@ -668,7 +668,7 @@ fn draw_settings_page(ui: &mut egui::Ui, _hub: &mut HubState, pal: &Palette, tr:
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 ui.label(
-                    RichText::new("Language")
+                    RichText::new(tr.tr("hub_settings_language"))
                         .size(14.0)
                         .color(pal.text_secondary),
                 );

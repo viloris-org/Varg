@@ -1,0 +1,9 @@
+# Ralph Progress Tracker — Aster P0 Fullstack
+# Branch: ralph/aster-p0-fullstack
+# Started: 2026-05-21
+# Total stories: 58
+# Completed: 2
+# Last updated: 2026-05-21
+
+US-001: DONE — Added TimeState struct to engine-core with delta_seconds, fixed_delta_seconds, total_time, frame_index, time_scale fields; update(dt) method; and 4 unit tests
+US-002: DONE — InputState already existed in engine-platform with HashSet-based key tracking, pressed/held/released semantics, mouse/cursor/scroll tracking, end_frame() reset, and query methods; 2 tests pass

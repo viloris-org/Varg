@@ -15,4 +15,4 @@ pub use config::{EngineConfig, RuntimeProfile};
 pub use error::{EngineError, EngineResult};
 pub use handle::{Generation, Handle, HandleAllocator};
 pub use ids::{AssetId, EntityId, ResourceId};
-pub use time::{FrameCounter, TimeStep};
+pub use time::{FrameCounter, TimeState, TimeStep};
