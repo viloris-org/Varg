@@ -36,53 +36,83 @@ pub struct InfernuxPalette {
     pub input_bg: Color32,
     /// Frame hover color.
     pub frame_hover: Color32,
+    /// Frame active/pressed color.
+    pub frame_active: Color32,
     /// Header background color.
     pub header: Color32,
     /// Header hover color.
     pub header_hover: Color32,
+    /// Header active color.
+    pub header_active: Color32,
     /// Border color.
     pub border: Color32,
+    /// Border highlight color (for focused elements).
+    pub border_highlight: Color32,
+    /// Subtle separator color.
+    pub separator: Color32,
     /// Alternate row color.
     pub row_alt: Color32,
     /// Selection color.
     pub selection: Color32,
+    /// Selection hover color.
+    pub selection_hover: Color32,
     /// Accent color.
     pub accent: Color32,
+    /// Accent hover color.
+    pub accent_hover: Color32,
     /// Play button color.
     pub play: Color32,
+    /// Play button hover color.
+    pub play_hover: Color32,
     /// Pause button color.
     pub pause: Color32,
+    /// Pause button hover color.
+    pub pause_hover: Color32,
     /// Warning color.
     pub warning: Color32,
     /// Error color.
     pub error: Color32,
+    /// Success/info color.
+    pub success: Color32,
+    /// Overlay background (for modals/dialogs).
+    pub overlay_bg: Color32,
 }
 
 impl InfernuxPalette {
     /// Creates a dark theme palette.
     pub const fn dark() -> Self {
         Self {
-            text: Color32::from_rgb(214, 214, 214),
-            text_dim: Color32::from_rgb(140, 140, 140),
-            text_disabled: Color32::from_rgb(102, 102, 102),
-            window_bg: Color32::from_rgb(56, 56, 56),
-            panel_bg: Color32::from_rgb(54, 54, 54),
-            menu_bar: Color32::from_rgb(41, 41, 41),
-            status_bar: Color32::from_rgb(33, 33, 33),
-            viewport_bg: Color32::from_rgb(31, 31, 31),
-            frame_bg: Color32::from_rgb(42, 42, 42),
-            input_bg: Color32::from_rgb(34, 34, 34),
-            frame_hover: Color32::from_rgb(51, 45, 45),
-            header: Color32::from_rgb(60, 60, 60),
-            header_hover: Color32::from_rgb(71, 61, 61),
-            border: Color32::from_rgb(26, 26, 26),
-            row_alt: Color32::from_rgba_premultiplied(0, 0, 0, 22),
-            selection: Color32::from_rgb(44, 93, 135),
-            accent: Color32::from_rgb(235, 87, 87),
-            play: Color32::from_rgb(51, 115, 77),
-            pause: Color32::from_rgb(128, 102, 38),
-            warning: Color32::from_rgb(227, 181, 77),
-            error: Color32::from_rgb(235, 87, 87),
+            text: Color32::from_rgb(220, 220, 220),
+            text_dim: Color32::from_rgb(150, 150, 150),
+            text_disabled: Color32::from_rgb(100, 100, 100),
+            window_bg: Color32::from_rgb(32, 32, 32),
+            panel_bg: Color32::from_rgb(40, 40, 40),
+            menu_bar: Color32::from_rgb(35, 35, 35),
+            status_bar: Color32::from_rgb(30, 30, 30),
+            viewport_bg: Color32::from_rgb(28, 28, 28),
+            frame_bg: Color32::from_rgb(50, 50, 50),
+            input_bg: Color32::from_rgb(38, 38, 38),
+            frame_hover: Color32::from_rgb(60, 60, 60),
+            frame_active: Color32::from_rgb(55, 55, 55),
+            header: Color32::from_rgb(48, 48, 48),
+            header_hover: Color32::from_rgb(58, 58, 58),
+            header_active: Color32::from_rgb(52, 52, 52),
+            border: Color32::from_rgb(60, 60, 60),
+            border_highlight: Color32::from_rgb(80, 120, 160),
+            separator: Color32::from_rgb(55, 55, 55),
+            row_alt: Color32::from_rgba_premultiplied(255, 255, 255, 8),
+            selection: Color32::from_rgb(50, 100, 150),
+            selection_hover: Color32::from_rgb(60, 110, 160),
+            accent: Color32::from_rgb(220, 80, 80),
+            accent_hover: Color32::from_rgb(235, 95, 95),
+            play: Color32::from_rgb(60, 130, 90),
+            play_hover: Color32::from_rgb(70, 145, 105),
+            pause: Color32::from_rgb(140, 115, 50),
+            pause_hover: Color32::from_rgb(155, 130, 65),
+            warning: Color32::from_rgb(220, 170, 70),
+            error: Color32::from_rgb(220, 80, 80),
+            success: Color32::from_rgb(80, 180, 120),
+            overlay_bg: Color32::from_rgba_premultiplied(0, 0, 0, 180),
         }
     }
 }

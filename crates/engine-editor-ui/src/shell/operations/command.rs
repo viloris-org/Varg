@@ -215,20 +215,39 @@ pub fn apply_visuals(ctx: &egui::Context, pal: &InfernuxPalette) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = pal.window_bg;
     visuals.window_fill = pal.panel_bg;
-    visuals.extreme_bg_color = pal.frame_bg;
+    visuals.extreme_bg_color = pal.input_bg;
     visuals.faint_bg_color = pal.frame_bg;
     visuals.text_edit_bg_color = Some(pal.input_bg);
     visuals.window_stroke = Stroke::new(1.0, pal.border);
-    visuals.window_corner_radius = CornerRadius::same(0);
+    visuals.window_corner_radius = CornerRadius::same(4);
+
     visuals.widgets.noninteractive.bg_fill = pal.frame_bg;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, pal.text);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(3);
+
     visuals.widgets.inactive.bg_fill = pal.frame_bg;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, pal.text_dim);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(3);
+
     visuals.widgets.hovered.bg_fill = pal.frame_hover;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, pal.text);
-    visuals.widgets.active.bg_fill = pal.header_hover;
+    visuals.widgets.hovered.expansion = 1.0;
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(3);
+
+    visuals.widgets.active.bg_fill = pal.frame_active;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, pal.text);
+    visuals.widgets.active.corner_radius = CornerRadius::same(3);
+
+    visuals.widgets.open.bg_fill = pal.header_active;
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0, pal.text);
+    visuals.widgets.open.corner_radius = CornerRadius::same(3);
+
     visuals.selection.bg_fill = pal.selection;
-    visuals.selection.stroke = Stroke::new(1.0, pal.text);
+    visuals.selection.stroke = Stroke::new(1.0, pal.border_highlight);
+
+    visuals.hyperlink_color = pal.accent;
+    visuals.warn_fg_color = pal.warning;
+    visuals.error_fg_color = pal.error;
+
     ctx.set_visuals(visuals);
 }
