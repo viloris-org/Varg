@@ -1,1 +1,93 @@
+# Rust build output
 /target/
+
+# Generated packages and local build artifacts
+/dist/
+/build/
+/out/
+/tmp/
+/.tmp/
+/temp/
+/.temp/
+
+# Logs and diagnostics
+*.log
+*.trace
+*.profraw
+*.profdata
+crash.log
+
+# Coverage output
+/coverage/
+/tarpaulin-report.html
+/.coverage
+/.coverage.*
+/lcov.info
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.secrets
+
+# Editor and IDE state
+/.vscode/
+/.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# AI assistant and coding-agent state
+scripts/ralph/
+tasks/
+/.codex/
+/.claude/
+/.cursor/
+/.continue/
+/.windsurf/
+/.aider*
+/.copilot/
+/.tabnine/
+/.sourcegraph/
+/.qodo/
+/.amazonq/
+/.github/copilot-chat/
+
+# AI tool transcripts, scratch files, and caches
+CLAUDE.md
+.claude.json
+.claude.local.json
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v3/
+.continue/
+.cursorindexingignore
+codex-*.log
+copilot-*.log
+llm-*.log
+ai-*.log
+prompt-*.md
+prompts.local.md
+
+# Tool caches
+/.cache/
+/.pytest_cache/
+/.ruff_cache/
+/.mypy_cache/
+/.nox/
+/.tox/
+/.venv/
+/venv/
+/node_modules/
+/.parcel-cache/
+/.next/
+/.turbo/
+/.vite/
+/.wrangler/

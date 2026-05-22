@@ -30,11 +30,11 @@
 - 提供 `runtime-game` 运行器，能加载项目配置、默认场景并进入持续帧循环。
 - 每帧顺序明确：输入采集 -> fixed update 累积 -> physics fixed update -> scene fixed lifecycle -> scene update/late update -> audio update -> render submit -> deferred destroy。
 - 支持暂停、单步、退出、窗口 resize 和基础错误上报。
-- `engine-cli` 增加类似 `run <project>` 的命令，能直接运行 `examples/project`。
+- `aster` 增加类似 `run <project>` 的命令，能直接运行 `examples/project`。
 
 **验收**
 
-- `cargo run -p engine-cli -- run examples/project` 可以打开窗口并持续运行默认场景。
+- `cargo run -p aster -- run examples/project` 可以打开窗口并持续运行默认场景。
 - Player 对象上的组件/脚本能收到 start/update/fixed_update。
 - 关闭窗口或按 Escape 能稳定退出。
 
@@ -46,7 +46,7 @@
 
 **需求**
 
-- 先选定一个首发后端。建议优先 `wgpu`，因为 `engine-cli` 编辑器路径已经引入 `egui_wgpu::wgpu`；如果坚持 Vulkan，需要完成 `engine-render-vulkan` 的真实初始化、swapchain、pipeline 和资源上传。
+- 先选定一个首发后端。建议优先 `wgpu`，因为 `aster` 编辑器路径已经引入 `egui_wgpu::wgpu`；如果坚持 Vulkan，需要完成 `engine-render-vulkan` 的真实初始化、swapchain、pipeline 和资源上传。
 - 定义最小渲染组件：Camera、MeshRenderer、Light、MaterialRef。
 - 打通 Scene -> RenderWorld/RenderQueue -> RenderDevice 的提交流程。
 - Game View 和 Scene View 使用真实 offscreen target，而不是 placeholder。
