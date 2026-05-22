@@ -66,7 +66,8 @@ pub fn draw_project_panel(
             Vec2::new(170.0, 20.0),
             egui::TextEdit::singleline(&mut ui_state.project_import_path)
                 .hint_text(tr.tr("project_file_path_hint"))
-                .font(FontId::proportional(11.0)),
+                .font(FontId::proportional(11.0))
+                .text_color(pal.text),
         );
         search_field(
             ui,

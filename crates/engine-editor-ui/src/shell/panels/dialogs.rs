@@ -112,7 +112,8 @@ pub fn draw_command_palette(
                 Vec2::new(ui.available_width(), 24.0),
                 egui::TextEdit::singleline(&mut ui_state.command_filter)
                     .hint_text(tr.tr("command_palette_search"))
-                    .font(egui::FontId::proportional(13.0)),
+                    .font(egui::FontId::proportional(13.0))
+                    .text_color(pal.text),
             );
             ui.add_space(6.0);
             let query = ui_state.command_filter.trim().to_lowercase();

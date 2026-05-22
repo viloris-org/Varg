@@ -175,7 +175,8 @@ fn draw_hierarchy_entity(
             let text_edit = egui::TextEdit::singleline(&mut edit_text)
                 .id(text_id)
                 .desired_width(edit_rect.width())
-                .font(FontId::proportional(12.0));
+                .font(FontId::proportional(12.0))
+                .text_color(pal.text);
             let edit_response = ui.put(edit_rect, text_edit);
             let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));

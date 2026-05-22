@@ -59,7 +59,8 @@ pub fn draw_inspector(
                     dirty |= ui
                         .add_sized(
                             Vec2::new(ui.available_width(), 22.0),
-                            egui::TextEdit::singleline(&mut object.name),
+                            egui::TextEdit::singleline(&mut object.name)
+                                .text_color(pal.text),
                         )
                         .changed();
                 });
@@ -216,7 +217,8 @@ pub fn draw_inspector(
                         Vec2::new(ui.available_width().max(120.0), 20.0),
                         egui::TextEdit::singleline(&mut ui_state.add_component_filter)
                             .hint_text(tr.tr("inspector_add_component_search"))
-                            .font(FontId::proportional(12.0)),
+                            .font(FontId::proportional(12.0))
+                            .text_color(pal.text),
                     );
                     let filter = ui_state.add_component_filter.to_lowercase();
                     for (label, component) in default_components() {
