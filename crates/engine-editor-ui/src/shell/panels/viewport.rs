@@ -1697,7 +1697,7 @@ fn apply_transform_edit(shell: &mut EditorShell, selected_id: EntityId, edit: Tr
         TransformEdit::Rotate(axis, angle) => {
             if axis.length_squared() > f32::EPSILON && angle.abs() > f32::EPSILON {
                 transform.rotation =
-                    Quat::from_axis_angle(axis.normalized(), angle).mul(transform.rotation);
+                    Quat::from_axis_angle(axis.normalized(), angle) * transform.rotation;
                 transform.rotation = transform.rotation.normalized();
             }
         }

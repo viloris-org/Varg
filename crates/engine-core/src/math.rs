@@ -162,16 +162,6 @@ impl Quat {
         w: 1.0,
     };
 
-    /// Quaternion multiplication (rotation composition).
-    pub fn mul(self, rhs: Self) -> Self {
-        Self {
-            w: self.w * rhs.w - self.x * rhs.x - self.y * rhs.y - self.z * rhs.z,
-            x: self.w * rhs.x + self.x * rhs.w + self.y * rhs.z - self.z * rhs.y,
-            y: self.w * rhs.y - self.x * rhs.z + self.y * rhs.w + self.z * rhs.x,
-            z: self.w * rhs.z + self.x * rhs.y - self.y * rhs.x + self.z * rhs.w,
-        }
-    }
-
     /// Rotates a vector by this quaternion.
     pub fn rotate(self, v: Vec3) -> Vec3 {
         let q = Vec3::new(self.x, self.y, self.z);
@@ -287,7 +277,12 @@ impl std::ops::Mul for Quat {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        self.mul(rhs)
+        Self {
+            w: self.w * rhs.w - self.x * rhs.x - self.y * rhs.y - self.z * rhs.z,
+            x: self.w * rhs.x + self.x * rhs.w + self.y * rhs.z - self.z * rhs.y,
+            y: self.w * rhs.y - self.x * rhs.z + self.y * rhs.w + self.z * rhs.x,
+            z: self.w * rhs.z + self.x * rhs.y - self.y * rhs.x + self.z * rhs.w,
+        }
     }
 }
 
@@ -325,7 +320,7 @@ impl Transform {
     pub fn compose(&self, child: &Self) -> Self {
         Self {
             translation: self.transform_point(child.translation),
-            rotation: self.rotation.mul(child.rotation).normalized(),
+            rotation: (self.rotation * child.rotation).normalized(),
             scale: Vec3::new(
                 self.scale.x * child.scale.x,
                 self.scale.y * child.scale.y,
