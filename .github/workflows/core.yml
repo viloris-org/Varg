@@ -21,6 +21,9 @@ jobs:
           - name: macOS x64
             os: macos-13
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,7 +32,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint workspace
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace -- -D warnings
       - name: Test workspace
         run: cargo test --workspace
       - name: Build runtime-min
@@ -40,7 +43,3 @@ jobs:
         run: cargo build -p runtime-min --no-default-features --features agent-tools
       - name: Agent sandbox and worktree smoke tests
         run: cargo xtask agent-smoke
-      - name: Package runtime game
-        run: cargo xtask package --profile runtime-game
-      - name: Package editor
-        run: cargo xtask package --profile editor

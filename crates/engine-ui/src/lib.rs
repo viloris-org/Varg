@@ -167,6 +167,7 @@ pub enum EventResult {
 struct LayoutData {
     min_size: Vec2,
     position: Vec2,
+    #[expect(dead_code)]
     actual_size: Vec2,
     margin: Margin,
 }

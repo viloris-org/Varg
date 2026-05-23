@@ -1985,6 +1985,7 @@ fn resolve_rhai_script_path(
     Ok(path)
 }
 
+#[cfg(feature = "script-rhai")]
 fn format_entity_id(entity: engine_ecs::Entity) -> String {
     let handle = entity.handle();
     format!("{}:{}", handle.slot(), handle.generation().get())

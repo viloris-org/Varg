@@ -22,8 +22,8 @@ fn main() -> ExitCode {
 fn run() -> EngineResult<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("runtime-min") => build_profile(Profile::RuntimeMin),
-        Some("build-editor") => build_profile(Profile::Editor),
+        Some("runtime-min") => build_profile(Profile::RuntimeMin, false),
+        Some("build-editor") => build_profile(Profile::Editor, false),
         Some("agent-smoke") => cargo([
             "test",
             "-p",
@@ -88,11 +88,13 @@ impl Profile {
 struct PackageRequest {
     profile: Profile,
     project: PathBuf,
+    release: bool,
 }
 
 fn parse_package_request(args: impl Iterator<Item = String>) -> EngineResult<PackageRequest> {
     let mut profile = None;
     let mut project = None;
+    let mut release = false;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,6 +110,7 @@ fn parse_package_request(args: impl Iterator<Item = String>) -> EngineResult<Pac
                     .ok_or_else(|| EngineError::config("expected value after --project"))?;
                 project = Some(PathBuf::from(value));
             }
+            "--release" => release = true,
             value if value.starts_with("--") => {
                 return Err(EngineError::config(format!(
                     "unsupported package flag `{value}`"
@@ -133,28 +136,42 @@ fn parse_package_request(args: impl Iterator<Item = String>) -> EngineResult<Pac
         None => profile_from_project_config(&project)?,
     };
 
-    Ok(PackageRequest { profile, project })
+    Ok(PackageRequest {
+        profile,
+        project,
+        release,
+    })
 }
 
-fn build_profile(profile: Profile) -> EngineResult<()> {
-    cargo([
+fn build_profile(profile: Profile, release: bool) -> EngineResult<()> {
+    let mut base_args = vec![
         "build",
         "-p",
         "runtime-min",
         "--no-default-features",
         "--features",
         profile.name(),
-    ])?;
+    ];
+    if release {
+        base_args.push("--release");
+    }
+    cargo_vec(&base_args)?;
 
     match profile {
-        Profile::Editor | Profile::AgentTools | Profile::DevFull => cargo([
-            "build",
-            "-p",
-            "aster",
-            "--no-default-features",
-            "--features",
-            profile.name(),
-        ]),
+        Profile::Editor | Profile::AgentTools | Profile::DevFull => {
+            let mut aster_args = vec![
+                "build",
+                "-p",
+                "aster",
+                "--no-default-features",
+                "--features",
+                profile.name(),
+            ];
+            if release {
+                aster_args.push("--release");
+            }
+            cargo_vec(&aster_args)
+        }
         _ => Ok(()),
     }
 }
@@ -171,15 +188,19 @@ fn package(request: PackageRequest) -> EngineResult<()> {
         }
     }
 
-    build_profile(profile)?;
-    cargo([
+    build_profile(profile, request.release)?;
+    let mut aster_args = vec![
         "build",
         "-p",
         "aster",
         "--no-default-features",
         "--features",
         profile.name(),
-    ])?;
+    ];
+    if request.release {
+        aster_args.push("--release");
+    }
+    cargo_vec(&aster_args)?;
 
     let package_root = PathBuf::from("target")
         .join("aster-packages")
@@ -193,8 +214,9 @@ fn package(request: PackageRequest) -> EngineResult<()> {
         source,
     })?;
 
+    let build_profile_dir = if request.release { "release" } else { "debug" };
     let cli_source = PathBuf::from("target")
-        .join("debug")
+        .join(build_profile_dir)
         .join(executable_name("aster"));
     let cli_dest = bin_dir.join(executable_name("aster"));
     fs::copy(&cli_source, &cli_dest).map_err(|source| EngineError::Filesystem {
@@ -430,6 +452,22 @@ const fn editor_executable_dir() -> &'static str {
         "Contents/MacOS"
     } else {
         "bin"
+    }
+}
+
+fn cargo_vec(args: &[&str]) -> EngineResult<()> {
+    let status = Command::new("cargo")
+        .args(args)
+        .status()
+        .map_err(|source| EngineError::Filesystem {
+            path: "cargo".into(),
+            source,
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(EngineError::other(format!("cargo exited with {status}")))
     }
 }
 

@@ -147,9 +147,8 @@ fn low_shelf_coeffs(cutoff: f32, gain_db: f32, sample_rate: f32) -> (f32, f32, f
     let a = 10.0_f32.powf(gain_db / 40.0);
     let cos_w0 = w0.cos();
     let sin_w0 = w0.sin();
-    let _alpha = sin_w0 / 2.0 * ((a + 1.0 / a) * (1.0 / 1.0 - 1.0) + 2.0).sqrt();
-    // Simplified: use standard RBJ shelf formulas
-    let s_alpha = sin_w0 * ((a + 1.0) * (1.0 / 1.0 - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
+    let s = 1.0; // shelf slope parameter
+    let s_alpha = sin_w0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
     let two_sqrt_a_alpha = 2.0 * a.sqrt() * s_alpha;
 
     let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
@@ -188,7 +187,8 @@ fn high_shelf_coeffs(cutoff: f32, gain_db: f32, sample_rate: f32) -> (f32, f32, 
     let a = 10.0_f32.powf(gain_db / 40.0);
     let cos_w0 = w0.cos();
     let sin_w0 = w0.sin();
-    let s_alpha = sin_w0 * ((a + 1.0) * (1.0 / 1.0 - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
+    let s = 1.0; // shelf slope parameter
+    let s_alpha = sin_w0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
     let two_sqrt_a_alpha = 2.0 * a.sqrt() * s_alpha;
 
     let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
@@ -593,5 +593,296 @@ impl AudioEffect for FilterEffect {
             "resonance" => self.resonance = value.clamp(0.1, 10.0),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_finite(samples: &[f32]) {
+        for &s in samples {
+            assert!(s.is_finite(), "non-finite sample value: {s}");
+        }
+    }
+
+    // ── Biquad coefficient tests ──
+
+    #[test]
+    fn low_shelf_coeffs_are_finite() {
+        let (b0, b1, b2, a1, a2) = low_shelf_coeffs(300.0, 0.0, 44100.0);
+        assert!(b0.is_finite() && b1.is_finite() && b2.is_finite());
+        assert!(a1.is_finite() && a2.is_finite());
+    }
+
+    #[test]
+    fn low_shelf_coeffs_with_gain() {
+        // ±12 dB should produce different b0 coefficients
+        let (b0_boost, ..) = low_shelf_coeffs(300.0, 12.0, 44100.0);
+        let (b0_cut, ..) = low_shelf_coeffs(300.0, -12.0, 44100.0);
+        assert!(b0_boost > 1.0, "boost should amplify");
+        assert!(b0_cut < 1.0, "cut should attenuate");
+    }
+
+    #[test]
+    fn peaking_coeffs_are_finite() {
+        let (b0, b1, b2, a1, a2) = peaking_coeffs(1000.0, 6.0, 0.7, 44100.0);
+        assert!(b0.is_finite() && b1.is_finite() && b2.is_finite());
+        assert!(a1.is_finite() && a2.is_finite());
+    }
+
+    #[test]
+    fn high_shelf_coeffs_are_finite() {
+        let (b0, b1, b2, a1, a2) = high_shelf_coeffs(5000.0, 0.0, 44100.0);
+        assert!(b0.is_finite() && b1.is_finite() && b2.is_finite());
+        assert!(a1.is_finite() && a2.is_finite());
+    }
+
+    #[test]
+    fn high_shelf_coeffs_with_gain() {
+        let (b0_boost, ..) = high_shelf_coeffs(5000.0, 12.0, 44100.0);
+        let (b0_cut, ..) = high_shelf_coeffs(5000.0, -12.0, 44100.0);
+        assert!(b0_boost > 1.0, "boost should amplify");
+        assert!(b0_cut < 1.0, "cut should attenuate");
+    }
+
+    #[test]
+    fn coeffs_handle_edge_frequencies() {
+        // Very low frequency
+        let (b0, b1, b2, a1, a2) = low_shelf_coeffs(20.0, 0.0, 44100.0);
+        assert!(b0.is_finite() && b1.is_finite() && b2.is_finite());
+        assert!(a1.is_finite() && a2.is_finite());
+
+        // Near Nyquist
+        let (b0, b1, b2, a1, a2) = low_shelf_coeffs(20000.0, 0.0, 44100.0);
+        assert!(b0.is_finite() && b1.is_finite() && b2.is_finite());
+        assert!(a1.is_finite() && a2.is_finite());
+    }
+
+    // ── Effect smoke tests ──
+
+    #[test]
+    fn reverb_process_produces_finite_output() {
+        let mut reverb = ReverbEffect::new();
+        let mut samples = vec![0.5; 128];
+        reverb.process(&mut samples, 1.0 / 60.0);
+        assert_finite(&samples);
+    }
+
+    #[test]
+    fn eq_effect_processes_without_panic() {
+        let mut eq = EqEffect::default();
+        let mut samples = vec![0.25; 128];
+        eq.process(&mut samples, 1.0 / 60.0);
+        assert_finite(&samples);
+    }
+
+    #[test]
+    fn eq_effect_responds_to_gain_changes() {
+        let mut eq = EqEffect::default();
+        let mut flat = vec![0.5; 256];
+        eq.process(&mut flat, 1.0 / 60.0);
+
+        let mut boosted = vec![0.5; 256];
+        eq.low_gain = 1.0; // +12 dB low shelf
+        eq.process(&mut boosted, 1.0 / 60.0);
+
+        // Boosted low shelf should change at least one sample
+        let diff = flat
+            .iter()
+            .zip(boosted.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(diff, "EQ with low_gain=1.0 should alter the signal");
+    }
+
+    #[test]
+    fn compressor_process_produces_finite_output() {
+        let mut comp = CompressorEffect::default();
+        let mut samples = vec![0.8; 128];
+        comp.process(&mut samples, 1.0 / 60.0);
+        assert_finite(&samples);
+    }
+
+    #[test]
+    fn compressor_reduces_loud_signals() {
+        let mut comp = CompressorEffect::default();
+        comp.threshold = 0.3;
+        comp.ratio = 4.0;
+        let mut samples = vec![0.9; 512];
+        comp.process(&mut samples, 1.0 / 60.0);
+        // Envelope needs time to build up; test the tail
+        let tail_rms = (samples[256..].iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt();
+        assert!(
+            tail_rms < 0.9,
+            "compressor should reduce amplitude of loud signal"
+        );
+    }
+
+    #[test]
+    fn limiter_clamps_to_ceiling() {
+        let mut limiter = LimiterEffect::default();
+        limiter.ceiling = 0.5;
+        let mut samples = vec![1.0, -1.0, 0.3, -0.3];
+        limiter.process(&mut samples, 1.0 / 60.0);
+        for &s in &samples {
+            assert!(s.abs() <= 0.51, "sample {s} exceeds ceiling");
+        }
+    }
+
+    #[test]
+    fn delay_process_produces_finite_output() {
+        let mut delay = DelayEffect::new(0.1);
+        let mut samples = vec![0.3; 128];
+        delay.process(&mut samples, 1.0 / 60.0);
+        assert_finite(&samples);
+    }
+
+    #[test]
+    fn chorus_process_produces_finite_output() {
+        let mut chorus = ChorusEffect::default();
+        let mut samples = vec![0.3; 128];
+        chorus.process(&mut samples, 1.0 / 60.0);
+        assert_finite(&samples);
+    }
+
+    #[test]
+    fn filter_low_pass_attenuates_high_frequencies() {
+        let mut filter = FilterEffect::default();
+        filter.filter_type = FilterType::LowPass;
+        filter.cutoff = 500.0;
+        filter.resonance = 0.7;
+
+        // Generate a tone near cutoff (should pass)
+        let low_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 400.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let low_rms = {
+            let mut sig = low_tone.clone();
+            filter.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        // Generate a tone far above cutoff (should be attenuated)
+        let mut reset = FilterEffect::default();
+        reset.filter_type = FilterType::LowPass;
+        reset.cutoff = 500.0;
+        reset.resonance = 0.7;
+        let high_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 4000.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let high_rms = {
+            let mut sig = high_tone;
+            reset.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        // Low tone should have more energy than high tone through LPF
+        assert!(
+            low_rms > high_rms,
+            "LPF should pass low frequencies more than high: low={low_rms}, high={high_rms}"
+        );
+    }
+
+    #[test]
+    fn filter_high_pass_attenuates_low_frequencies() {
+        let mut filter = FilterEffect::default();
+        filter.filter_type = FilterType::HighPass;
+        filter.cutoff = 2000.0;
+        filter.resonance = 0.7;
+
+        let low_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 200.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let low_rms = {
+            let mut sig = low_tone.clone();
+            filter.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        let mut reset = FilterEffect::default();
+        reset.filter_type = FilterType::HighPass;
+        reset.cutoff = 2000.0;
+        reset.resonance = 0.7;
+        let high_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 4000.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let high_rms = {
+            let mut sig = high_tone;
+            reset.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        assert!(
+            low_rms < high_rms,
+            "HPF should pass high frequencies more than low: low={low_rms}, high={high_rms}"
+        );
+    }
+
+    #[test]
+    fn filter_band_pass_rejects_extremes() {
+        let mut filter = FilterEffect::default();
+        filter.filter_type = FilterType::BandPass;
+        filter.cutoff = 1000.0;
+        filter.resonance = 0.7;
+
+        let mid_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let mid_rms = {
+            let mut sig = mid_tone.clone();
+            filter.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        let mut reset = FilterEffect::default();
+        reset.filter_type = FilterType::BandPass;
+        reset.cutoff = 1000.0;
+        reset.resonance = 0.7;
+        let low_tone: Vec<f32> = (0..256)
+            .map(|i| (2.0 * std::f32::consts::PI * 50.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let low_rms = {
+            let mut sig = low_tone;
+            reset.process(&mut sig, 1.0 / 60.0);
+            (sig.iter().map(|s| s * s).sum::<f32>() / 256.0).sqrt()
+        };
+
+        assert!(
+            mid_rms > low_rms,
+            "BPF should pass center frequencies more than low: mid={mid_rms}, low={low_rms}"
+        );
+    }
+
+    #[test]
+    fn set_parameter_on_all_effects() {
+        let effects: &mut [&mut dyn AudioEffect] = &mut [
+            &mut ReverbEffect::new(),
+            &mut EqEffect::default(),
+            &mut CompressorEffect::default(),
+            &mut LimiterEffect::default(),
+            &mut DelayEffect::new(0.1),
+            &mut ChorusEffect::default(),
+            &mut FilterEffect::default(),
+        ];
+        for effect in effects.iter_mut() {
+            effect.set_parameter("nonexistent", 0.5); // must not panic
+        }
+    }
+
+    #[test]
+    fn zero_input_produces_zero_output_for_linear_effects() {
+        // Effects with no internal excitation (delay, reverb with 0 feedback)
+        // should output silence for silence input once the buffer drains.
+        let mut delay = DelayEffect::new(0.1);
+        delay.feedback = 0.0;
+        delay.mix = 0.5;
+        let mut zeros = vec![0.0; 4096]; // long enough to flush delay buffer
+        delay.process(&mut zeros, 1.0 / 60.0);
+        // Tail should be silent after the delay line is flushed
+        let tail_silent = zeros[2048..].iter().all(|&s| s.abs() < 1e-6);
+        assert!(
+            tail_silent,
+            "delay with zero feedback should eventually be silent"
+        );
     }
 }
