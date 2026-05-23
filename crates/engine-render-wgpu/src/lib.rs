@@ -518,105 +518,54 @@ impl WgpuRenderDevice {
     ///
     /// Use this when the host composites the result into its own UI (e.g., egui).
     pub fn render_world_offscreen(&mut self, world: &RenderWorld) -> EngineResult<()> {
-        let batches = self.prepare_render_batches(world);
+        let handle = self.default_target.handle;
         let (tw, th) = self.default_target.size();
-        let aspect = tw as f32 / th.max(1) as f32;
-        let uniform = camera_uniform_from_world(world, aspect);
-        self.queue
-            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let lighting = lighting_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
-
-        let target = self
-            .targets
-            .get(&self.default_target.handle)
-            .ok_or_else(|| EngineError::invalid_handle("default wgpu target is missing"))?;
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("aster offscreen render world encoder"),
-            });
-        encode_batched_forward_pass(
-            &mut encoder,
-            &target.color_view,
-            target.depth_view.as_ref(),
-            &self.pipeline,
-            &self.camera_bind_group,
-            &self.mesh_cache,
-            &self.vertex_buffer,
-            &self.index_buffer,
-            &self.instance_buffer,
-            &batches,
-        );
-        encode_grid_pass(
-            &mut encoder,
-            &target.color_view,
-            target.depth_view.as_ref(),
-            &self.grid_pipeline,
-            &self.grid_bind_group,
-            &self.grid_vertex_buffer,
-            self.grid_vertex_count,
-        );
-        self.queue.submit(std::iter::once(encoder.finish()));
-        self.submitted_worlds = self.submitted_worlds.saturating_add(1);
-        Ok(())
+        self.render_world_to_target(
+            world,
+            handle,
+            tw as f32 / th.max(1) as f32,
+            "aster offscreen render world encoder",
+            "default wgpu target is missing",
+        )
     }
 
     /// Renders a render world to the game offscreen target, bypassing any surface.
     ///
     /// Use this when the host composites the game view result into its own UI (e.g., egui).
     pub fn render_world_offscreen_game(&mut self, world: &RenderWorld) -> EngineResult<()> {
-        let batches = self.prepare_render_batches(world);
+        let handle = self.game_target.handle;
         let (tw, th) = self.game_target.size();
-        let aspect = tw as f32 / th.max(1) as f32;
-        let uniform = camera_uniform_from_world(world, aspect);
-        self.queue
-            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let lighting = lighting_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
-
-        let target = self
-            .targets
-            .get(&self.game_target.handle)
-            .ok_or_else(|| EngineError::invalid_handle("game wgpu target is missing"))?;
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("aster game offscreen render world encoder"),
-            });
-        encode_batched_forward_pass(
-            &mut encoder,
-            &target.color_view,
-            target.depth_view.as_ref(),
-            &self.pipeline,
-            &self.camera_bind_group,
-            &self.mesh_cache,
-            &self.vertex_buffer,
-            &self.index_buffer,
-            &self.instance_buffer,
-            &batches,
-        );
-        encode_grid_pass(
-            &mut encoder,
-            &target.color_view,
-            target.depth_view.as_ref(),
-            &self.grid_pipeline,
-            &self.grid_bind_group,
-            &self.grid_vertex_buffer,
-            self.grid_vertex_count,
-        );
-        self.queue.submit(std::iter::once(encoder.finish()));
-        self.submitted_worlds = self.submitted_worlds.saturating_add(1);
-        Ok(())
+        self.render_world_to_target(
+            world,
+            handle,
+            tw as f32 / th.max(1) as f32,
+            "aster game offscreen render world encoder",
+            "game wgpu target is missing",
+        )
     }
 
     /// Renders a render world to the preview offscreen target.
     pub fn render_world_offscreen_preview(&mut self, world: &RenderWorld) -> EngineResult<()> {
-        let batches = self.prepare_render_batches(world);
+        let handle = self.preview_target.handle;
         let (tw, th) = self.preview_target.size();
-        let aspect = tw as f32 / th.max(1) as f32;
+        self.render_world_to_target(
+            world,
+            handle,
+            tw as f32 / th.max(1) as f32,
+            "aster preview offscreen render world encoder",
+            "preview wgpu target is missing",
+        )
+    }
+
+    fn render_world_to_target(
+        &mut self,
+        world: &RenderWorld,
+        target_handle: Handle,
+        aspect: f32,
+        encoder_label: &str,
+        missing_error: &str,
+    ) -> EngineResult<()> {
+        let batches = self.prepare_render_batches(world);
         let uniform = camera_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
@@ -626,12 +575,12 @@ impl WgpuRenderDevice {
 
         let target = self
             .targets
-            .get(&self.preview_target.handle)
-            .ok_or_else(|| EngineError::invalid_handle("preview wgpu target is missing"))?;
+            .get(&target_handle)
+            .ok_or_else(|| EngineError::invalid_handle(missing_error))?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("aster preview offscreen render world encoder"),
+                label: Some(encoder_label),
             });
         encode_batched_forward_pass(
             &mut encoder,
@@ -1159,20 +1108,7 @@ impl WgpuRenderDevice {
             height: h,
             ..self.default_target.desc.clone()
         };
-        let CreatedTarget(color, color_view, depth, depth_view, new_target) =
-            create_target(&self.device, &mut self.target_allocator, desc)?;
-        self.targets.remove(&old_handle);
-        self.targets.insert(
-            new_target.handle,
-            GpuTarget {
-                _color: color,
-                color_view,
-                _depth: depth,
-                depth_view,
-                _desc: new_target.desc.clone(),
-            },
-        );
-        self.default_target = new_target;
+        self.default_target = self.create_resized_target(old_handle, desc)?;
         Ok(())
     }
 
@@ -1191,20 +1127,7 @@ impl WgpuRenderDevice {
             height: h,
             ..self.game_target.desc.clone()
         };
-        let CreatedTarget(color, color_view, depth, depth_view, new_target) =
-            create_target(&self.device, &mut self.target_allocator, desc)?;
-        self.targets.remove(&old_handle);
-        self.targets.insert(
-            new_target.handle,
-            GpuTarget {
-                _color: color,
-                color_view,
-                _depth: depth,
-                depth_view,
-                _desc: new_target.desc.clone(),
-            },
-        );
-        self.game_target = new_target;
+        self.game_target = self.create_resized_target(old_handle, desc)?;
         Ok(())
     }
 
@@ -1223,6 +1146,15 @@ impl WgpuRenderDevice {
             height: h,
             ..self.preview_target.desc.clone()
         };
+        self.preview_target = self.create_resized_target(old_handle, desc)?;
+        Ok(())
+    }
+
+    fn create_resized_target(
+        &mut self,
+        old_handle: Handle,
+        desc: RenderTargetDesc,
+    ) -> EngineResult<RenderTarget> {
         let CreatedTarget(color, color_view, depth, depth_view, new_target) =
             create_target(&self.device, &mut self.target_allocator, desc)?;
         self.targets.remove(&old_handle);
@@ -1236,8 +1168,7 @@ impl WgpuRenderDevice {
                 _desc: new_target.desc.clone(),
             },
         );
-        self.preview_target = new_target;
-        Ok(())
+        Ok(new_target)
     }
 
     /// Resizes the configured presentation surface.

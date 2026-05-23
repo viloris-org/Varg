@@ -298,18 +298,12 @@ pub fn handle_transform_tool_shortcuts(ctx: &egui::Context, ui_state: &mut Shell
 
     let matched = ctx.input(|input| {
         if input.modifiers.any() {
-            None
-        } else if input.key_pressed(egui::Key::Q) {
-            Some(EditorTransformTool::View)
-        } else if input.key_pressed(egui::Key::W) {
-            Some(EditorTransformTool::Move)
-        } else if input.key_pressed(egui::Key::E) {
-            Some(EditorTransformTool::Rotate)
-        } else if input.key_pressed(egui::Key::R) {
-            Some(EditorTransformTool::Scale)
-        } else {
-            None
+            return None;
         }
+        [egui::Key::Q, egui::Key::W, egui::Key::E, egui::Key::R]
+            .into_iter()
+            .find(|&key| input.key_pressed(key))
+            .and_then(transform_tool_for_shortcut_key)
     });
 
     if let Some(tool) = matched {
@@ -317,7 +311,6 @@ pub fn handle_transform_tool_shortcuts(ctx: &egui::Context, ui_state: &mut Shell
     }
 }
 
-#[cfg(test)]
 pub(crate) fn transform_tool_for_shortcut_key(key: egui::Key) -> Option<EditorTransformTool> {
     match key {
         egui::Key::Q => Some(EditorTransformTool::View),

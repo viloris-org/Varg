@@ -1072,7 +1072,7 @@ fn paint_and_handle_rotate_gizmo(
                         selected_id,
                         TransformEdit::Rotate(axis.direction, delta),
                     );
-                    mark_drag_dirty(ui_state, selected_id, shell);
+                    mark_drag_dirty(ui_state);
                 }
                 if let Some(ref mut drag) = ui_state.viewport_transform_drag {
                     drag.rotate_prev_angle = current_angle;
@@ -1175,11 +1175,7 @@ fn paint_rotation_ring(
     color: Color32,
     stroke_width: f32,
 ) {
-    let mut tangent = normal.cross(EngineVec3::new(0.0, 1.0, 0.0)).normalized();
-    if tangent.length_squared() <= f32::EPSILON {
-        tangent = normal.cross(EngineVec3::new(1.0, 0.0, 0.0)).normalized();
-    }
-    let bitangent = normal.cross(tangent).normalized();
+    let (tangent, bitangent) = rotation_tangent_frame(normal);
     // Glow pass: wider, semi-transparent
     let glow_alpha = (color.a() as f32 * 0.3) as u8;
     let glow_color = Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), glow_alpha);
@@ -1302,7 +1298,7 @@ fn handle_move_drag(
                 let mut transform = drag.start_transform;
                 transform.translation += delta;
                 set_selected_transform(shell, selected_id, transform);
-                mark_drag_dirty(ui_state, selected_id, shell);
+                mark_drag_dirty(ui_state);
                 update_move_drag_delta_label(ui_state, delta);
             }
         }
@@ -1406,7 +1402,7 @@ fn handle_transform_axis_drag(
         let edit_result = edit(world_delta);
         let snapped = snap_transform_edit(edit_result, ui_state);
         apply_transform_edit(shell, selected_id, snapped);
-        mark_drag_dirty(ui_state, selected_id, shell);
+        mark_drag_dirty(ui_state);
         update_drag_delta_label(ui_state, selected_id, shell);
         edge_scroll_camera(ui, ui_state, rect);
         ui.ctx().request_repaint();
@@ -1436,7 +1432,7 @@ fn handle_transform_screen_drag(
         let edit_result = edit(scaled_delta);
         let snapped = snap_transform_edit(edit_result, ui_state);
         apply_transform_edit(shell, selected_id, snapped);
-        mark_drag_dirty(ui_state, selected_id, shell);
+        mark_drag_dirty(ui_state);
         update_drag_delta_label(ui_state, selected_id, shell);
         edge_scroll_camera(ui, ui_state, viewport_rect);
         ui.ctx().request_repaint();
@@ -1555,7 +1551,7 @@ fn cancel_viewport_drag(shell: &mut EditorShell, ui_state: &mut ShellUiState) {
     ui_state.drag_delta_label = None;
 }
 
-fn mark_drag_dirty(ui_state: &mut ShellUiState, _selected_id: EntityId, _shell: &EditorShell) {
+fn mark_drag_dirty(ui_state: &mut ShellUiState) {
     ui_state.drag_dirty = true;
 }
 
@@ -1738,7 +1734,7 @@ fn is_player_entity(shell: &EditorShell, entity_id: EntityId) -> bool {
     let Some(object) = project.scene.object(entity) else {
         return false;
     };
-    object.name.to_lowercase().contains("player")
+    object.name.to_ascii_lowercase().contains("player")
 }
 
 fn try_ground_clamp_transform(transform: &mut Transform) {
@@ -1921,18 +1917,10 @@ fn paint_scene_guides(
                 );
                 world_delta = apply_precision_vec3(world_delta, ui);
                 if is_snap_active(ui_state) {
-                    if let Some(snap) = ui_state.editor_snap_settings.move_snap {
-                        let current = guide.position + world_delta;
-                        let snapped = EngineVec3::new(
-                            (current.x / snap).round() * snap,
-                            (current.y / snap).round() * snap,
-                            (current.z / snap).round() * snap,
-                        );
-                        let snap_delta = snapped - guide.position;
-                        translate_scene_guide_by_delta(shell, guide.id, snap_delta);
-                    } else {
-                        translate_scene_guide_by_delta(shell, guide.id, world_delta);
-                    }
+                    let current = guide.position + world_delta;
+                    let snapped = snap_position(current, &ui_state.editor_snap_settings);
+                    let snap_delta = snapped - guide.position;
+                    translate_scene_guide_by_delta(shell, guide.id, snap_delta);
                 } else {
                     translate_scene_guide_by_delta(shell, guide.id, world_delta);
                 }
@@ -2046,12 +2034,8 @@ fn aim_scene_guide(
         }
         SceneGuideKind::Camera => raw_direction,
     };
-    let up = match guide.kind {
-        SceneGuideKind::Light => EngineVec3::new(0.0, 1.0, 0.0),
-        _ => EngineVec3::new(0.0, 1.0, 0.0),
-    };
     update_scene_guide_transform(shell, guide.id, |transform| {
-        transform.rotation = quat_look_at(direction, up);
+        transform.rotation = quat_look_at(direction, EngineVec3::new(0.0, 1.0, 0.0));
     });
 }
 

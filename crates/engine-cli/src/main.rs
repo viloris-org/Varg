@@ -423,6 +423,42 @@ fn open_editor() -> EngineResult<()> {
         store: FileEditorStore,
     }
 
+    fn register_viewport_texture(
+        renderer: &mut egui_wgpu::Renderer,
+        device: &wgpu::Device,
+        cached_id: &mut Option<egui::TextureId>,
+        output: &mut Option<engine_editor_ui::ViewportTexture>,
+        texture_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let egui_texture_id = if let Some(texture_id) = *cached_id {
+            renderer.update_egui_texture_from_wgpu_texture(
+                device,
+                texture_view,
+                wgpu::FilterMode::Linear,
+                texture_id,
+            );
+            texture_id
+        } else {
+            let texture_id = renderer.register_native_texture(
+                device,
+                texture_view,
+                wgpu::FilterMode::Linear,
+            );
+            *cached_id = Some(texture_id);
+            texture_id
+        };
+        let egui::TextureId::User(texture_id) = egui_texture_id else {
+            return;
+        };
+        *output = Some(engine_editor_ui::ViewportTexture {
+            id: texture_id,
+            width,
+            height,
+        });
+    }
+
     impl App {
         /// Renders the editor scene view to an offscreen texture and registers it
         /// for display in the next egui frame.
@@ -455,33 +491,15 @@ fn open_editor() -> EngineResult<()> {
             }
 
             let (width, height) = wgpu_dev.default_target_size();
-            let egui_texture_id = if let Some(texture_id) = self.scene_view_texture_id {
-                render_state.renderer.update_egui_texture_from_wgpu_texture(
-                    &render_state.device,
-                    wgpu_dev.default_target_view(),
-                    wgpu::FilterMode::Linear,
-                    texture_id,
-                );
-                texture_id
-            } else {
-                let texture_id = render_state.renderer.register_native_texture(
-                    &render_state.device,
-                    wgpu_dev.default_target_view(),
-                    wgpu::FilterMode::Linear,
-                );
-                self.scene_view_texture_id = Some(texture_id);
-                texture_id
-            };
-
-            let egui::TextureId::User(texture_id) = egui_texture_id else {
-                return;
-            };
-
-            self.shell_ui.scene_view_texture = Some(engine_editor_ui::ViewportTexture {
-                id: texture_id,
+            register_viewport_texture(
+                &mut render_state.renderer,
+                &render_state.device,
+                &mut self.scene_view_texture_id,
+                &mut self.shell_ui.scene_view_texture,
+                wgpu_dev.default_target_view(),
                 width,
                 height,
-            });
+            );
         }
 
         /// Renders the game view to an offscreen texture and registers it
@@ -524,33 +542,15 @@ fn open_editor() -> EngineResult<()> {
             }
 
             let (width, height) = wgpu_dev.game_target_size();
-            let egui_texture_id = if let Some(texture_id) = self.game_view_texture_id {
-                render_state.renderer.update_egui_texture_from_wgpu_texture(
-                    &render_state.device,
-                    wgpu_dev.game_target_view(),
-                    wgpu::FilterMode::Linear,
-                    texture_id,
-                );
-                texture_id
-            } else {
-                let texture_id = render_state.renderer.register_native_texture(
-                    &render_state.device,
-                    wgpu_dev.game_target_view(),
-                    wgpu::FilterMode::Linear,
-                );
-                self.game_view_texture_id = Some(texture_id);
-                texture_id
-            };
-
-            let egui::TextureId::User(texture_id) = egui_texture_id else {
-                return;
-            };
-
-            self.shell_ui.game_view_texture = Some(engine_editor_ui::ViewportTexture {
-                id: texture_id,
+            register_viewport_texture(
+                &mut render_state.renderer,
+                &render_state.device,
+                &mut self.game_view_texture_id,
+                &mut self.shell_ui.game_view_texture,
+                wgpu_dev.game_target_view(),
                 width,
                 height,
-            });
+            );
         }
 
         /// Renders the selected-camera preview for the Inspector.
@@ -577,33 +577,15 @@ fn open_editor() -> EngineResult<()> {
             }
 
             let (width, height) = wgpu_dev.preview_target_size();
-            let egui_texture_id = if let Some(texture_id) = self.camera_preview_texture_id {
-                render_state.renderer.update_egui_texture_from_wgpu_texture(
-                    &render_state.device,
-                    wgpu_dev.preview_target_view(),
-                    wgpu::FilterMode::Linear,
-                    texture_id,
-                );
-                texture_id
-            } else {
-                let texture_id = render_state.renderer.register_native_texture(
-                    &render_state.device,
-                    wgpu_dev.preview_target_view(),
-                    wgpu::FilterMode::Linear,
-                );
-                self.camera_preview_texture_id = Some(texture_id);
-                texture_id
-            };
-
-            let egui::TextureId::User(texture_id) = egui_texture_id else {
-                return;
-            };
-
-            self.shell_ui.camera_preview_texture = Some(engine_editor_ui::ViewportTexture {
-                id: texture_id,
+            register_viewport_texture(
+                &mut render_state.renderer,
+                &render_state.device,
+                &mut self.camera_preview_texture_id,
+                &mut self.shell_ui.camera_preview_texture,
+                wgpu_dev.preview_target_view(),
                 width,
                 height,
-            });
+            );
         }
 
         fn handle_play_mode_request(&mut self) {
