@@ -23,7 +23,7 @@ Use Rust 2021 and keep code formatted with `cargo fmt --workspace`. Prefer expli
 
 Use Rust’s built-in test framework. Put crate integration tests in `crates/<crate>/tests/` and unit tests near the code they cover. Name tests after behavior, for example `loads_runtime_services` or `rejects_invalid_manifest`. When changing feature-gated code, run the targeted feature command as well as the full workspace tests.
 
-Before finishing any task, run `cargo test --workspace` to check for regressions.
+Before finishing any task, run `cargo fmt --check` to verify formatting and `cargo test --workspace` to check for regressions.
 
 ## Commit & Pull Request Guidelines
 

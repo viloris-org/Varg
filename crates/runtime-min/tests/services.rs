@@ -151,7 +151,14 @@ mod editor_tests {
     fn core_commands_are_registered() {
         let mut registry = CommandRegistry::default();
         register_core_commands(&mut registry);
-        for id in ["play.toggle", "play.pause", "play.stop", "assets.reload", "scene.save", "project.build"] {
+        for id in [
+            "play.toggle",
+            "play.pause",
+            "play.stop",
+            "assets.reload",
+            "scene.save",
+            "project.build",
+        ] {
             assert!(registry.get(id).is_some(), "missing command: {id}");
         }
     }
