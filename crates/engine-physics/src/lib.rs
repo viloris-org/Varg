@@ -811,7 +811,7 @@ impl PhysicsBackend for SimplePhysicsBackend {
                 body.transform.translation += body.velocity * dt;
             }
         }
-        self.solve_joints();
+        self.solve_joints(dt);
         self.update_contacts();
     }
 
@@ -1091,7 +1091,7 @@ impl PhysicsBackend for SimplePhysicsBackend {
 }
 
 impl SimplePhysicsBackend {
-    fn solve_joints(&mut self) {
+    fn solve_joints(&mut self, dt: f32) {
         let joints = self.joints.clone();
         for (_handle, desc) in &joints {
             match &desc.joint_type {
@@ -1132,17 +1132,22 @@ impl SimplePhysicsBackend {
                         let distance = delta.length();
                         if distance > f32::EPSILON {
                             let direction = delta / distance;
-                            let force = direction * ((distance - rest_length) * *stiffness);
+                            // Scale force and damping by dt for frame-rate independence
+                            let dt = dt.max(0.0001);
+                            let force = direction
+                                * ((distance - rest_length) * *stiffness * dt);
+                            let damping_factor =
+                                (1.0 - (*damping).min(1.0)).powf(dt * 60.0);
                             if let Some(body) = self.bodies.get_mut(&desc.body_a) {
                                 if body.desc.kind == BodyKind::Dynamic {
                                     body.velocity += force;
-                                    body.velocity = body.velocity * (1.0 - (*damping).min(1.0));
+                                    body.velocity = body.velocity * damping_factor;
                                 }
                             }
                             if let Some(body) = self.bodies.get_mut(&desc.body_b) {
                                 if body.desc.kind == BodyKind::Dynamic {
-                                    body.velocity = body.velocity - force;
-                                    body.velocity = body.velocity * (1.0 - (*damping).min(1.0));
+                                    body.velocity -= force;
+                                    body.velocity = body.velocity * damping_factor;
                                 }
                             }
                         }

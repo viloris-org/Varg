@@ -107,10 +107,12 @@ impl RenderWorld2D {
     pub fn extract(scene: &engine_ecs::Scene) -> Self {
         let mut world = RenderWorld2D::default();
 
-        for (_entity, obj) in scene.iter_objects() {
+        for (entity, obj) in scene.iter_objects() {
             if !obj.active {
                 continue;
             }
+
+            let transform = scene.transforms().local(entity).unwrap_or_default();
 
             for component in &obj.components {
                 match component {
@@ -121,7 +123,7 @@ impl RenderWorld2D {
                             .unwrap_or_default();
                         world.sprites.push(RenderSprite {
                             object: obj.id,
-                            transform: Transform::IDENTITY,
+                            transform,
                             color: sprite.color,
                             texture: texture_name,
                             order_in_layer: sprite.order_in_layer,
@@ -137,7 +139,7 @@ impl RenderWorld2D {
                             .unwrap_or_default();
                         world.tilemaps.push(RenderTileMap {
                             object: obj.id,
-                            transform: Transform::IDENTITY,
+                            transform,
                             tileset: tileset_name,
                             tile_size: tilemap.tile_size,
                             map_size: tilemap.map_size,
@@ -147,14 +149,14 @@ impl RenderWorld2D {
                     engine_ecs::ComponentData::Camera2D(cam) => {
                         world.camera = Some(RenderCamera2D {
                             object: obj.id,
-                            transform: Transform::IDENTITY,
+                            transform,
                             zoom: cam.zoom,
                         });
                     }
                     engine_ecs::ComponentData::Light2D(light) => {
                         world.lights.push(RenderLight2D {
                             object: obj.id,
-                            transform: Transform::IDENTITY,
+                            transform,
                             color: light.color,
                             intensity: light.intensity,
                             range: light.range,
@@ -163,7 +165,7 @@ impl RenderWorld2D {
                     engine_ecs::ComponentData::Occluder2D(occluder) => {
                         world.occluders.push(RenderOccluder2D {
                             object: obj.id,
-                            transform: Transform::IDENTITY,
+                            transform,
                             polygon: occluder.polygon.clone(),
                         });
                     }

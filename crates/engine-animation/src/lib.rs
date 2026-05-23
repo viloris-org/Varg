@@ -202,18 +202,19 @@ fn sample_track(track: &AnimationTrack, time: f32) -> Option<KeyframeValue> {
         return Some(track.keyframes.last().unwrap().value.clone());
     }
 
-    for i in 0..track.keyframes.len() - 1 {
-        let k0 = &track.keyframes[i];
-        let k1 = &track.keyframes[i + 1];
-        if time >= k0.time && time <= k1.time {
-            let t = if (k1.time - k0.time).abs() > f32::EPSILON {
-                (time - k0.time) / (k1.time - k0.time)
-            } else {
-                0.0
-            };
-
-            return Some(interpolate_value(&k0.value, &k1.value, t, k0.interpolation));
-        }
+    // Binary search: find first keyframe with time > target
+    let idx = track
+        .keyframes
+        .partition_point(|kf| kf.time <= time);
+    if idx > 0 && idx < track.keyframes.len() {
+        let k0 = &track.keyframes[idx - 1];
+        let k1 = &track.keyframes[idx];
+        let t = if (k1.time - k0.time).abs() > f32::EPSILON {
+            (time - k0.time) / (k1.time - k0.time)
+        } else {
+            0.0
+        };
+        return Some(interpolate_value(&k0.value, &k1.value, t, k0.interpolation));
     }
 
     Some(track.keyframes.last().unwrap().value.clone())

@@ -798,18 +798,41 @@ impl AssetDatabase {
     }
 
     /// Resolves `builtin:/x` or `project:/x` resource references to native paths.
+    ///
+    /// Rejects references whose resolved path escapes the intended root directory.
     pub fn resolve_resource_reference(&self, reference: &str) -> Result<PathBuf, AssetError> {
-        if let Some(rest) = reference.strip_prefix("builtin:/") {
-            Ok(self.builtin_root.join(rest))
+        let (root, rest) = if let Some(rest) = reference.strip_prefix("builtin:/") {
+            (&self.builtin_root, rest)
         } else if let Some(rest) = reference.strip_prefix("project:/") {
-            Ok(self.project_root.join(rest))
+            (&self.project_root, rest)
         } else {
-            Err(AssetError::NotFound {
+            return Err(AssetError::NotFound {
                 diagnostic: AssetDiagnostic::new(
                     "resource reference must use builtin:/ or project:/",
                 ),
-            })
+            });
+        };
+
+        let resolved = root.join(rest);
+        // Canonicalize to resolve ../ components and symlinks.
+        let canonical = resolved.canonicalize().map_err(|_| AssetError::NotFound {
+            diagnostic: AssetDiagnostic::new("resource reference resolves to a non-existent path")
+                .with_path(&resolved),
+        })?;
+        let canonical_root = root.canonicalize().map_err(|_| AssetError::NotFound {
+            diagnostic: AssetDiagnostic::new("root directory does not exist").with_path(root),
+        })?;
+
+        if !canonical.starts_with(&canonical_root) {
+            return Err(AssetError::NotFound {
+                diagnostic: AssetDiagnostic::new(
+                    "resource reference escapes its root directory",
+                )
+                .with_path(&resolved),
+            });
         }
+
+        Ok(canonical)
     }
 
     /// Returns the dependency graph.

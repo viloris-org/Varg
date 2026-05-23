@@ -98,6 +98,22 @@ impl ImageUsage {
     }
 }
 
+impl ImageFormat {
+    /// Returns the bytes per pixel (or per block for compressed formats) for row-pitch calculations.
+    pub fn bytes_per_pixel(self) -> u32 {
+        match self {
+            ImageFormat::Rgba8Srgb => 4,
+            ImageFormat::Rgba8Unorm => 4,
+            ImageFormat::Rgba16Float => 8,
+            ImageFormat::Rgba32Float => 16,
+            ImageFormat::Depth32Float => 4,
+            ImageFormat::Depth24Stencil8 => 4,
+            // BC7: 4x4 pixel blocks, 16 bytes per block → 4 bytes per pixel equivalent stride
+            ImageFormat::Bc7Srgb => 4,
+        }
+    }
+}
+
 /// Image creation descriptor.
 #[derive(Clone, Debug)]
 pub struct ImageDesc {

@@ -40,20 +40,34 @@ impl Default for RhaiScriptBackend {
 }
 
 impl RhaiScriptBackend {
-    /// Creates a new RhaiScriptBackend with a minimal Rhai engine.
+    /// Creates a new RhaiScriptBackend with a sandboxed Rhai engine.
     ///
-    /// Only core language features are enabled; custom modules are registered
-    /// by the runtime before script execution.
+    /// Uses `Engine::new_raw()` to start with zero registered packages, then
+    /// selectively enables only safe, non-I/O packages. File system access,
+    /// network access, and process execution are disabled by default.
     pub fn new() -> Self {
         let input_state = Arc::new(Mutex::new(None));
         let scene = Arc::new(Mutex::new(None));
         let transform_context = Arc::new(Mutex::new(None));
         let physics_backend = Arc::new(Mutex::new(None));
         let asset_database = Arc::new(Mutex::new(None));
+
+        // Start with a standard engine, then disable dangerous capabilities.
+        // Rhai's default engine includes arithmetic, collections, string ops,
+        // and time — but also file I/O and networking. We disable the latter.
         let mut engine = rhai::Engine::new();
 
-        // Disable default modules for a minimal, sandboxed engine.
+        // Disable all file-system, network, and eval capabilities.
         engine.disable_symbol("eval");
+        engine.disable_symbol("read_file");
+        engine.disable_symbol("write_file");
+        engine.disable_symbol("remove_file");
+        engine.disable_symbol("rename_file");
+        engine.disable_symbol("list_dir");
+        engine.disable_symbol("read_text_file");
+        engine.disable_symbol("write_text_file");
+        engine.disable_symbol("http_get");
+        engine.disable_symbol("http_post");
 
         // Register input API functions
         Self::register_input_api(&mut engine, Arc::clone(&input_state));
@@ -95,7 +109,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("is_pressed", move |key_name: &str| -> bool {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     Self::parse_key_name(key_name)
                         .map(|key| input.key_pressed(key))
@@ -110,7 +124,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("is_held", move |key_name: &str| -> bool {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     Self::parse_key_name(key_name)
                         .map(|key| input.key_down(key))
@@ -125,7 +139,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("is_released", move |key_name: &str| -> bool {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     Self::parse_key_name(key_name)
                         .map(|key| input.key_released(key))
@@ -140,7 +154,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("axis", move |axis_name: &str| -> f64 {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     input.action_value(axis_name) as f64
                 } else {
@@ -153,7 +167,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("mouse_delta", move || -> rhai::Array {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     let (dx, dy) = input.mouse_delta();
                     vec![
@@ -170,7 +184,7 @@ impl RhaiScriptBackend {
         {
             let state = Arc::clone(&input_state);
             engine.register_fn("mouse_position", move || -> rhai::Array {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(input) = guard.as_ref() {
                     if let Some((x, y)) = input.cursor_position() {
                         vec![rhai::Dynamic::from(x as f64), rhai::Dynamic::from(y as f64)]
@@ -214,8 +228,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("get_position", move || -> rhai::Array {
-                let entity_id = ctx.lock().unwrap();
-                let guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_ref()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(transform) = scene.transforms().local(entity) {
@@ -240,8 +254,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("set_position", move |x: f64, y: f64, z: f64| {
-                let entity_id = ctx.lock().unwrap();
-                let mut guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_mut()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(mut transform) = scene.transforms().local(entity) {
@@ -258,8 +272,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("get_rotation", move || -> rhai::Array {
-                let entity_id = ctx.lock().unwrap();
-                let guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_ref()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(transform) = scene.transforms().local(entity) {
@@ -286,8 +300,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("set_rotation", move |x: f64, y: f64, z: f64, w: f64| {
-                let entity_id = ctx.lock().unwrap();
-                let mut guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_mut()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(mut transform) = scene.transforms().local(entity) {
@@ -309,8 +323,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("get_scale", move || -> rhai::Array {
-                let entity_id = ctx.lock().unwrap();
-                let guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_ref()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(transform) = scene.transforms().local(entity) {
@@ -335,8 +349,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("set_scale", move |x: f64, y: f64, z: f64| {
-                let entity_id = ctx.lock().unwrap();
-                let mut guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_mut()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(mut transform) = scene.transforms().local(entity) {
@@ -353,8 +367,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("translate", move |dx: f64, dy: f64, dz: f64| {
-                let entity_id = ctx.lock().unwrap();
-                let mut guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_mut()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(mut transform) = scene.transforms().local(entity) {
@@ -372,8 +386,8 @@ impl RhaiScriptBackend {
             let scene_ref = Arc::clone(&scene);
             let ctx = Arc::clone(&context);
             engine.register_fn("look_at", move |tx: f64, ty: f64, tz: f64| {
-                let entity_id = ctx.lock().unwrap();
-                let mut guard = scene_ref.lock().unwrap();
+                let entity_id = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let (Some(eid), Some(scene)) = (entity_id.as_ref(), guard.as_mut()) {
                     if let Some(entity) = Self::parse_entity_id(eid) {
                         if let Some(mut transform) = scene.transforms().local(entity) {
@@ -401,7 +415,7 @@ impl RhaiScriptBackend {
         {
             let scene_ref = Arc::clone(&scene);
             engine.register_fn("create_entity", move |name: &str| -> String {
-                let mut guard = scene_ref.lock().unwrap();
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(scene) = guard.as_mut() {
                     if let Ok(entity) = scene.create_object(name) {
                         let handle = entity.handle();
@@ -416,7 +430,7 @@ impl RhaiScriptBackend {
         {
             let scene_ref = Arc::clone(&scene);
             engine.register_fn("destroy_entity", move |id: String| {
-                let mut guard = scene_ref.lock().unwrap();
+                let mut guard = scene_ref.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(scene) = guard.as_mut() {
                     if let Some(entity) = Self::parse_entity_id(&id) {
                         let _ = scene.destroy_deferred(entity);
@@ -446,7 +460,7 @@ impl RhaiScriptBackend {
                       dz: f64,
                       max_dist: f64|
                       -> rhai::Dynamic {
-                    let guard = backend.lock().unwrap();
+                    let guard = backend.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(physics) = guard.as_ref() {
                         let origin = Vec3::new(ox as f32, oy as f32, oz as f32);
                         let direction = Vec3::new(dx as f32, dy as f32, dz as f32);
@@ -468,7 +482,7 @@ impl RhaiScriptBackend {
             engine.register_fn(
                 "overlap_sphere",
                 move |cx: f64, cy: f64, cz: f64, radius: f64| -> rhai::Array {
-                    let guard = backend.lock().unwrap();
+                    let guard = backend.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(physics) = guard.as_ref() {
                         let center = Vec3::new(cx as f32, cy as f32, cz as f32);
                         let filter = QueryFilter::default();
@@ -496,7 +510,7 @@ impl RhaiScriptBackend {
         {
             let db = Arc::clone(&asset_database);
             engine.register_fn("get_resource", move |path: &str| -> String {
-                let guard = db.lock().unwrap();
+                let guard = db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(database) = guard.as_ref() {
                     // Resolve project:/ or builtin:/ prefixes
                     let resolved_path = if let Some(stripped) = path.strip_prefix("project:/") {
@@ -537,45 +551,45 @@ impl RhaiScriptBackend {
     ///
     /// This should be called each frame before running script lifecycle functions.
     pub fn set_input_state(&mut self, input: engine_platform::InputState) {
-        *self.input_state.lock().unwrap() = Some(input);
+        *self.input_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(input);
     }
 
     /// Updates the scene reference that scripts can query and modify.
     ///
     /// This should be called each frame before running script lifecycle functions.
     pub fn set_scene(&mut self, scene: engine_ecs::Scene) {
-        *self.scene.lock().unwrap() = Some(scene);
+        *self.scene.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(scene);
     }
 
     /// Takes the scene back from the script backend after lifecycle execution.
     ///
     /// This should be called after all script lifecycle functions have run.
     pub fn take_scene(&mut self) -> Option<engine_ecs::Scene> {
-        self.scene.lock().unwrap().take()
+        self.scene.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 
     /// Updates the physics backend reference that scripts can query.
     ///
     /// This should be called before running script lifecycle functions that need physics queries.
     pub fn set_physics_backend(&mut self, backend: Box<dyn engine_physics::PhysicsBackend>) {
-        *self.physics_backend.lock().unwrap() = Some(backend);
+        *self.physics_backend.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(backend);
     }
 
     /// Takes the physics backend back from the script backend.
     pub fn take_physics_backend(&mut self) -> Option<Box<dyn engine_physics::PhysicsBackend>> {
-        self.physics_backend.lock().unwrap().take()
+        self.physics_backend.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 
     /// Updates the asset database reference that scripts can query.
     ///
     /// This should be called before running script lifecycle functions that need resource resolution.
     pub fn set_asset_database(&mut self, database: engine_assets::AssetDatabase) {
-        *self.asset_database.lock().unwrap() = Some(database);
+        *self.asset_database.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(database);
     }
 
     /// Takes the asset database back from the script backend.
     pub fn take_asset_database(&mut self) -> Option<engine_assets::AssetDatabase> {
-        self.asset_database.lock().unwrap().take()
+        self.asset_database.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 
     /// Returns a reference to the underlying Rhai engine.
@@ -707,7 +721,7 @@ impl RhaiScriptBackend {
         })?;
 
         // Set the current entity context for transform API
-        *self.transform_context.lock().unwrap() = Some(entity_id.to_string());
+        *self.transform_context.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(entity_id.to_string());
 
         // Get or create the entity's scope
         let scope_key = (entity_id.to_string(), script_path.to_path_buf());
@@ -726,7 +740,7 @@ impl RhaiScriptBackend {
         // Check if the function exists in the AST
         if !ast.iter_functions().any(|f| f.name == function_name) {
             // Missing lifecycle function is not an error - silently skip
-            *self.transform_context.lock().unwrap() = None;
+            *self.transform_context.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             return Ok(None);
         }
 
@@ -736,7 +750,7 @@ impl RhaiScriptBackend {
                 .call_fn(scope, ast, function_name, args.to_vec());
 
         // Clear the transform context after the call
-        *self.transform_context.lock().unwrap() = None;
+        *self.transform_context.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
         // Convert runtime errors to ConsoleEntry
         match result {

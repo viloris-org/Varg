@@ -18,14 +18,31 @@ impl ShaderBackend for WgslCodegen {
     fn generate(&self, ir: &ShaderIR) -> EngineResult<String> {
         let mut output = String::new();
 
+        // Emit uniforms — textures and samplers use `var` without storage class;
+        // buffer-backed uniforms use `var<uniform>`.
         for uniform in &ir.uniforms {
             let wgsl_type = uniform_type_wgsl(uniform.uniform_type);
-            output.push_str(&format!(
-                "@group({}) @binding({}) var<uniform> {}: {};\n",
-                uniform.set, uniform.binding, uniform.name, wgsl_type
-            ));
+            let decl = match uniform.uniform_type {
+                UniformType::Texture2D | UniformType::TextureCube | UniformType::Sampler => {
+                    format!(
+                        "@group({}) @binding({}) var {}: {};\n",
+                        uniform.set, uniform.binding, uniform.name, wgsl_type
+                    )
+                }
+                _ => {
+                    format!(
+                        "@group({}) @binding({}) var<uniform> {}: {};\n",
+                        uniform.set, uniform.binding, uniform.name, wgsl_type
+                    )
+                }
+            };
+            output.push_str(&decl);
         }
 
+        // Varyings: emit as module-scope private variables. A proper
+        // implementation would use @location(n) entry-point parameters, but
+        // for the current IR model these serve as inter-stage communication
+        // scratch slots.
         for varying in &ir.varyings {
             output.push_str(&format!(
                 "var<private> {}: {};\n",

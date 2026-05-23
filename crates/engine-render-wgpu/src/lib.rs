@@ -181,6 +181,19 @@ pub struct WgpuRenderDevice {
     grid_bind_group: wgpu::BindGroup,
     grid_vertex_buffer: wgpu::Buffer,
     grid_vertex_count: u32,
+    /// Frame-lagged destruction queue: (frame_index, resource).
+    destroy_queue: Vec<(u64, DestroyResource)>,
+}
+
+/// A GPU resource pending deferred destruction.
+#[allow(dead_code)]
+enum DestroyResource {
+    /// wgpu Texture (dropped when all GPU command buffers referencing it have completed).
+    Texture(wgpu::Texture),
+    /// wgpu Buffer.
+    Buffer(wgpu::Buffer),
+    /// wgpu TextureView.
+    TextureView(wgpu::TextureView),
 }
 
 impl std::fmt::Debug for WgpuRenderDevice {
@@ -1023,6 +1036,7 @@ impl WgpuRenderDevice {
             grid_bind_group,
             grid_vertex_buffer,
             grid_vertex_count,
+            destroy_queue: Vec::new(),
         };
         renderer.upload_debug_meshes();
         Ok(renderer)
@@ -1296,7 +1310,7 @@ impl RenderDevice for WgpuRenderDevice {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(desc.width.max(1) * 4),
+                    bytes_per_row: Some(desc.width.max(1) * desc.format.bytes_per_pixel()),
                     rows_per_image: Some(desc.height.max(1)),
                 },
                 wgpu::Extent3d {
@@ -1319,8 +1333,10 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn destroy_image(&mut self, handle: ImageHandle) {
-        if self.images.remove(&handle.raw()).is_some() {
+        if let Some(image) = self.images.remove(&handle.raw()) {
             let _ = self.image_allocator.free(handle.raw());
+            let frame = self.submitted_worlds;
+            self.destroy_queue.push((frame, DestroyResource::Texture(image._texture)));
         }
     }
 
@@ -1337,8 +1353,10 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn destroy_buffer(&mut self, handle: BufferHandle) {
-        if self.buffers.remove(&handle.raw()).is_some() {
+        if let Some(buffer) = self.buffers.remove(&handle.raw()) {
             let _ = self.buffer_allocator.free(handle.raw());
+            let frame = self.submitted_worlds;
+            self.destroy_queue.push((frame, DestroyResource::Buffer(buffer)));
         }
     }
 
@@ -1355,7 +1373,7 @@ impl RenderDevice for WgpuRenderDevice {
                 data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(desc.width.max(1) * 4),
+                    bytes_per_row: Some(desc.width.max(1) * desc.format.bytes_per_pixel()),
                     rows_per_image: Some(desc.height.max(1)),
                 },
                 wgpu::Extent3d {
@@ -1404,7 +1422,15 @@ impl RenderDevice for WgpuRenderDevice {
         Ok(())
     }
 
-    fn flush_destroy_queue(&mut self, _frame_index: u64) {}
+    fn flush_destroy_queue(&mut self, frame_index: u64) {
+        // Drop resources whose frame index is at least 2 frames behind the
+        // current frame, ensuring GPU command buffers referencing them have
+        // completed.
+        let threshold = frame_index.saturating_sub(2);
+        self.destroy_queue.retain(|(idx, _resource)| {
+            *idx > threshold
+        });
+    }
 }
 
 struct CreatedTarget(

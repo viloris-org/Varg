@@ -76,10 +76,12 @@ impl fmt::Debug for ComponentEntry {
     }
 }
 
-/// Component storage keyed by live entity. Mutations are applied per entity and type-erased at the boundary.
+/// Component storage keyed by live entity. Components are indexed by TypeId for O(1) lookup.
 #[derive(Default)]
 pub struct ComponentStorage {
     entries: HashMap<Entity, Vec<ComponentEntry>>,
+    /// Per-entity, per-TypeId index into `entries` for O(1) access.
+    type_index: HashMap<(Entity, std::any::TypeId), usize>,
 }
 
 impl fmt::Debug for ComponentStorage {
@@ -94,17 +96,29 @@ impl fmt::Debug for ComponentStorage {
 impl ComponentStorage {
     /// Inserts a native component for an entity.
     pub fn insert<C: Component>(&mut self, entity: Entity, component: C) {
-        self.entries
-            .entry(entity)
-            .or_default()
-            .push(ComponentEntry {
-                component: Box::new(component),
-                started: false,
-            });
+        let type_id = std::any::TypeId::of::<C>();
+        let component_list = self.entries.entry(entity).or_default();
+        let index = component_list.len();
+        component_list.push(ComponentEntry {
+            component: Box::new(component),
+            started: false,
+        });
+        self.type_index.insert((entity, type_id), index);
     }
 
-    /// Returns a mutable component reference by concrete type.
+    /// Returns a mutable component reference by concrete type (O(1) via TypeId index).
     pub fn get_mut<C: Component>(&mut self, entity: Entity) -> Option<&mut C> {
+        let type_id = std::any::TypeId::of::<C>();
+        if let Some(&index) = self.type_index.get(&(entity, type_id)) {
+            return self
+                .entries
+                .get_mut(&entity)?
+                .get_mut(index)?
+                .component
+                .as_any_mut()
+                .downcast_mut::<C>();
+        }
+        // Fallback: linear scan for types registered before the index was added
         self.entries
             .get_mut(&entity)?
             .iter_mut()
@@ -114,6 +128,7 @@ impl ComponentStorage {
     /// Removes every component attached to an entity.
     pub fn remove_entity(&mut self, entity: Entity) {
         self.entries.remove(&entity);
+        self.type_index.retain(|&(e, _), _| e != entity);
     }
 
     /// Ticks lifecycle hooks in deterministic entity and insertion order.

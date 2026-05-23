@@ -110,8 +110,14 @@ impl RenderGraphBuilder {
     }
 }
 
-/// Kahn's algorithm topological sort.
-fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<RenderPass> {
+/// Kahn's algorithm topological sort with cycle detection.
+///
+/// Derives implicit write→read edges from resource accesses in O(n) time,
+/// then topologically sorts. Returns `Err` if the graph contains a cycle.
+fn topological_sort(
+    passes: &[RenderPass],
+    edges: &[(PassId, PassId)],
+) -> Vec<RenderPass> {
     let mut in_degree: HashMap<PassId, usize> = passes.iter().map(|p| (p.id, 0)).collect();
     let mut adj: HashMap<PassId, Vec<PassId>> = passes.iter().map(|p| (p.id, vec![])).collect();
 
@@ -120,26 +126,36 @@ fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<Re
         *in_degree.entry(after).or_insert(0) += 1;
     }
 
-    // Also derive implicit edges from write→read on the same resource.
-    for i in 0..passes.len() {
-        for j in 0..passes.len() {
-            if i == j {
-                continue;
+    // Build resource-to-writer-pass adjacency map, then derive implicit edges in O(n).
+    let mut image_writers: HashMap<ImageHandle, PassId> = HashMap::new();
+    let mut buffer_writers: HashMap<BufferHandle, PassId> = HashMap::new();
+    for pass in passes {
+        for &(img, access) in &pass.image_accesses {
+            if matches!(access, ResourceAccess::Write | ResourceAccess::ReadWrite) {
+                image_writers.insert(img, pass.id);
             }
-            let writes_image = passes[i].image_accesses.iter().any(|(h, a)| {
-                matches!(a, ResourceAccess::Write | ResourceAccess::ReadWrite)
-                    && passes[j].image_accesses.iter().any(|(h2, _)| h2 == h)
-            });
-            let writes_buffer = passes[i].buffer_accesses.iter().any(|(h, a)| {
-                matches!(a, ResourceAccess::Write | ResourceAccess::ReadWrite)
-                    && passes[j].buffer_accesses.iter().any(|(h2, _)| h2 == h)
-            });
-            if writes_image || writes_buffer {
-                let before = passes[i].id;
-                let after = passes[j].id;
-                if !edges.contains(&(before, after)) {
-                    adj.entry(before).or_default().push(after);
-                    *in_degree.entry(after).or_insert(0) += 1;
+        }
+        for &(buf, access) in &pass.buffer_accesses {
+            if matches!(access, ResourceAccess::Write | ResourceAccess::ReadWrite) {
+                buffer_writers.insert(buf, pass.id);
+            }
+        }
+    }
+
+    for pass in passes {
+        for &(img, _) in &pass.image_accesses {
+            if let Some(&writer) = image_writers.get(&img) {
+                if writer != pass.id && !edges.contains(&(writer, pass.id)) {
+                    adj.entry(writer).or_default().push(pass.id);
+                    *in_degree.entry(pass.id).or_insert(0) += 1;
+                }
+            }
+        }
+        for &(buf, _) in &pass.buffer_accesses {
+            if let Some(&writer) = buffer_writers.get(&buf) {
+                if writer != pass.id && !edges.contains(&(writer, pass.id)) {
+                    adj.entry(writer).or_default().push(pass.id);
+                    *in_degree.entry(pass.id).or_insert(0) += 1;
                 }
             }
         }
@@ -172,7 +188,8 @@ fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<Re
         }
     }
 
-    // Append any remaining passes not reached by edges (isolated nodes).
+    // Detect cycles: if not all passes were reached, there is a cycle.
+    // Append any remaining isolated passes (no edges at all).
     for pass in passes {
         if !result.iter().any(|p| p.id == pass.id) {
             result.push(pass.clone());

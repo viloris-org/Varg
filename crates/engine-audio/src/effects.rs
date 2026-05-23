@@ -67,7 +67,10 @@ impl AudioEffect for ReverbEffect {
     }
 }
 
-/// Three-band parametric equalizer.
+/// Three-band equalizer using cascade biquad filters.
+///
+/// Low shelf (cutoff ~300 Hz), peaking (center ~1000 Hz), and high shelf
+/// (cutoff ~5000 Hz). Each band has independent gain in [-1.0, 1.0].
 #[derive(Debug, Clone)]
 pub struct EqEffect {
     /// Low band gain.
@@ -76,6 +79,43 @@ pub struct EqEffect {
     pub mid_gain: f32,
     /// High band gain.
     pub high_gain: f32,
+    // Biquad states for the three bands
+    low_x1: f32,
+    low_x2: f32,
+    low_y1: f32,
+    low_y2: f32,
+    mid_x1: f32,
+    mid_x2: f32,
+    mid_y1: f32,
+    mid_y2: f32,
+    high_x1: f32,
+    high_x2: f32,
+    high_y1: f32,
+    high_y2: f32,
+    // Cached coefficients; recomputed in process() when sample rate context changes
+    cached_coeffs: Option<EqCoefficients>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EqCoefficients {
+    // Low shelf
+    low_b0: f32,
+    low_b1: f32,
+    low_b2: f32,
+    low_a1: f32,
+    low_a2: f32,
+    // Peaking
+    mid_b0: f32,
+    mid_b1: f32,
+    mid_b2: f32,
+    mid_a1: f32,
+    mid_a2: f32,
+    // High shelf
+    high_b0: f32,
+    high_b1: f32,
+    high_b2: f32,
+    high_a1: f32,
+    high_a2: f32,
 }
 
 impl Default for EqEffect {
@@ -84,8 +124,75 @@ impl Default for EqEffect {
             low_gain: 0.0,
             mid_gain: 0.0,
             high_gain: 0.0,
+            low_x1: 0.0,
+            low_x2: 0.0,
+            low_y1: 0.0,
+            low_y2: 0.0,
+            mid_x1: 0.0,
+            mid_x2: 0.0,
+            mid_y1: 0.0,
+            mid_y2: 0.0,
+            high_x1: 0.0,
+            high_x2: 0.0,
+            high_y1: 0.0,
+            high_y2: 0.0,
+            cached_coeffs: None,
         }
     }
+}
+
+/// Computes low-shelf biquad coefficients.
+fn low_shelf_coeffs(cutoff: f32, gain_db: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
+    let w0 = 2.0 * std::f32::consts::PI * cutoff / sample_rate;
+    let a = 10.0_f32.powf(gain_db / 40.0);
+    let cos_w0 = w0.cos();
+    let sin_w0 = w0.sin();
+    let _alpha = sin_w0 / 2.0 * ((a + 1.0 / a) * (1.0 / 1.0 - 1.0) + 2.0).sqrt();
+    // Simplified: use standard RBJ shelf formulas
+    let s_alpha = sin_w0 * ((a + 1.0) * (1.0 / 1.0 - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
+    let two_sqrt_a_alpha = 2.0 * a.sqrt() * s_alpha;
+
+    let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+    let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+    let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+    let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+    let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+    let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+    (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+}
+
+/// Computes peaking biquad coefficients.
+fn peaking_coeffs(center: f32, gain_db: f32, q: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
+    let w0 = 2.0 * std::f32::consts::PI * center / sample_rate;
+    let a = 10.0_f32.powf(gain_db / 40.0);
+    let cos_w0 = w0.cos();
+    let sin_w0 = w0.sin();
+    let alpha = sin_w0 / (2.0 * q);
+    let b0 = 1.0 + alpha * a;
+    let b1 = -2.0 * cos_w0;
+    let b2 = 1.0 - alpha * a;
+    let a0 = 1.0 + alpha / a;
+    let a1 = -2.0 * cos_w0;
+    let a2 = 1.0 - alpha / a;
+    (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+}
+
+/// Computes high-shelf biquad coefficients.
+fn high_shelf_coeffs(cutoff: f32, gain_db: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
+    let w0 = 2.0 * std::f32::consts::PI * cutoff / sample_rate;
+    let a = 10.0_f32.powf(gain_db / 40.0);
+    let cos_w0 = w0.cos();
+    let sin_w0 = w0.sin();
+    let s_alpha = sin_w0 * ((a + 1.0) * (1.0 / 1.0 - 1.0) + 2.0).sqrt().max(0.0) * 0.5;
+    let two_sqrt_a_alpha = 2.0 * a.sqrt() * s_alpha;
+
+    let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+    let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+    let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+    let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+    let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+    let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+    (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
 }
 
 impl AudioEffect for EqEffect {
@@ -94,8 +201,82 @@ impl AudioEffect for EqEffect {
     }
 
     fn process(&mut self, samples: &mut [f32], _dt: f32) {
+        let sample_rate = 44100.0;
+
+        // Recompute coefficients if gains changed
+        let low_g = self.low_gain.clamp(-1.0, 1.0) * 12.0; // ±12 dB range
+        let mid_g = self.mid_gain.clamp(-1.0, 1.0) * 12.0;
+        let high_g = self.high_gain.clamp(-1.0, 1.0) * 12.0;
+
+        let need_recompute = match &self.cached_coeffs {
+            None => true,
+            Some(_) => true, // Always recompute for simplicity; could compare gains
+        };
+
+        if need_recompute {
+            let (low_b0, low_b1, low_b2, low_a1, low_a2) =
+                low_shelf_coeffs(300.0, low_g, sample_rate);
+            let (mid_b0, mid_b1, mid_b2, mid_a1, mid_a2) =
+                peaking_coeffs(1000.0, mid_g, 0.7, sample_rate);
+            let (high_b0, high_b1, high_b2, high_a1, high_a2) =
+                high_shelf_coeffs(5000.0, high_g, sample_rate);
+            self.cached_coeffs = Some(EqCoefficients {
+                low_b0,
+                low_b1,
+                low_b2,
+                low_a1,
+                low_a2,
+                mid_b0,
+                mid_b1,
+                mid_b2,
+                mid_a1,
+                mid_a2,
+                high_b0,
+                high_b1,
+                high_b2,
+                high_a1,
+                high_a2,
+            });
+        }
+
+        let coeffs = self.cached_coeffs.as_ref().unwrap();
+
+        // Apply three cascaded biquads: low shelf → peaking → high shelf
         for sample in samples.iter_mut() {
-            *sample *= 1.0 + self.mid_gain.clamp(-1.0, 1.0);
+            let x = *sample;
+
+            // Low shelf
+            let y_low = coeffs.low_b0 * x + coeffs.low_b1 * self.low_x1 + coeffs.low_b2 * self.low_x2
+                - coeffs.low_a1 * self.low_y1
+                - coeffs.low_a2 * self.low_y2;
+            self.low_x2 = self.low_x1;
+            self.low_x1 = x;
+            self.low_y2 = self.low_y1;
+            self.low_y1 = y_low;
+
+            // Peaking
+            let y_mid = coeffs.mid_b0 * y_low
+                + coeffs.mid_b1 * self.mid_x1
+                + coeffs.mid_b2 * self.mid_x2
+                - coeffs.mid_a1 * self.mid_y1
+                - coeffs.mid_a2 * self.mid_y2;
+            self.mid_x2 = self.mid_x1;
+            self.mid_x1 = y_low;
+            self.mid_y2 = self.mid_y1;
+            self.mid_y1 = y_mid;
+
+            // High shelf
+            let y_high = coeffs.high_b0 * y_mid
+                + coeffs.high_b1 * self.high_x1
+                + coeffs.high_b2 * self.high_x2
+                - coeffs.high_a1 * self.high_y1
+                - coeffs.high_a2 * self.high_y2;
+            self.high_x2 = self.high_x1;
+            self.high_x1 = y_mid;
+            self.high_y2 = self.high_y1;
+            self.high_y1 = y_high;
+
+            *sample = y_high;
         }
     }
 

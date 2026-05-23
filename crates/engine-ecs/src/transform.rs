@@ -6,7 +6,7 @@ use engine_core::{math::Transform, EngineError, EngineResult};
 
 use crate::Entity;
 
-/// Parent/child transform hierarchy.
+/// Parent/child transform hierarchy with cached world transforms.
 #[derive(Clone, Debug, Default)]
 pub struct TransformHierarchy {
     locals: HashMap<Entity, Transform>,
@@ -14,12 +14,14 @@ pub struct TransformHierarchy {
     children: HashMap<Entity, Vec<Entity>>,
     roots: Vec<Entity>,
     dirty: HashSet<Entity>,
+    world_cache: HashMap<Entity, Transform>,
 }
 
 impl TransformHierarchy {
     /// Sets or replaces the local transform for an entity.
     pub fn set_local(&mut self, entity: Entity, transform: Transform) {
         self.locals.insert(entity, transform);
+        self.world_cache.remove(&entity);
         self.mark_dirty(entity);
     }
 
@@ -86,6 +88,11 @@ impl TransformHierarchy {
         self.children.get(&parent).cloned().unwrap_or_default()
     }
 
+    /// Returns a reference to the children list (zero-allocation read path).
+    pub fn children_ref(&self, parent: Entity) -> &[Entity] {
+        self.children.get(&parent).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
     /// Returns root entities in sibling order.
     pub fn roots(&self) -> &[Entity] {
         &self.roots
@@ -115,6 +122,7 @@ impl TransformHierarchy {
         self.children.remove(&entity);
         self.roots.retain(|candidate| *candidate != entity);
         self.dirty.remove(&entity);
+        self.world_cache.remove(&entity);
     }
 
     /// Returns whether an entity's transform subtree needs recomputation.
@@ -126,7 +134,16 @@ impl TransformHierarchy {
     ///
     /// If the entity has no local transform, returns `None`.
     /// Composes transforms top-down: root → ... → entity.
+    /// Results are cached; the cache is invalidated when any ancestor's local
+    /// transform changes via `set_local` or the hierarchy is modified.
     pub fn world(&self, entity: Entity) -> Option<Transform> {
+        // Check cache first for clean entities
+        if !self.is_dirty(entity) {
+            if let Some(&cached) = self.world_cache.get(&entity) {
+                return Some(cached);
+            }
+        }
+
         let _local = self.locals.get(&entity)?;
         // Walk up to root, collecting entities from child to root
         let mut chain = vec![entity];
@@ -145,13 +162,21 @@ impl TransformHierarchy {
         Some(world)
     }
 
-    /// Clears all dirty transform markers after recomputation.
+    /// Clears all dirty transform markers after recomputation, caching computed worlds.
     pub fn clear_dirty(&mut self) {
+        // Cache world transforms for all dirty entities before clearing flags
+        let dirty_entities: Vec<Entity> = self.dirty.iter().copied().collect();
+        for entity in dirty_entities {
+            if let Some(world) = self.world(entity) {
+                self.world_cache.insert(entity, world);
+            }
+        }
         self.dirty.clear();
     }
 
     fn mark_dirty(&mut self, entity: Entity) {
         self.dirty.insert(entity);
+        self.world_cache.remove(&entity);
         for child in self.children(entity) {
             self.mark_dirty(child);
         }

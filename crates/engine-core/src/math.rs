@@ -40,7 +40,7 @@ impl Vec3 {
     /// Returns a normalized copy, or zero when the vector is too small.
     pub fn normalized(self) -> Self {
         let length = self.length();
-        if length <= f32::EPSILON {
+        if length <= 1e-8 {
             Self::ZERO
         } else {
             self / length
@@ -238,6 +238,41 @@ impl Quat {
             y: cr * sp * cy + sr * cp * sy,
             z: cr * cp * sy - sr * sp * cy,
         }
+    }
+    /// Creates a rotation from an axis and angle (in radians).
+    pub fn from_axis_angle(axis: Vec3, angle: f32) -> Self {
+        let half_angle = angle * 0.5;
+        let (sin_half, cos_half) = half_angle.sin_cos();
+        let n = axis.normalized();
+        Self {
+            x: n.x * sin_half,
+            y: n.y * sin_half,
+            z: n.z * sin_half,
+            w: cos_half,
+        }
+    }
+
+    /// Creates a rotation that aligns the positive X-axis with the given direction.
+    pub fn from_direction(dir: Vec3) -> Self {
+        let dir = dir.normalized();
+        let dot = dir.dot(Vec3::new(1.0, 0.0, 0.0));
+        if dot > 0.9999 {
+            return Self::IDENTITY;
+        }
+        if dot < -0.9999 {
+            return Self::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), std::f32::consts::PI);
+        }
+        let axis = Vec3::new(1.0, 0.0, 0.0).cross(dir).normalized();
+        let angle = dot.clamp(-1.0, 1.0).acos();
+        Self::from_axis_angle(axis, angle)
+    }
+}
+
+impl std::ops::Mul for Quat {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        self.mul(rhs)
     }
 }
 

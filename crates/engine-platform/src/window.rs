@@ -33,6 +33,13 @@ pub trait WindowProvider {
 }
 
 /// winit-backed window provider. Only available with the `editor` feature.
+///
+/// Note: Each call to `create_window` creates a temporary EventLoop instance for
+/// window creation only. The returned Window does not hold a reference to the
+/// EventLoop. The caller must create and run a separate EventLoop via
+/// `winit::event_loop::EventLoop::new()` when entering the application run loop.
+/// Per winit, only one EventLoop may be active in the process at any time, so
+/// ensure the creation-loop is dropped before the application loop begins.
 #[cfg(feature = "editor")]
 pub struct WinitWindowProvider;
 
@@ -53,6 +60,7 @@ impl WindowProvider for WinitWindowProvider {
         let window = event_loop
             .create_window(attrs)
             .map_err(|e| EngineError::other(e.to_string()))?;
+        // The temporary EventLoop is dropped here; the Window remains valid.
         Ok(window)
     }
 }

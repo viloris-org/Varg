@@ -146,10 +146,17 @@ impl Skeleton {
     }
 
     /// Computes world-space bone transforms from the hierarchy.
+    ///
+    /// Uses animated transforms from `self.bone_transforms` when available,
+    /// falling back to `bone.rest_transform` for bones without animation data.
     pub fn compute_world_transforms(&self) -> Vec<Transform> {
         let mut world = vec![Transform::IDENTITY; self.bones.len()];
         for (i, bone) in self.bones.iter().enumerate() {
-            let local = bone.rest_transform;
+            let local = self
+                .bone_transforms
+                .get(i)
+                .copied()
+                .unwrap_or(bone.rest_transform);
             world[i] = if let Some(parent_idx) = bone.parent {
                 world[parent_idx].compose(&local)
             } else {
@@ -211,16 +218,69 @@ impl Default for CCDIKSolver {
 
 impl CCDIKSolver {
     /// Solves the IK chain to reach the target.
+    ///
+    /// Returns true if converged within tolerance. Modified bone rotations are
+    /// written back to `skeleton.bone_transforms`.
     pub fn solve(&self, skeleton: &mut Skeleton) -> bool {
+        let _world = skeleton.compute_world_transforms();
+        let mut local_rotations: Vec<Quat> = self
+            .chain
+            .iter()
+            .map(|&i| {
+                skeleton
+                    .bone_transforms
+                    .get(i)
+                    .map(|t| t.rotation)
+                    .unwrap_or_else(|| {
+                        skeleton.bones.get(i).map(|b| b.rest_transform.rotation).unwrap_or(Quat::IDENTITY)
+                    })
+            })
+            .collect();
+
         for _ in 0..self.max_iterations {
             let world = skeleton.compute_world_transforms();
+            let end_idx = *self.chain.first().unwrap_or(&0);
             let end_effector = world
-                .get(*self.chain.first().unwrap_or(&0))
+                .get(end_idx)
                 .map(|t| t.translation)
                 .unwrap_or(Vec3::ZERO);
             let delta = self.target - end_effector;
             if delta.length_squared() < self.tolerance * self.tolerance {
+                // Write back converged rotations to skeleton
+                for (chain_pos, &bone_idx) in self.chain.iter().enumerate() {
+                    if let Some(t) = skeleton.bone_transforms.get_mut(bone_idx) {
+                        t.rotation = local_rotations[chain_pos];
+                    }
+                }
                 return true;
+            }
+
+            // CCD: rotate each bone from end effector toward root
+            for (chain_pos, &bone_idx) in self.chain.iter().enumerate() {
+                let joint_pos = world
+                    .get(bone_idx)
+                    .map(|t| t.translation)
+                    .unwrap_or(Vec3::ZERO);
+                let to_effector = (end_effector - joint_pos).normalized();
+                let to_target = (self.target - joint_pos).normalized();
+
+                let dot = to_effector.dot(to_target);
+                if dot > 0.9999 {
+                    continue;
+                }
+
+                let rotation_axis = to_effector.cross(to_target).normalized();
+                let angle = dot.clamp(-1.0, 1.0).acos();
+                let delta_rot = Quat::from_axis_angle(rotation_axis, angle);
+
+                local_rotations[chain_pos] = delta_rot * local_rotations[chain_pos];
+            }
+        }
+
+        // Write final rotations even if not fully converged
+        for (chain_pos, &bone_idx) in self.chain.iter().enumerate() {
+            if let Some(t) = skeleton.bone_transforms.get_mut(bone_idx) {
+                t.rotation = local_rotations[chain_pos];
             }
         }
         false
@@ -265,6 +325,9 @@ impl Default for FABRIKSolver {
 
 impl FABRIKSolver {
     /// Solves the IK chain using FABRIK algorithm.
+    ///
+    /// Returns true if converged within tolerance. Modified bone positions and
+    /// rotations are written back to `skeleton.bone_transforms`.
     pub fn solve(&self, skeleton: &mut Skeleton) -> bool {
         let world = skeleton.compute_world_transforms();
         let mut positions: Vec<Vec3> = self
@@ -282,6 +345,7 @@ impl FABRIKSolver {
             return false;
         }
 
+        let mut converged = false;
         for _ in 0..self.max_iterations {
             positions[n - 1] = self.target;
 
@@ -303,10 +367,32 @@ impl FABRIKSolver {
 
             let end = positions[n - 1];
             if (end - self.target).length_squared() < self.tolerance * self.tolerance {
-                return true;
+                converged = true;
+                break;
             }
         }
-        false
+
+        // Write back computed local transforms to skeleton
+        skeleton.bone_transforms.resize(skeleton.bones.len(), Transform::IDENTITY);
+
+        for (chain_pos, &bone_idx) in self.chain.iter().enumerate() {
+            let bone_pos = positions[chain_pos];
+            let bone_dir = if chain_pos < n - 1 {
+                (positions[chain_pos + 1] - bone_pos).normalized()
+            } else if chain_pos > 0 {
+                (bone_pos - positions[chain_pos - 1]).normalized()
+            } else {
+                Vec3::new(1.0, 0.0, 0.0)
+            };
+
+            let rotation = Quat::from_direction(bone_dir);
+            if let Some(t) = skeleton.bone_transforms.get_mut(bone_idx) {
+                t.translation = bone_pos;
+                t.rotation = rotation;
+            }
+        }
+
+        converged
     }
 
     /// Sets the chain from bone names.
