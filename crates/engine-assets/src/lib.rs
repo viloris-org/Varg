@@ -3,6 +3,17 @@
 
 //! Asset database, registry, manifest, dependency, import, and reload primitives.
 
+pub mod registry;
+pub mod resource_trait;
+pub mod resource_types;
+
+pub use registry::ResourceTypeRegistry;
+pub use resource_trait::{Resource, ResourceHandle as TypedResourceHandle};
+pub use resource_types::{
+    CurveLoopMode, CurvePoint, CurveResource, FontResource, InputActionDef, InputMapResource,
+    ThemeResource,
+};
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt, fs,

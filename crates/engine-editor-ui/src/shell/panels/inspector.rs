@@ -454,6 +454,7 @@ fn draw_component_editor(
                 pal,
             );
         }
+        _ => {}
     }
     dirty
 }
@@ -672,6 +673,7 @@ fn draw_component_schema_field(
             "pending_recovery" => bool_property_row(ui, &label, &mut script.pending_recovery, pal),
             _ => false,
         },
+        _ => false,
     }
 }
 

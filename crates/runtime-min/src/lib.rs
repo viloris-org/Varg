@@ -1615,7 +1615,16 @@ pub fn extract_render_world(scene: &Scene) -> RenderWorld {
                 ComponentData::Rigidbody(_)
                 | ComponentData::Collider(_)
                 | ComponentData::AudioSource(_)
-                | ComponentData::Script(_) => {}
+                | ComponentData::Script(_)
+                | ComponentData::Sprite2D(_)
+                | ComponentData::TileMap(_)
+                | ComponentData::Camera2D(_)
+                | ComponentData::Light2D(_)
+                | ComponentData::Occluder2D(_)
+                | ComponentData::AnimationPlayer(_)
+                | ComponentData::SkinnedMeshRenderer(_)
+                | ComponentData::AudioStreamPlayer2D(_)
+                | ComponentData::AudioStreamPlayer3D(_) => {}
             }
         }
         if object.camera_role == Some(CameraRole::Main) && world.camera.is_none() {

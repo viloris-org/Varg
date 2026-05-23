@@ -17,10 +17,13 @@ pub mod audio;
 
 pub use particle::{ParticleInstance, ParticleSystem};
 pub use scene::{
-    AudioSourceComponentData, CameraComponentData, CameraRole, ColliderComponentData,
-    ComponentData, GameObject, LifecycleStage, LightComponentData, MaterialRef,
-    MeshRendererComponentData, ObjectIdAllocator, ParticleEmitterComponentData,
-    RigidbodyComponentData, Scene, SceneFile, SceneMode, ScriptComponentProxy,
+    AnimationPlayerComponentData, AudioSourceComponentData, AudioStreamPlayer2DComponentData,
+    AudioStreamPlayer3DComponentData, Camera2DComponentData, CameraComponentData, CameraRole,
+    ColliderComponentData, ComponentData, GameObject, LifecycleStage, Light2DComponentData,
+    LightComponentData, MaterialRef, MeshRendererComponentData, ObjectIdAllocator,
+    Occluder2DComponentData, ParticleEmitterComponentData, RigidbodyComponentData, Scene,
+    SceneFile, SceneMode, ScriptComponentProxy, SkinnedMeshRendererComponentData,
+    Sprite2DComponentData, TileMap2DComponentData,
 };
 pub use schema::{
     BuildConfiguration, ComponentFieldKind, ComponentFieldSchema, ComponentSchema,

@@ -1,0 +1,19 @@
+[package]
+name = "engine-skeleton"
+description = "Aster skeletal animation: bones, skinning, IK, and bone modifiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+runtime-min = ["engine-core/runtime-min"]
+runtime-game = ["runtime-min"]
+editor = ["engine-core/editor"]
+dev-full = ["runtime-game", "editor"]
+
+[dependencies]
+engine-core.workspace = true
+serde.workspace = true

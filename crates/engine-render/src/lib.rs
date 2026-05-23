@@ -302,6 +302,37 @@ pub trait RenderDevice {
 
     /// Flushes the delayed destruction queue for the given frame.
     fn flush_destroy_queue(&mut self, frame_index: u64);
+
+    /// Draws a batch of 2D quads.
+    fn draw_2d_batch(
+        &mut self,
+        _vertices: &[[f32; 8]],
+        _texture: ImageHandle,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Uploads bone matrices for GPU skinning.
+    fn upload_bone_matrices(
+        &mut self,
+        _matrices: &[[f32; 16]],
+    ) -> EngineResult<BufferHandle> {
+        Ok(BufferHandle(engine_core::Handle::new(
+            0,
+            engine_core::Generation::FIRST,
+        )))
+    }
+
+    /// Draws a skinned mesh with bone matrices applied.
+    fn draw_skinned_mesh(
+        &mut self,
+        _mesh_name: &str,
+        _material_name: &str,
+        _bone_buffer: BufferHandle,
+        _bone_count: u32,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
 }
 
 /// Null renderer used by minimal runtime builds.

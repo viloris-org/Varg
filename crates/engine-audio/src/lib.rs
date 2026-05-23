@@ -7,11 +7,25 @@
 //! linking any audio library. A real backend (FMOD, kira, cpal, …) replaces it
 //! by implementing [`AudioBackend`] and registering it at startup.
 
+pub mod bus;
+pub mod effects;
+pub mod spatial;
+pub mod stream_player;
+
 use std::collections::HashMap;
 
 use engine_core::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
+pub use crate::bus::{AudioBus, AudioBusGraph};
+pub use crate::effects::{
+    AudioEffect, ChorusEffect, CompressorEffect, DelayEffect, EqEffect, FilterEffect, FilterType,
+    LimiterEffect, ReverbEffect,
+};
+pub use crate::spatial::{compute_attenuation, compute_pan, AttenuationModel};
+pub use crate::stream_player::{
+    AudioStreamPlayer2DComponentData, AudioStreamPlayer3DComponentData,
+};
 pub use engine_core::math::Vec3;
 
 // ── Handles ──────────────────────────────────────────────────────────────────
@@ -75,6 +89,13 @@ pub struct AudioSourceDesc {
     pub position: Option<Vec3>,
     /// Start playing immediately on spawn.
     pub auto_play: bool,
+    /// Output bus name.
+    #[serde(default = "default_bus_name")]
+    pub bus: String,
+}
+
+fn default_bus_name() -> String {
+    "Master".to_string()
 }
 
 impl AudioSourceDesc {
@@ -87,6 +108,7 @@ impl AudioSourceDesc {
             looping: false,
             position: None,
             auto_play: true,
+            bus: "Master".to_string(),
         }
     }
 }
@@ -455,9 +477,11 @@ impl AudioBackend for MemoryAudioBackend {
 
 // ── AudioContext ──────────────────────────────────────────────────────────────
 
-/// Top-level audio context that owns a backend.
+/// Top-level audio context that owns a backend and bus graph.
 pub struct AudioContext {
     backend: Box<dyn AudioBackend>,
+    /// Audio bus graph for mixing and effects.
+    pub bus_graph: AudioBusGraph,
 }
 
 impl std::fmt::Debug for AudioContext {
@@ -471,6 +495,7 @@ impl AudioContext {
     pub fn new(backend: impl AudioBackend + 'static) -> Self {
         Self {
             backend: Box::new(backend),
+            bus_graph: AudioBusGraph::new(),
         }
     }
 
@@ -494,9 +519,14 @@ impl AudioContext {
         self.backend.as_ref()
     }
 
-    /// Advances the audio engine.
+    /// Advances the audio engine and processes the bus graph.
     pub fn update(&mut self, dt: f32) {
         self.backend.update(dt);
+    }
+
+    /// Processes audio through the bus graph with the given sample buffer.
+    pub fn process_bus(&mut self, samples: &mut [f32], dt: f32) {
+        self.bus_graph.process(samples, dt);
     }
 }
 

@@ -833,6 +833,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "engine-animation"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "serde",
+]
+
+[[package]]
 name = "engine-assets"
 version = "0.1.0"
 dependencies = [
@@ -943,6 +951,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-render-2d"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-ecs",
+ "engine-render",
+ "serde",
+]
+
+[[package]]
 name = "engine-render-vulkan"
 version = "0.1.0"
 dependencies = [
@@ -978,6 +996,32 @@ dependencies = [
  "engine-physics",
  "engine-platform",
  "rhai",
+]
+
+[[package]]
+name = "engine-shader"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine-skeleton"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "serde",
+]
+
+[[package]]
+name = "engine-ui"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-render",
+ "serde",
 ]
 
 [[package]]
@@ -2914,6 +2958,7 @@ dependencies = [
 name = "runtime-min"
 version = "0.1.0"
 dependencies = [
+ "engine-animation",
  "engine-assets",
  "engine-audio",
  "engine-core",
@@ -2923,8 +2968,12 @@ dependencies = [
  "engine-physics",
  "engine-platform",
  "engine-render",
+ "engine-render-2d",
  "engine-render-wgpu",
  "engine-script-rhai",
+ "engine-shader",
+ "engine-skeleton",
+ "engine-ui",
  "serde_json",
  "toml",
  "winit",

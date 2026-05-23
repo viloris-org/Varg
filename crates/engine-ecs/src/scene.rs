@@ -330,6 +330,297 @@ impl Default for AudioSourceComponentData {
 
 pub use crate::particle::ParticleEmitterComponentData;
 
+/// Serializable 2D sprite component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Sprite2DComponentData {
+    /// Texture asset GUID.
+    pub texture: Option<AssetId>,
+    /// Tint color (RGBA).
+    #[serde(default = "default_sprite_color")]
+    pub color: [f32; 4],
+    /// Flip horizontally.
+    #[serde(default)]
+    pub flip_h: bool,
+    /// Flip vertically.
+    #[serde(default)]
+    pub flip_v: bool,
+    /// Draw order within layer.
+    #[serde(default)]
+    pub order_in_layer: i32,
+    /// Sorting layer name.
+    #[serde(default = "default_sprite_layer")]
+    pub layer: String,
+    /// Whether the sprite is centered.
+    #[serde(default = "default_true")]
+    pub centered: bool,
+}
+
+fn default_sprite_color() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+fn default_sprite_layer() -> String {
+    "Default".to_string()
+}
+
+impl Default for Sprite2DComponentData {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            color: default_sprite_color(),
+            flip_h: false,
+            flip_v: false,
+            order_in_layer: 0,
+            layer: default_sprite_layer(),
+            centered: true,
+        }
+    }
+}
+
+/// Serializable 2D tile map component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct TileMap2DComponentData {
+    /// Tileset texture asset GUID.
+    pub tileset: Option<AssetId>,
+    /// Tile size in pixels.
+    #[serde(default = "default_tile_size")]
+    pub tile_size: u32,
+    /// Map dimensions in tiles (width, height).
+    #[serde(default)]
+    pub map_size: (u32, u32),
+    /// Tile indices.
+    #[serde(default)]
+    pub tiles: Vec<u32>,
+    /// Sorting layer name.
+    #[serde(default = "default_tile_layer")]
+    pub layer: String,
+}
+
+fn default_tile_size() -> u32 {
+    16
+}
+
+fn default_tile_layer() -> String {
+    "Default".to_string()
+}
+
+impl Default for TileMap2DComponentData {
+    fn default() -> Self {
+        Self {
+            tileset: None,
+            tile_size: default_tile_size(),
+            map_size: (1, 1),
+            tiles: Vec::new(),
+            layer: default_tile_layer(),
+        }
+    }
+}
+
+/// Serializable 2D camera component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Camera2DComponentData {
+    /// Zoom level.
+    #[serde(default = "default_camera2d_zoom")]
+    pub zoom: f32,
+    /// RGB clear color.
+    #[serde(default = "default_camera2d_clear_color")]
+    pub clear_color: Vec3,
+}
+
+fn default_camera2d_zoom() -> f32 {
+    1.0
+}
+
+fn default_camera2d_clear_color() -> Vec3 {
+    Vec3::new(0.1, 0.1, 0.1)
+}
+
+impl Default for Camera2DComponentData {
+    fn default() -> Self {
+        Self {
+            zoom: default_camera2d_zoom(),
+            clear_color: default_camera2d_clear_color(),
+        }
+    }
+}
+
+/// Serializable 2D light component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Light2DComponentData {
+    /// RGB light color.
+    pub color: Vec3,
+    /// Light intensity.
+    #[serde(default = "default_light2d_intensity")]
+    pub intensity: f32,
+    /// Light range in world units.
+    #[serde(default = "default_light2d_range")]
+    pub range: f32,
+}
+
+fn default_light2d_intensity() -> f32 {
+    1.0
+}
+
+fn default_light2d_range() -> f32 {
+    10.0
+}
+
+impl Default for Light2DComponentData {
+    fn default() -> Self {
+        Self {
+            color: Vec3::ONE,
+            intensity: 1.0,
+            range: 10.0,
+        }
+    }
+}
+
+/// Serializable 2D occluder component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Occluder2DComponentData {
+    /// Occlusion polygon vertices in local space.
+    #[serde(default = "default_occluder_polygon")]
+    pub polygon: Vec<[f32; 2]>,
+}
+
+fn default_occluder_polygon() -> Vec<[f32; 2]> {
+    vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
+}
+
+impl Default for Occluder2DComponentData {
+    fn default() -> Self {
+        Self {
+            polygon: default_occluder_polygon(),
+        }
+    }
+}
+
+/// Serializable animation player component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AnimationPlayerComponentData {
+    /// Animation clip asset GUID.
+    pub clip: Option<AssetId>,
+    /// Whether to auto-play on scene start.
+    #[serde(default)]
+    pub auto_play: bool,
+    /// Playback speed multiplier.
+    #[serde(default = "default_anim_speed")]
+    pub speed: f32,
+}
+
+fn default_anim_speed() -> f32 {
+    1.0
+}
+
+impl Default for AnimationPlayerComponentData {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            auto_play: false,
+            speed: 1.0,
+        }
+    }
+}
+
+/// Serializable skinned mesh renderer component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SkinnedMeshRendererComponentData {
+    /// Mesh asset GUID.
+    pub mesh: Option<AssetId>,
+    /// Material reference.
+    pub material: MaterialRef,
+    /// Entity with the Skeleton component.
+    pub skeleton_root: Option<EntityId>,
+    /// Whether this renderer casts shadows.
+    #[serde(default = "default_true")]
+    pub casts_shadows: bool,
+}
+
+impl Default for SkinnedMeshRendererComponentData {
+    fn default() -> Self {
+        Self {
+            mesh: None,
+            material: MaterialRef::debug(),
+            skeleton_root: None,
+            casts_shadows: true,
+        }
+    }
+}
+
+/// Serializable audio stream player 2D component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AudioStreamPlayer2DComponentData {
+    /// Audio clip asset GUID.
+    pub clip: Option<AssetId>,
+    /// Output bus name.
+    #[serde(default = "default_bus_name")]
+    pub bus: String,
+    /// Volume multiplier.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Whether to loop.
+    #[serde(default)]
+    pub looping: bool,
+    /// Whether to auto-play on scene start.
+    #[serde(default)]
+    pub play_on_start: bool,
+}
+
+fn default_bus_name() -> String {
+    "SFX".to_string()
+}
+
+fn default_volume() -> f32 {
+    1.0
+}
+
+impl Default for AudioStreamPlayer2DComponentData {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            bus: "SFX".to_string(),
+            volume: 1.0,
+            looping: false,
+            play_on_start: false,
+        }
+    }
+}
+
+/// Serializable audio stream player 3D component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AudioStreamPlayer3DComponentData {
+    /// Audio clip asset GUID.
+    pub clip: Option<AssetId>,
+    /// Output bus name.
+    #[serde(default = "default_bus_name")]
+    pub bus: String,
+    /// Volume multiplier.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Whether to loop.
+    #[serde(default)]
+    pub looping: bool,
+    /// Whether to auto-play on scene start.
+    #[serde(default)]
+    pub play_on_start: bool,
+    /// Blend between 2D (0.0) and 3D (1.0) spatial audio.
+    #[serde(default)]
+    pub spatial_blend: f32,
+}
+
+impl Default for AudioStreamPlayer3DComponentData {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            bus: "SFX".to_string(),
+            volume: 1.0,
+            looping: false,
+            play_on_start: false,
+            spatial_blend: 1.0,
+        }
+    }
+}
+
 /// Versioned component payload used by scenes and prefabs.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -350,6 +641,24 @@ pub enum ComponentData {
     ParticleEmitter(ParticleEmitterComponentData),
     /// Script proxy component.
     Script(ScriptComponentProxy),
+    /// 2D sprite component.
+    Sprite2D(Sprite2DComponentData),
+    /// 2D tile map component.
+    TileMap(TileMap2DComponentData),
+    /// 2D camera component.
+    Camera2D(Camera2DComponentData),
+    /// 2D light component.
+    Light2D(Light2DComponentData),
+    /// 2D occluder component.
+    Occluder2D(Occluder2DComponentData),
+    /// Animation player component.
+    AnimationPlayer(AnimationPlayerComponentData),
+    /// Skinned mesh renderer component.
+    SkinnedMeshRenderer(SkinnedMeshRendererComponentData),
+    /// Audio stream player 2D component.
+    AudioStreamPlayer2D(AudioStreamPlayer2DComponentData),
+    /// Audio stream player 3D component.
+    AudioStreamPlayer3D(AudioStreamPlayer3DComponentData),
 }
 
 impl ComponentData {
@@ -364,6 +673,15 @@ impl ComponentData {
             Self::AudioSource(_) => "AudioSource",
             Self::ParticleEmitter(_) => "ParticleEmitter",
             Self::Script(_) => "Script",
+            Self::Sprite2D(_) => "Sprite2D",
+            Self::TileMap(_) => "TileMap",
+            Self::Camera2D(_) => "Camera2D",
+            Self::Light2D(_) => "Light2D",
+            Self::Occluder2D(_) => "Occluder2D",
+            Self::AnimationPlayer(_) => "AnimationPlayer",
+            Self::SkinnedMeshRenderer(_) => "SkinnedMeshRenderer",
+            Self::AudioStreamPlayer2D(_) => "AudioStreamPlayer2D",
+            Self::AudioStreamPlayer3D(_) => "AudioStreamPlayer3D",
         }
     }
 }

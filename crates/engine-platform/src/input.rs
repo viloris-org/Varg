@@ -2,6 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::gamepad::GamepadState;
+use crate::input_map::GamepadButton;
+
 /// Keyboard key codes used by the platform abstraction.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum KeyCode {
@@ -116,9 +119,31 @@ pub struct InputState {
     mouse_delta: (f32, f32),
     wheel_delta: (f32, f32),
     actions: HashMap<String, ActionBinding>,
+    gamepad: Option<GamepadState>,
 }
 
 impl InputState {
+    /// Applies a gamepad state for this frame.
+    pub fn apply_gamepad_state(&mut self, state: GamepadState) {
+        self.gamepad = Some(state);
+    }
+
+    /// Returns the current gamepad state.
+    pub fn gamepad_state(&self) -> Option<&GamepadState> {
+        self.gamepad.as_ref()
+    }
+
+    /// Returns whether a gamepad button is currently held.
+    pub fn gamepad_button_down(&self, button: GamepadButton) -> bool {
+        self.gamepad
+            .as_ref()
+            .is_some_and(|g| g.button_down(button))
+    }
+
+    /// Returns all keys pressed this frame.
+    pub fn pressed_keys(&self) -> Vec<KeyCode> {
+        self.pressed_keys.iter().copied().collect()
+    }
     /// Registers or replaces an action binding.
     pub fn bind_action(&mut self, name: impl Into<String>, binding: ActionBinding) {
         self.actions.insert(name.into(), binding);
@@ -205,6 +230,9 @@ impl InputState {
         self.released_mouse_buttons.clear();
         self.mouse_delta = (0.0, 0.0);
         self.wheel_delta = (0.0, 0.0);
+        if let Some(gamepad) = self.gamepad.as_mut() {
+            gamepad.end_frame();
+        }
     }
 
     /// Returns whether a key is currently held.

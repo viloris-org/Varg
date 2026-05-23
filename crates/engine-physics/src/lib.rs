@@ -7,6 +7,8 @@
 //! linking any physics library. The `rapier` feature enables [`RapierPhysicsBackend`],
 //! the production backend used by runtime-game builds.
 
+pub mod joints;
+
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -15,16 +17,19 @@ use std::{
 use engine_core::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
+pub use crate::joints::{
+    JointDesc, JointHandle, JointLimits, JointMotor, JointState, JointType,
+};
 pub use engine_core::math::{Quat, Transform, Vec3};
 
 // ── Primitive types ──────────────────────────────────────────────────────────
 
 /// Opaque handle to a physics body.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct BodyHandle(pub u64);
 
 /// Opaque handle to a collider.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct ColliderHandle(pub u64);
 
 /// Physics body kind.
@@ -358,6 +363,40 @@ pub trait PhysicsBackend: Send + Sync {
         body: BodyHandle,
         desc: CharacterControllerDesc,
     ) -> EngineResult<CharacterControllerOutput>;
+
+    /// Creates a joint between two bodies.
+    fn create_joint(&mut self, _desc: &JointDesc) -> EngineResult<JointHandle> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "joints",
+        })
+    }
+
+    /// Destroys a joint.
+    fn destroy_joint(&mut self, _joint: JointHandle) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Returns the state of a joint.
+    fn joint_state(&self, _joint: JointHandle) -> EngineResult<JointState> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "joints",
+        })
+    }
+
+    /// Sets the motor on a joint.
+    fn set_joint_motor(&mut self, _joint: JointHandle, _motor: JointMotor) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Sets the limits on a joint.
+    fn set_joint_limits(&mut self, _joint: JointHandle, _limits: JointLimits) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Returns the reaction force and torque magnitude on a joint.
+    fn joint_forces(&self, _joint: JointHandle) -> EngineResult<(f32, f32)> {
+        Ok((0.0, 0.0))
+    }
 }
 
 // ── Null backend ─────────────────────────────────────────────────────────────
@@ -490,6 +529,35 @@ impl PhysicsWorld {
     pub fn backend(&self) -> &dyn PhysicsBackend {
         self.backend.as_ref()
     }
+
+    /// Creates a joint between two bodies.
+    pub fn create_joint(&mut self, desc: &JointDesc) -> EngineResult<JointHandle> {
+        self.backend.create_joint(desc)
+    }
+
+    /// Destroys a joint.
+    pub fn destroy_joint(&mut self, joint: JointHandle) -> EngineResult<()> {
+        self.backend.destroy_joint(joint)
+    }
+
+    /// Sets a joint motor.
+    pub fn set_joint_motor(&mut self, joint: JointHandle, motor: JointMotor) -> EngineResult<()> {
+        self.backend.set_joint_motor(joint, motor)
+    }
+
+    /// Sets joint limits.
+    pub fn set_joint_limits(
+        &mut self,
+        joint: JointHandle,
+        limits: JointLimits,
+    ) -> EngineResult<()> {
+        self.backend.set_joint_limits(joint, limits)
+    }
+
+    /// Returns joint reaction forces.
+    pub fn joint_forces(&self, joint: JointHandle) -> EngineResult<(f32, f32)> {
+        self.backend.joint_forces(joint)
+    }
 }
 
 // ── Simple deterministic backend ─────────────────────────────────────────────
@@ -519,8 +587,10 @@ struct SimpleCollider {
 pub struct SimplePhysicsBackend {
     next_body: u64,
     next_collider: u64,
+    next_joint: u64,
     bodies: HashMap<BodyHandle, SimpleBody>,
     colliders: HashMap<ColliderHandle, SimpleCollider>,
+    joints: HashMap<JointHandle, JointDesc>,
     active_pairs: HashSet<(ColliderHandle, ColliderHandle)>,
     contacts: Vec<ContactEvent>,
     gravity: Vec3,
@@ -531,8 +601,10 @@ impl Default for SimplePhysicsBackend {
         Self {
             next_body: 1,
             next_collider: 1,
+            next_joint: 1,
             bodies: HashMap::new(),
             colliders: HashMap::new(),
+            joints: HashMap::new(),
             active_pairs: HashSet::new(),
             contacts: Vec::new(),
             gravity: Vec3::new(0.0, -9.81, 0.0),
@@ -739,6 +811,7 @@ impl PhysicsBackend for SimplePhysicsBackend {
                 body.transform.translation += body.velocity * dt;
             }
         }
+        self.solve_joints();
         self.update_contacts();
     }
 
@@ -947,6 +1020,137 @@ impl PhysicsBackend for SimplePhysicsBackend {
                     .is_some(),
             collisions: usize::from(hit.is_some()),
         })
+    }
+
+    fn create_joint(&mut self, desc: &JointDesc) -> EngineResult<JointHandle> {
+        let handle = JointHandle(self.next_joint);
+        self.next_joint = self.next_joint.saturating_add(1).max(1);
+        self.joints.insert(handle, desc.clone());
+        Ok(handle)
+    }
+
+    fn destroy_joint(&mut self, joint: JointHandle) -> EngineResult<()> {
+        self.joints
+            .remove(&joint)
+            .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+        Ok(())
+    }
+
+    fn joint_state(&self, joint: JointHandle) -> EngineResult<JointState> {
+        let desc = self
+            .joints
+            .get(&joint)
+            .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+        Ok(JointState {
+            handle: joint,
+            desc: desc.clone(),
+        })
+    }
+
+    fn set_joint_motor(&mut self, joint: JointHandle, motor: JointMotor) -> EngineResult<()> {
+        let desc = self
+            .joints
+            .get_mut(&joint)
+            .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+        match &mut desc.joint_type {
+            JointType::Hinge {
+                motor: ref mut m, ..
+            }
+            | JointType::Slider {
+                motor: ref mut m, ..
+            } => *m = Some(motor),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn set_joint_limits(
+        &mut self,
+        joint: JointHandle,
+        limits: JointLimits,
+    ) -> EngineResult<()> {
+        let desc = self
+            .joints
+            .get_mut(&joint)
+            .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+        match &mut desc.joint_type {
+            JointType::Hinge {
+                limits: ref mut l, ..
+            }
+            | JointType::Slider {
+                limits: ref mut l, ..
+            } => *l = limits,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn joint_forces(&self, _joint: JointHandle) -> EngineResult<(f32, f32)> {
+        Ok((0.0, 0.0))
+    }
+}
+
+impl SimplePhysicsBackend {
+    fn solve_joints(&mut self) {
+        let joints = self.joints.clone();
+        for (_handle, desc) in &joints {
+            match &desc.joint_type {
+                JointType::Pin {
+                    anchor_a,
+                    anchor_b,
+                } => {
+                    let transform_a =
+                        self.bodies.get(&desc.body_a).map(|b| b.transform);
+                    let transform_b =
+                        self.bodies.get(&desc.body_b).map(|b| b.transform);
+                    if let (Some(ta), Some(tb)) = (transform_a, transform_b) {
+                        let world_a = ta.transform_point(*anchor_a);
+                        let world_b = tb.transform_point(*anchor_b);
+                        let correction = world_b - world_a;
+                        if let Some(body) = self.bodies.get_mut(&desc.body_a) {
+                            if body.desc.kind == BodyKind::Dynamic {
+                                body.transform.translation += correction;
+                            }
+                        }
+                    }
+                }
+                JointType::SpringArm {
+                    anchor_a,
+                    anchor_b,
+                    rest_length,
+                    stiffness,
+                    damping,
+                } => {
+                    let transform_a =
+                        self.bodies.get(&desc.body_a).map(|b| b.transform);
+                    let transform_b =
+                        self.bodies.get(&desc.body_b).map(|b| b.transform);
+                    if let (Some(ta), Some(tb)) = (transform_a, transform_b) {
+                        let world_a = ta.transform_point(*anchor_a);
+                        let world_b = tb.transform_point(*anchor_b);
+                        let delta = world_b - world_a;
+                        let distance = delta.length();
+                        if distance > f32::EPSILON {
+                            let direction = delta / distance;
+                            let force = direction * ((distance - rest_length) * *stiffness);
+                            if let Some(body) = self.bodies.get_mut(&desc.body_a) {
+                                if body.desc.kind == BodyKind::Dynamic {
+                                    body.velocity += force;
+                                    body.velocity = body.velocity * (1.0 - (*damping).min(1.0));
+                                }
+                            }
+                            if let Some(body) = self.bodies.get_mut(&desc.body_b) {
+                                if body.desc.kind == BodyKind::Dynamic {
+                                    body.velocity = body.velocity - force;
+                                    body.velocity = body.velocity * (1.0 - (*damping).min(1.0));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
