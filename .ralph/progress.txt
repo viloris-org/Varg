@@ -1,6 +1,0 @@
-# Ralph Progress Tracker — Aster P0 Fullstack
-# Branch: ralph/aster-p0-fullstack
-# Started: 2026-05-21
-# Total stories: 58
-# Completed: 0
-# Last updated: 2026-05-21

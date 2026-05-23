@@ -59,6 +59,7 @@ tasks/
 /.qodo/
 /.amazonq/
 /.github/copilot-chat/
+/.kiro/
 
 # AI tool transcripts, scratch files, and caches
 CLAUDE.md
