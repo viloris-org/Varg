@@ -441,11 +441,8 @@ fn open_editor() -> EngineResult<()> {
             );
             texture_id
         } else {
-            let texture_id = renderer.register_native_texture(
-                device,
-                texture_view,
-                wgpu::FilterMode::Linear,
-            );
+            let texture_id =
+                renderer.register_native_texture(device, texture_view, wgpu::FilterMode::Linear);
             *cached_id = Some(texture_id);
             texture_id
         };
