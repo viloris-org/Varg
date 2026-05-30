@@ -13,9 +13,11 @@ editor = ["engine-editor/editor", "engine-core/editor", "dep:egui", "dep:egui-ph
 dev-full = ["editor", "engine-editor/dev-full", "engine-core/dev-full"]
 
 [dependencies]
+engine-ai.workspace = true
 engine-assets.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
+
 engine-editor.workspace = true
 engine-i18n.workspace = true
 engine-render.workspace = true

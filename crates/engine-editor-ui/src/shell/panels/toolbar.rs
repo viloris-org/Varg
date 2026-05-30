@@ -157,6 +157,12 @@ pub fn draw_toolbar(
             );
             panel_toggle(
                 ui,
+                tr.tr("panel_copilot"),
+                &mut ui_state.copilot.visible,
+                pal,
+            );
+            panel_toggle(
+                ui,
                 tr.tr("panel_hierarchy"),
                 &mut ui_state.show_hierarchy,
                 pal,

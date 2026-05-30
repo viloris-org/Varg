@@ -11,8 +11,8 @@ use super::operations::command::{
 };
 use super::panels::{
     draw_bottom_dock, draw_center_dock, draw_close_project_dialog, draw_command_palette,
-    draw_hierarchy, draw_inspector, draw_menu_bar, draw_project_panel, draw_script_editor,
-    draw_status_bar, draw_toolbar,
+    draw_copilot, draw_hierarchy, draw_inspector, draw_menu_bar, draw_project_panel,
+    draw_script_editor, draw_status_bar, draw_toolbar,
 };
 use super::types::{InfernuxPalette, ShellUiState};
 use super::widgets::layout::{panel_frame, panel_title};
@@ -98,6 +98,19 @@ pub fn draw_shell(
             .frame(panel_frame(&pal))
             .show(ctx, |ui| {
                 draw_inspector(ui, shell, ui_state, &pal, &tr);
+            });
+    }
+
+    // Copilot panel (right side, next to inspector)
+    if ui_state.copilot.visible {
+        let _res = egui::SidePanel::right("infernux_copilot")
+            .default_width(340.0)
+            .min_width(260.0)
+            .max_width(500.0)
+            .resizable(true)
+            .frame(panel_frame(&pal))
+            .show(ctx, |ui| {
+                draw_copilot(ui, shell, ui_state, &pal, &tr);
             });
     }
 

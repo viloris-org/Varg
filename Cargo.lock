@@ -833,6 +833,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "engine-agent-cluster"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-ecs",
+ "engine-editor",
+ "engine-policy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "engine-ai"
+version = "0.1.0"
+dependencies = [
+ "engine-assets",
+ "engine-core",
+ "engine-ecs",
+ "engine-editor",
+ "engine-script-rhai",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "engine-animation"
 version = "0.1.0"
 dependencies = [
@@ -894,6 +919,7 @@ dependencies = [
  "engine-physics",
  "engine-render",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -903,6 +929,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui-phosphor",
+ "engine-ai",
  "engine-assets",
  "engine-core",
  "engine-ecs",
@@ -939,6 +966,15 @@ dependencies = [
  "egui-winit",
  "engine-core",
  "winit",
+]
+
+[[package]]
+name = "engine-policy"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2958,6 +2994,7 @@ dependencies = [
 name = "runtime-min"
 version = "0.1.0"
 dependencies = [
+ "engine-ai",
  "engine-animation",
  "engine-assets",
  "engine-audio",

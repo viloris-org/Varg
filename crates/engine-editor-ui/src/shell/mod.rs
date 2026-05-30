@@ -1,5 +1,6 @@
 //! Editor shell UI modules.
 
+pub mod copilot_engine;
 pub mod operations;
 pub mod panels;
 pub mod types;

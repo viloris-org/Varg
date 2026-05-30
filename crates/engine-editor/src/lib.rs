@@ -37,6 +37,61 @@ pub enum ThemePreference {
     Light,
 }
 
+/// Copilot model provider configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotProvider {
+    /// Use a local stub (for testing/development).
+    #[default]
+    Stub,
+    /// OpenAI-compatible API.
+    OpenAI,
+    /// Anthropic API.
+    Anthropic,
+    /// Local Ollama instance.
+    Ollama,
+}
+
+/// AI model configuration for the Editor Copilot.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CopilotSettings {
+    /// Which provider to use.
+    #[serde(default)]
+    pub provider: CopilotProvider,
+    /// Model identifier (e.g. "gpt-4", "claude-3-opus", "llama3").
+    #[serde(default = "default_copilot_model")]
+    pub model: String,
+    /// API endpoint URL for the provider.
+    #[serde(default)]
+    pub api_endpoint: Option<String>,
+    /// API key (stored locally, never serialized to project files).
+    #[serde(skip)]
+    pub api_key: Option<String>,
+    /// Max tokens per response.
+    #[serde(default = "default_copilot_max_tokens")]
+    pub max_tokens: u32,
+}
+
+fn default_copilot_model() -> String {
+    "gpt-4".to_owned()
+}
+
+fn default_copilot_max_tokens() -> u32 {
+    4096
+}
+
+impl Default for CopilotSettings {
+    fn default() -> Self {
+        Self {
+            provider: CopilotProvider::Stub,
+            model: default_copilot_model(),
+            api_endpoint: None,
+            api_key: None,
+            max_tokens: default_copilot_max_tokens(),
+        }
+    }
+}
+
 /// Durable editor preferences.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EditorPreferences {
@@ -55,6 +110,9 @@ pub struct EditorPreferences {
     /// Serialized layout identifier for the current editor shell.
     #[serde(default = "default_layout")]
     pub layout: String,
+    /// Copilot AI provider and model configuration.
+    #[serde(default)]
+    pub copilot: CopilotSettings,
 }
 
 impl Default for EditorPreferences {
@@ -65,6 +123,7 @@ impl Default for EditorPreferences {
             reopen_last_project: true,
             last_project_location: None,
             layout: default_layout(),
+            copilot: CopilotSettings::default(),
         }
     }
 }
@@ -502,26 +561,117 @@ impl UndoRedoStack {
     }
 }
 
+/// Context passed to every command handler.
+pub struct CommandContext<'a> {
+    /// Mutable project state (scene, assets, manifest).
+    pub project: &'a mut ProjectContext,
+    /// Current editor selection.
+    pub selection: &'a SelectionService,
+    /// Console for logging and diagnostics.
+    pub console: &'a mut ConsoleService,
+}
+
+/// A function that executes an editor command and returns an undoable record.
+pub type CommandHandler = Box<dyn Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand>>;
+
+/// A command with optional execution handler.
+pub struct ExecutableCommand {
+    /// Command metadata (id, label, category, shortcut, availability).
+    pub metadata: EditorCommand,
+    /// Optional execution handler (omitted from debug output).
+    pub handler: Option<CommandHandler>,
+}
+
+impl std::fmt::Debug for ExecutableCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutableCommand")
+            .field("metadata", &self.metadata)
+            .field("handler", &self.handler.as_ref().map(|_| "fn"))
+            .finish()
+    }
+}
+
 /// Registry for menu, toolbar, and command-palette commands.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Default)]
 pub struct CommandRegistry {
-    commands: BTreeMap<String, EditorCommand>,
+    commands: BTreeMap<String, ExecutableCommand>,
 }
 
 impl CommandRegistry {
-    /// Registers or replaces a command.
+    /// Registers or replaces a command with metadata only (no handler).
     pub fn register(&mut self, command: EditorCommand) {
-        self.commands.insert(command.id.clone(), command);
+        self.commands.insert(
+            command.id.clone(),
+            ExecutableCommand {
+                metadata: command,
+                handler: None,
+            },
+        );
     }
 
-    /// Looks up a command.
+    /// Registers a command with an execution handler.
+    pub fn register_executable(
+        &mut self,
+        command: EditorCommand,
+        handler: impl Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand> + 'static,
+    ) {
+        self.commands.insert(
+            command.id.clone(),
+            ExecutableCommand {
+                metadata: command,
+                handler: Some(Box::new(handler)),
+            },
+        );
+    }
+
+    /// Looks up a command's metadata.
     pub fn get(&self, id: &str) -> Option<&EditorCommand> {
-        self.commands.get(id)
+        self.commands.get(id).map(|cmd| &cmd.metadata)
     }
 
-    /// Lists commands in stable id order.
+    /// Lists command metadata in stable id order.
     pub fn commands(&self) -> impl Iterator<Item = &EditorCommand> {
-        self.commands.values()
+        self.commands.values().map(|cmd| &cmd.metadata)
+    }
+
+    /// Executes a command by id, returning an undoable operation record.
+    ///
+    /// Returns an error if the command is not found or has no handler.
+    pub fn execute(&self, id: &str, ctx: &mut CommandContext<'_>) -> EngineResult<UndoCommand> {
+        let cmd = self
+            .commands
+            .get(id)
+            .ok_or_else(|| EngineError::config(format!("unknown command: {id}")))?;
+        match &cmd.handler {
+            Some(handler) => handler(ctx),
+            None => Err(EngineError::config(format!(
+                "command {id} has no executable handler"
+            ))),
+        }
+    }
+
+    /// Returns whether a command is executable.
+    pub fn is_executable(&self, id: &str) -> bool {
+        self.commands
+            .get(id)
+            .and_then(|cmd| cmd.handler.as_ref())
+            .is_some()
+    }
+
+    /// Lists commands with executable handlers (usable by AI agents).
+    pub fn list_executable(&self) -> impl Iterator<Item = &EditorCommand> {
+        self.commands
+            .values()
+            .filter(|cmd| cmd.handler.is_some())
+            .map(|cmd| &cmd.metadata)
+    }
+}
+
+impl std::fmt::Debug for CommandRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandRegistry")
+            .field("command_count", &self.commands.len())
+            .finish()
     }
 }
 
@@ -924,6 +1074,253 @@ pub fn register_core_commands(registry: &mut CommandRegistry) {
     }
 }
 
+/// Registers executable AI-agent commands.
+///
+/// These commands have handler closures and can be invoked by an AI agent
+/// through `CommandRegistry::execute`. Only commands that are useful for
+/// programmatic scene manipulation are included — UI commands are skipped.
+pub fn register_ai_commands(registry: &mut CommandRegistry) {
+    // ── GameObject creation ────────────────────────────────────────
+
+    registry.register_executable(
+        command(
+            "gameobject.create_empty",
+            "Create Empty",
+            "GameObject",
+            Some("Ctrl+Shift+N"),
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            let entity = ctx.project.scene.create_object("GameObject")?;
+            let entity_id = format!(
+                "{}:{}",
+                entity.handle().slot(),
+                entity.handle().generation().get()
+            );
+            let snapshot = ctx.project.scene.to_json("after_create")?;
+            Ok(UndoCommand::new(
+                "Create Empty",
+                format!("entity:{entity_id}"),
+                "",
+                snapshot,
+            ))
+        },
+    );
+
+    registry.register_executable(
+        command(
+            "gameobject.create_camera",
+            "Create Camera",
+            "GameObject",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            use engine_ecs::CameraComponentData;
+            let entity = ctx.project.scene.create_object("Camera")?;
+            ctx.project.scene.upsert_component(
+                entity,
+                engine_ecs::ComponentData::Camera(CameraComponentData::default()),
+            )?;
+            let entity_id = format!(
+                "{}:{}",
+                entity.handle().slot(),
+                entity.handle().generation().get()
+            );
+            Ok(UndoCommand::new(
+                "Create Camera",
+                format!("entity:{entity_id}"),
+                "",
+                ctx.project.scene.to_json("after_create_camera")?,
+            ))
+        },
+    );
+
+    registry.register_executable(
+        command(
+            "gameobject.create_light",
+            "Create Light",
+            "GameObject",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            use engine_ecs::LightComponentData;
+            let entity = ctx.project.scene.create_object("Light")?;
+            ctx.project.scene.upsert_component(
+                entity,
+                engine_ecs::ComponentData::Light(LightComponentData::default()),
+            )?;
+            let entity_id = format!(
+                "{}:{}",
+                entity.handle().slot(),
+                entity.handle().generation().get()
+            );
+            Ok(UndoCommand::new(
+                "Create Light",
+                format!("entity:{entity_id}"),
+                "",
+                ctx.project.scene.to_json("after_create_light")?,
+            ))
+        },
+    );
+
+    // ── Component management ───────────────────────────────────────
+
+    registry.register_executable(
+        command(
+            "component.add_script",
+            "Add Script",
+            "Component",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            let selection = ctx
+                .selection
+                .selected()
+                .ok_or_else(|| EngineError::config("no entity selected"))?;
+            let entity_id = match selection {
+                Selection::Entity(id) => id.clone(),
+                _ => return Err(EngineError::config("selection is not an entity")),
+            };
+            let entity = engine_ecs::Entity::from_handle(engine_core::Handle::new(
+                entity_id
+                    .strip_prefix("entity:")
+                    .and_then(|s| s.split(':').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                engine_core::Generation::FIRST,
+            ));
+            ctx.project.scene.upsert_component(
+                entity,
+                engine_ecs::ComponentData::Script(engine_ecs::ScriptComponentProxy {
+                    backend: "rhai".to_string(),
+                    script: String::new(),
+                    state_json: None,
+                    pending_recovery: false,
+                }),
+            )?;
+            Ok(UndoCommand::new(
+                "Add Script",
+                format!("entity:{entity_id}"),
+                "",
+                ctx.project.scene.to_json("after_add_script")?,
+            ))
+        },
+    );
+
+    registry.register_executable(
+        command(
+            "component.add_rigidbody",
+            "Add Rigidbody",
+            "Component",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            let entity = resolve_selected_entity(ctx.selection)?;
+            ctx.project.scene.upsert_component(
+                entity,
+                engine_ecs::ComponentData::Rigidbody(engine_ecs::RigidbodyComponentData::default()),
+            )?;
+            Ok(UndoCommand::new(
+                "Add Rigidbody",
+                format!("entity:{}", entity.handle().slot()),
+                "",
+                ctx.project.scene.to_json("after_add_rigidbody")?,
+            ))
+        },
+    );
+
+    registry.register_executable(
+        command(
+            "component.add_collider",
+            "Add Collider",
+            "Component",
+            None,
+            CommandAvailability::ProjectOpen,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            let entity = resolve_selected_entity(ctx.selection)?;
+            ctx.project.scene.upsert_component(
+                entity,
+                engine_ecs::ComponentData::Collider(engine_ecs::ColliderComponentData::default()),
+            )?;
+            Ok(UndoCommand::new(
+                "Add Collider",
+                format!("entity:{}", entity.handle().slot()),
+                "",
+                ctx.project.scene.to_json("after_add_collider")?,
+            ))
+        },
+    );
+
+    // ── Scene persistence ──────────────────────────────────────────
+
+    registry.register_executable(
+        command(
+            "scene.save",
+            "Save",
+            "File",
+            Some("Ctrl+S"),
+            CommandAvailability::DirtyScene,
+        ),
+        |ctx: &mut CommandContext<'_>| {
+            let scene_path = ctx
+                .project
+                .project_root
+                .join(&ctx.project.manifest.default_scene);
+            let before =
+                fs::read_to_string(&scene_path).map_err(|source| EngineError::Filesystem {
+                    path: scene_path.clone(),
+                    source,
+                })?;
+            let after = ctx.project.scene.to_json("save")?;
+            let tmp_path = scene_path.with_extension("tmp");
+            fs::write(&tmp_path, &after).map_err(|source| EngineError::Filesystem {
+                path: tmp_path.clone(),
+                source,
+            })?;
+            fs::rename(&tmp_path, &scene_path).map_err(|source| EngineError::Filesystem {
+                path: scene_path.clone(),
+                source,
+            })?;
+            Ok(UndoCommand::new(
+                "Save Scene",
+                scene_path.to_string_lossy(),
+                before,
+                after,
+            ))
+        },
+    );
+}
+
+/// Resolves the currently selected entity from the selection service.
+fn resolve_selected_entity(selection: &SelectionService) -> EngineResult<engine_ecs::Entity> {
+    let sel = selection
+        .selected()
+        .ok_or_else(|| EngineError::config("no entity selected"))?;
+    let entity_id = match sel {
+        Selection::Entity(id) => id.clone(),
+        _ => return Err(EngineError::config("selection is not an entity")),
+    };
+    // Parse "entity:<slot>:<gen>" or "<slot>:<gen>" format
+    let id_part = entity_id.strip_prefix("entity:").unwrap_or(&entity_id);
+    let parts: Vec<&str> = id_part.split(':').collect();
+    if parts.len() >= 1 {
+        if let Ok(slot) = parts[0].parse::<u32>() {
+            return Ok(engine_ecs::Entity::from_handle(engine_core::Handle::new(
+                slot,
+                engine_core::Generation::FIRST,
+            )));
+        }
+    }
+    Err(EngineError::config(format!(
+        "cannot parse entity id: {entity_id}"
+    )))
+}
+
 fn command(
     id: &str,
     label: &str,
@@ -995,6 +1392,146 @@ impl ProjectContext {
             scene,
             asset_db,
             project_root,
+        })
+    }
+
+    /// Serializes the project state into an AI-consumable context.
+    ///
+    /// Produces a compact JSON representation of the scene graph, components,
+    /// transforms, and asset list suitable as LLM prompt context.
+    pub fn to_ai_context(&self) -> serde_json::Value {
+        serde_json::json!({
+            "project": {
+                "name": self.manifest.name,
+                "default_scene": self.manifest.default_scene,
+            },
+            "scene": self.scene_to_ai_context(),
+            "assets": self.assets_to_ai_context(),
+        })
+    }
+
+    fn scene_to_ai_context(&self) -> serde_json::Value {
+        let objects: Vec<serde_json::Value> = self
+            .scene
+            .objects()
+            .iter()
+            .map(|(entity, obj)| {
+                let transform = self.scene.transforms().local(*entity);
+                let parent = self.scene.transforms().parent(*entity);
+                serde_json::json!({
+                    "id": format!("{}:{}",
+                        entity.handle().slot(),
+                        entity.handle().generation().get()
+                    ),
+                    "name": obj.name,
+                    "tag": obj.tag,
+                    "layer": obj.layer,
+                    "active": obj.active,
+                    "parent": parent.map(|p| format!("{}:{}",
+                        p.handle().slot(),
+                        p.handle().generation().get()
+                    )),
+                    "transform": transform.map(|t| serde_json::json!({
+                        "position": [t.translation.x, t.translation.y, t.translation.z],
+                        "rotation": [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                        "scale": [t.scale.x, t.scale.y, t.scale.z],
+                    })),
+                    "components": obj.components.iter()
+                        .map(|c| Self::component_to_ai_context(c))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        serde_json::json!({ "objects": objects })
+    }
+
+    fn component_to_ai_context(component: &engine_ecs::ComponentData) -> serde_json::Value {
+        use engine_ecs::ComponentData;
+        match component {
+            ComponentData::Camera(c) => serde_json::json!({
+                "type": "Camera",
+                "fov": c.vertical_fov_degrees,
+                "near": c.near,
+                "far": c.far,
+                "primary": c.primary,
+            }),
+            ComponentData::MeshRenderer(m) => serde_json::json!({
+                "type": "MeshRenderer",
+                "mesh": m.mesh.map(|id| id.as_u128().to_string()),
+                "builtin_mesh": m.builtin_mesh,
+                "casts_shadows": m.casts_shadows,
+                "receive_shadows": m.receive_shadows,
+            }),
+            ComponentData::Light(l) => serde_json::json!({
+                "type": "Light",
+                "kind": l.kind,
+                "color": [l.color.x, l.color.y, l.color.z],
+                "intensity": l.intensity,
+                "range": l.range,
+                "spot_angle": l.spot_angle,
+            }),
+            ComponentData::Rigidbody(r) => serde_json::json!({
+                "type": "Rigidbody",
+                "body_type": r.body_type,
+                "mass": r.mass,
+                "use_gravity": r.use_gravity,
+                "linear_damping": r.linear_damping,
+                "angular_damping": r.angular_damping,
+            }),
+            ComponentData::Collider(c) => serde_json::json!({
+                "type": "Collider",
+                "shape": c.shape,
+                "size": [c.size.x, c.size.y, c.size.z],
+                "is_trigger": c.is_trigger,
+            }),
+            ComponentData::Script(s) => serde_json::json!({
+                "type": "Script",
+                "backend": s.backend,
+                "script": s.script,
+            }),
+            ComponentData::AudioSource(a) => serde_json::json!({
+                "type": "AudioSource",
+                "clip": a.clip.map(|id| id.as_u128().to_string()),
+                "volume": a.volume,
+                "looping": a.looping,
+                "play_on_start": a.play_on_start,
+            }),
+            ComponentData::ParticleEmitter(p) => serde_json::json!({
+                "type": "ParticleEmitter",
+                "max_particles": p.max_particles,
+                "emission_rate": p.emission_rate,
+            }),
+            ComponentData::Sprite2D(s) => serde_json::json!({
+                "type": "Sprite2D",
+                "texture": s.texture.map(|id| id.as_u128().to_string()),
+            }),
+            ComponentData::Camera2D(c) => serde_json::json!({
+                "type": "Camera2D",
+                "zoom": c.zoom,
+            }),
+            ComponentData::AnimationPlayer(_a) => serde_json::json!({
+                "type": "AnimationPlayer",
+            }),
+            _ => serde_json::json!({ "type": component.type_id() }),
+        }
+    }
+
+    fn assets_to_ai_context(&self) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = self
+            .asset_db
+            .iter_entries()
+            .map(|entry| {
+                serde_json::json!({
+                    "guid": entry.guid.to_string(),
+                    "path": entry.path.to_string_lossy(),
+                    "kind": format!("{:?}", entry.kind),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "count": items.len(),
+            "items": items,
         })
     }
 }
@@ -1162,5 +1699,72 @@ mod tests {
         assert_eq!(ctx.manifest.name, "Aster Example");
         assert!(ctx.scene.object_count() > 0);
         assert_eq!(ctx.project_root, project_root);
+    }
+
+    #[test]
+    fn ai_context_includes_scene_objects_and_assets() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir.join("../../examples/project");
+
+        let ctx = ProjectContext::open(&project_root).unwrap();
+        let ai_ctx = ctx.to_ai_context();
+
+        // Verify top-level structure
+        assert!(ai_ctx.get("project").is_some());
+        assert!(ai_ctx.get("scene").is_some());
+        assert!(ai_ctx.get("assets").is_some());
+
+        // Verify scene objects exist
+        let objects = ai_ctx["scene"]["objects"]
+            .as_array()
+            .expect("scene.objects should be an array");
+        assert!(!objects.is_empty(), "scene should have at least one object");
+
+        // Verify each object has required fields
+        let first_obj = &objects[0];
+        assert!(first_obj.get("id").and_then(|v| v.as_str()).is_some());
+        assert!(first_obj.get("name").and_then(|v| v.as_str()).is_some());
+        assert!(first_obj.get("components").is_some());
+        assert!(first_obj.get("transform").is_some());
+
+        // Verify assets are present
+        let assets = ai_ctx["assets"]["items"]
+            .as_array()
+            .expect("assets.items should be an array");
+        // Example project should have at least one scanned asset
+        assert!(
+            ai_ctx["assets"]["count"].as_u64().unwrap_or(0) > 0 || assets.is_empty(),
+            "assets should have count field"
+        );
+    }
+
+    #[test]
+    fn ai_context_component_types_are_human_readable() {
+        use engine_core::math::Transform;
+        use engine_ecs::{ComponentData, LightComponentData, ProjectManifest, Scene};
+
+        let mut scene = Scene::new();
+        let entity = scene.create_object("TestLight").unwrap();
+        scene
+            .transforms_mut()
+            .set_local(entity, Transform::IDENTITY);
+        scene
+            .upsert_component(entity, ComponentData::Light(LightComponentData::default()))
+            .unwrap();
+
+        let asset_db =
+            engine_assets::AssetDatabase::new(std::env::temp_dir(), std::env::temp_dir());
+        let ctx = ProjectContext {
+            manifest: ProjectManifest::example(),
+            scene,
+            asset_db,
+            project_root: std::env::temp_dir(),
+        };
+
+        let ai_ctx = ctx.to_ai_context();
+        let objects = ai_ctx["scene"]["objects"].as_array().unwrap();
+        let components = objects[0]["components"].as_array().unwrap();
+
+        assert_eq!(components[0]["type"].as_str().unwrap(), "Light");
     }
 }

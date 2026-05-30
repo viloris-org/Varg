@@ -1,6 +1,7 @@
 //! Panel modules for the editor shell.
 
 pub mod console;
+pub mod copilot;
 pub mod dialogs;
 pub mod hierarchy;
 pub mod inspector;
@@ -12,6 +13,7 @@ pub mod viewport;
 
 // Re-export panel drawing functions
 pub use console::draw_console;
+pub use copilot::draw_copilot;
 pub use dialogs::{draw_close_project_dialog, draw_command_palette, draw_script_editor};
 pub use hierarchy::draw_hierarchy;
 pub use inspector::draw_inspector;

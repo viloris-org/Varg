@@ -376,6 +376,8 @@ pub struct ShellUiState {
     pub asset_delete_confirm: Option<PathBuf>,
     /// Current in-editor script editing session.
     pub script_editor: Option<ScriptEditorState>,
+    /// Copilot panel transient state.
+    pub copilot: CopilotPanelState,
 }
 
 impl ShellUiState {
@@ -444,6 +446,10 @@ impl ShellUiState {
             asset_rename: None,
             asset_delete_confirm: None,
             script_editor: None,
+            copilot: CopilotPanelState {
+                visible: true,
+                ..CopilotPanelState::default()
+            },
         }
     }
 }
@@ -487,6 +493,94 @@ pub struct ScriptEditorState {
     pub dirty: bool,
     /// Last save/load status for the editor window.
     pub status: Option<String>,
+}
+
+/// Transient Copilot panel state.
+#[derive(Clone, Debug)]
+pub struct CopilotPanelState {
+    /// Whether the panel is visible.
+    pub visible: bool,
+    /// User input text.
+    pub input: String,
+    /// Chat history.
+    pub messages: Vec<CopilotChatMessage>,
+    /// Current operation status.
+    pub status: CopilotStatus,
+    /// Whether auto-accept is enabled for low/medium risk operations.
+    pub auto_accept: bool,
+    /// Whether the trace section is expanded.
+    pub trace_expanded: bool,
+    /// Cached plan preview lines (one per planned operation).
+    pub plan_preview: Vec<PlanPreviewItem>,
+    /// Cached trace entries from the last execution.
+    pub trace_entries: Vec<String>, // serialized TraceEntry debug lines
+    /// Console entry count from the last execution.
+    pub console_entry_count: usize,
+    /// Error count from the last execution.
+    pub console_error_count: usize,
+    /// Status message to show (e.g. "Applied 4 operations").
+    pub status_message: Option<String>,
+    /// Error message to display.
+    pub error_message: Option<String>,
+}
+
+impl Default for CopilotPanelState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            input: String::new(),
+            messages: Vec::new(),
+            status: CopilotStatus::Idle,
+            auto_accept: false,
+            trace_expanded: false,
+            plan_preview: Vec::new(),
+            trace_entries: Vec::new(),
+            console_entry_count: 0,
+            console_error_count: 0,
+            status_message: None,
+            error_message: None,
+        }
+    }
+}
+
+/// Status of the current Copilot operation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum CopilotStatus {
+    /// Idle — waiting for user input.
+    #[default]
+    Idle,
+    /// Agent is planning (sending to model, parsing response).
+    Planning,
+    /// Plan is ready for user review.
+    ReadyForReview,
+    /// Agent is executing approved operations.
+    Executing,
+    /// Execution complete.
+    Complete,
+    /// An error occurred.
+    Error(String),
+}
+
+/// A single message in the Copilot chat history.
+#[derive(Clone, Debug)]
+pub struct CopilotChatMessage {
+    /// Message role ("user" or "assistant").
+    pub role: String,
+    /// Message content.
+    pub content: String,
+}
+
+/// A single planned operation shown in the review UI.
+#[derive(Clone, Debug)]
+pub struct PlanPreviewItem {
+    /// Index in the plan.
+    pub index: usize,
+    /// Human-readable preview text.
+    pub preview: String,
+    /// Whether the operation is write-capable (requires approval).
+    pub requires_write: bool,
+    /// User has approved this operation.
+    pub approved: bool,
 }
 
 /// Play Mode command requested by editor UI and executed by the native host.
