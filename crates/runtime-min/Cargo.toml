@@ -44,9 +44,7 @@ editor = [
     "engine-core/editor",
     "engine-ecs/editor",
     "dep:engine-editor",
-    "dep:engine-editor-ui",
     "engine-editor/editor",
-    "engine-editor-ui/editor",
     "engine-platform/editor",
     "engine-render/editor",
 ]
@@ -85,7 +83,6 @@ engine-core.workspace = true
 engine-ecs.workspace = true
 engine-ai = { workspace = true, optional = true }
 engine-editor = { workspace = true, optional = true }
-engine-editor-ui = { workspace = true, optional = true }
 engine-physics = { workspace = true, optional = true }
 engine-platform.workspace = true
 engine-render.workspace = true

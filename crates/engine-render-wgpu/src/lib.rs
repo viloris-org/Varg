@@ -38,6 +38,10 @@ struct Instance {
     offset: [f32; 3],
     scale: [f32; 3],
     color: [f32; 4],
+    rotation: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    emissive: [f32; 3],
 }
 
 #[repr(C)]
@@ -51,15 +55,6 @@ struct CameraUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ModelUniform {
     model: [[f32; 4]; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct MaterialUniform {
-    base_color: [f32; 4],
-    metallic: f32,
-    roughness: f32,
-    _pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -85,6 +80,20 @@ impl Default for LightingUniform {
             ambient: DEFAULT_AMBIENT_LIGHT,
             params: [0, 0, 0, 0],
             lights: [ForwardLightUniform::zeroed(); MAX_FORWARD_LIGHTS],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadowUniform {
+    light_view_projection: [[f32; 4]; 4],
+}
+
+impl ShadowUniform {
+    fn zeroed() -> Self {
+        Self {
+            light_view_projection: IDENTITY_MAT4,
         }
     }
 }
@@ -184,6 +193,13 @@ pub struct WgpuRenderDevice {
     grid_bind_group: wgpu::BindGroup,
     grid_vertex_buffer: wgpu::Buffer,
     grid_vertex_count: u32,
+    _shadow_depth: wgpu::Texture,
+    shadow_depth_view: wgpu::TextureView,
+    _shadow_sampler: wgpu::Sampler,
+    shadow_uniform: wgpu::Buffer,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_bind_group: wgpu::BindGroup,
+    material_cache: HashMap<String, ([f32; 4], f32, f32, [f32; 3])>,
     /// Frame-lagged destruction queue: (frame_index, resource).
     destroy_queue: Vec<(u64, DestroyResource)>,
 }
@@ -418,7 +434,7 @@ impl WgpuRenderDevice {
     /// Creates a wgpu render device from pre-created shared device and queue.
     ///
     /// Use this when the host (e.g. CLI editor) already owns a wgpu device/queue
-    /// that must be shared between the 3D renderer and egui compositor.
+    /// that must be shared between the 3D renderer and the host compositor.
     pub fn from_arc_device(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
@@ -490,9 +506,26 @@ impl WgpuRenderDevice {
         self.preview_target.size()
     }
 
+    /// Register PBR material parameters for an asset material name.
+    ///
+    /// Material names match the format used in `RenderObject::material`, e.g.
+    /// `"asset:0123456789abcdef"`. Parameters registered here override the
+    /// default built-in material lookups.
+    pub fn register_material_params(
+        &mut self,
+        name: &str,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+        emissive: [f32; 3],
+    ) {
+        self.material_cache
+            .insert(name.to_owned(), (base_color, metallic, roughness, emissive));
+    }
+
     /// Prepares instance buffer from mesh batches for rendering.
     fn prepare_render_batches(&mut self, world: &RenderWorld) -> Vec<(String, u32)> {
-        let batches = mesh_batches_from_world(world);
+        let batches = self.mesh_batches_from_world(world);
         let total_instances: usize = batches.iter().map(|(_, inst)| inst.len()).sum();
         if total_instances > self.instance_capacity {
             self.instance_capacity = total_instances.next_power_of_two();
@@ -517,7 +550,7 @@ impl WgpuRenderDevice {
 
     /// Renders a render world to the default offscreen target, bypassing any surface.
     ///
-    /// Use this when the host composites the result into its own UI (e.g., egui).
+    /// Use this when the host composites the result into its own UI.
     pub fn render_world_offscreen(&mut self, world: &RenderWorld) -> EngineResult<()> {
         let handle = self.default_target.handle;
         let (tw, th) = self.default_target.size();
@@ -532,7 +565,7 @@ impl WgpuRenderDevice {
 
     /// Renders a render world to the game offscreen target, bypassing any surface.
     ///
-    /// Use this when the host composites the game view result into its own UI (e.g., egui).
+    /// Use this when the host composites the game view result into its own UI.
     pub fn render_world_offscreen_game(&mut self, world: &RenderWorld) -> EngineResult<()> {
         let handle = self.game_target.handle;
         let (tw, th) = self.game_target.size();
@@ -655,6 +688,9 @@ impl WgpuRenderDevice {
         let lighting = lighting_uniform_from_world(world);
         self.queue
             .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+        let shadow = shadow_uniform_from_world(world);
+        self.queue
+            .write_buffer(&self.shadow_uniform, 0, bytemuck::bytes_of(&shadow));
 
         let target = self
             .targets
@@ -665,6 +701,17 @@ impl WgpuRenderDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some(encoder_label),
             });
+        encode_shadow_pass(
+            &mut encoder,
+            &self.shadow_depth_view,
+            &self.shadow_pipeline,
+            &self.shadow_bind_group,
+            &self.vertex_buffer,
+            &self.index_buffer,
+            &self.instance_buffer,
+            &batches,
+            &self.mesh_cache,
+        );
         encode_batched_forward_pass(
             &mut encoder,
             &target.color_view,
@@ -761,16 +808,6 @@ impl WgpuRenderDevice {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let material_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("aster material uniform"),
-            contents: bytemuck::bytes_of(&MaterialUniform {
-                base_color: [1.0, 1.0, 1.0, 1.0],
-                metallic: 0.0,
-                roughness: 0.5,
-                _pad: [0.0; 2],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
         let lighting_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aster lighting uniform"),
             contents: bytemuck::bytes_of(&LightingUniform::default()),
@@ -821,12 +858,44 @@ impl WgpuRenderDevice {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+        // Shadow map resources
+        let shadow_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aster shadow depth"),
+            size: wgpu::Extent3d {
+                width: 2048,
+                height: 2048,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_depth_view = shadow_depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("aster shadow sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster shadow uniform"),
+            contents: bytemuck::bytes_of(&ShadowUniform::zeroed()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("aster forward bind group layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -847,16 +916,6 @@ impl WgpuRenderDevice {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -865,13 +924,39 @@ impl WgpuRenderDevice {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -896,19 +981,27 @@ impl WgpuRenderDevice {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: material_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
                     resource: wgpu::BindingResource::TextureView(&default_texture_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 3,
                     resource: wgpu::BindingResource::Sampler(&default_sampler),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 4,
                     resource: lighting_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&shadow_depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: shadow_uniform.as_entire_binding(),
                 },
             ],
         });
@@ -940,14 +1033,18 @@ impl WgpuRenderDevice {
                         attributes: &wgpu::vertex_attr_array![
                             3 => Float32x3,
                             4 => Float32x3,
-                            5 => Float32x4
+                            5 => Float32x4,
+                            6 => Float32x4,
+                            7 => Float32,
+                            8 => Float32,
+                            9 => Float32x3
                         ],
                     },
                 ],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 ..wgpu::PrimitiveState::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -967,7 +1064,7 @@ impl WgpuRenderDevice {
                         .as_ref()
                         .map(|(_, config)| config.format)
                         .unwrap_or_else(|| to_wgpu_format(format)),
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1069,6 +1166,93 @@ impl WgpuRenderDevice {
         });
         let grid_vertex_count = grid_vertices.len() as u32;
 
+        // Shadow pipeline
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster shadow shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
+        });
+        let shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster shadow bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aster shadow bind group"),
+            layout: &shadow_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_uniform.as_entire_binding(),
+            }],
+        });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aster shadow pipeline layout"),
+                bind_group_layouts: &[Some(&shadow_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster shadow pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3,
+                            1 => Float32x3,
+                            2 => Float32x2
+                        ],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            3 => Float32x3,
+                            4 => Float32x3,
+                            5 => Float32x4,
+                            6 => Float32x4,
+                            7 => Float32,
+                            8 => Float32,
+                            9 => Float32x3
+                        ],
+                    },
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aster cube vertices"),
             contents: bytemuck::cast_slice(CUBE_VERTICES),
@@ -1165,6 +1349,13 @@ impl WgpuRenderDevice {
             grid_bind_group,
             grid_vertex_buffer,
             grid_vertex_count,
+            _shadow_depth: shadow_depth,
+            shadow_depth_view,
+            _shadow_sampler: shadow_sampler,
+            shadow_uniform,
+            shadow_pipeline,
+            shadow_bind_group,
+            material_cache: HashMap::new(),
             destroy_queue: Vec::new(),
         };
         renderer.upload_debug_meshes();
@@ -1347,6 +1538,110 @@ impl WgpuRenderDevice {
         let view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         self.surface_depth = Some(depth);
         self.surface_depth_view = Some(view);
+    }
+
+    /// Groups render objects by mesh name for batched instanced rendering.
+    fn mesh_batches_from_world(&self, world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
+        let batch_capacity = (world.objects.len()
+            + usize::from(!world.sprites.is_empty())
+            + usize::from(!world.particles.is_empty()))
+        .min(32);
+        let mut batches: HashMap<&str, Vec<Instance>> = HashMap::with_capacity(batch_capacity);
+        for object in &world.objects {
+            let (color, metallic, roughness, emissive) = self.pbr_for_material(&object.material);
+            let t = object.transform;
+            let mesh = if object.mesh.is_empty() {
+                "debug/cube"
+            } else {
+                object.mesh.as_str()
+            };
+            batches.entry(mesh).or_default().push(Instance {
+                offset: [t.translation.x, t.translation.y, t.translation.z],
+                scale: [
+                    t.scale.x.max(0.05),
+                    t.scale.y.max(0.05),
+                    t.scale.z.max(0.05),
+                ],
+                color,
+                rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                metallic,
+                roughness,
+                emissive,
+            });
+        }
+        if !world.sprites.is_empty() {
+            let mut sprites = world.sprites.iter().collect::<Vec<_>>();
+            sprites.sort_by(|left, right| {
+                left.layer
+                    .cmp(&right.layer)
+                    .then(left.order_in_layer.cmp(&right.order_in_layer))
+            });
+            let sprite_instances = sprites.into_iter().map(|sprite| {
+                let t = sprite.transform;
+                let x = t.scale.x.abs().max(0.01) * if sprite.flip_h { -1.0 } else { 1.0 };
+                let y = t.scale.y.abs().max(0.01) * if sprite.flip_v { -1.0 } else { 1.0 };
+                Instance {
+                    offset: [
+                        t.translation.x,
+                        t.translation.y,
+                        t.translation.z + sprite.order_in_layer as f32 * 0.0001,
+                    ],
+                    scale: [x, y, t.scale.z.abs().max(0.01)],
+                    color: sprite.color,
+                    rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                    metallic: 0.0,
+                    roughness: 0.5,
+                    emissive: [0.0; 3],
+                }
+            });
+            batches
+                .entry("debug/plane")
+                .or_default()
+                .extend(sprite_instances);
+        }
+        if !world.particles.is_empty() {
+            let particle_instances: Vec<Instance> = world
+                .particles
+                .iter()
+                .map(|particle| {
+                    let t = particle.transform;
+                    Instance {
+                        offset: [t.translation.x, t.translation.y, t.translation.z],
+                        scale: [
+                            t.scale.x.max(0.01),
+                            t.scale.y.max(0.01),
+                            t.scale.z.max(0.01),
+                        ],
+                        color: particle.color,
+                        rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                        metallic: 0.0,
+                        roughness: 0.5,
+                        emissive: [0.0; 3],
+                    }
+                })
+                .collect();
+            batches
+                .entry("debug/plane")
+                .or_default()
+                .extend(particle_instances);
+        }
+        batches
+            .into_iter()
+            .map(|(mesh, instances)| (mesh.to_owned(), instances))
+            .collect()
+    }
+
+    fn pbr_for_material(&self, material: &str) -> ([f32; 4], f32, f32, [f32; 3]) {
+        if let Some(&params) = self.material_cache.get(material) {
+            return params;
+        }
+        if material.contains("debug") {
+            ([0.2, 0.65, 1.0, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        } else if material.contains("error") {
+            ([1.0, 0.2, 0.45, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        } else {
+            ([0.82, 0.86, 0.72, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        }
     }
 }
 
@@ -1644,6 +1939,19 @@ impl RenderDevice for WgpuRenderDevice {
         self.destroy_queue
             .retain(|(idx, _resource)| *idx > threshold);
     }
+
+    fn register_material_params(
+        &mut self,
+        name: &str,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+        emissive: [f32; 3],
+    ) {
+        WgpuRenderDevice::register_material_params(
+            self, name, base_color, metallic, roughness, emissive,
+        );
+    }
 }
 
 struct CreatedTarget(
@@ -1795,6 +2103,78 @@ fn encode_batched_forward_pass<'a>(
     }
 }
 
+fn shadow_uniform_from_world(world: &RenderWorld) -> ShadowUniform {
+    let light_dir = engine_core::math::Vec3::new(-0.5, -1.0, -0.25).normalized();
+    let center = world
+        .camera
+        .as_ref()
+        .map(|c| c.transform.translation)
+        .unwrap_or(engine_core::math::Vec3::ZERO);
+    let shadow_size = 10.0;
+    let distance = 15.0;
+    let light_pos = center - light_dir * distance;
+
+    let up = if light_dir.x.abs() < 0.99 {
+        engine_core::math::Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        engine_core::math::Vec3::new(0.0, 0.0, 1.0)
+    };
+    let view = look_at_rh(light_pos, center, up);
+    let proj = orthographic_rh(shadow_size, 1.0, 0.1, distance * 2.0);
+    let vp = mul_mat4(&proj, &view);
+
+    ShadowUniform {
+        light_view_projection: vp,
+    }
+}
+
+fn encode_shadow_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    depth_view: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    vertex_buffer: &wgpu::Buffer,
+    index_buffer: &wgpu::Buffer,
+    instance_buffer: &wgpu::Buffer,
+    batches: &[(String, u32)],
+    mesh_cache: &HashMap<String, MeshBuffers>,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aster shadow pass"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+
+    let mut instance_offset = 0u32;
+    for (mesh_name, count) in batches {
+        if *count == 0 {
+            continue;
+        }
+        let buffers = mesh_cache.get(mesh_name);
+        let (vertex_buf, index_buf, index_count) = match buffers {
+            Some(b) => (&b.vertex_buffer, &b.index_buffer, b.index_count),
+            None => (vertex_buffer, index_buffer, CUBE_INDEX_COUNT),
+        };
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.set_vertex_buffer(1, instance_buffer.slice(..));
+        pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..index_count, 0, instance_offset..instance_offset + count);
+        instance_offset += count;
+    }
+}
+
 fn encode_grid_pass(
     encoder: &mut wgpu::CommandEncoder,
     color_view: &wgpu::TextureView,
@@ -1896,11 +2276,33 @@ fn camera_uniform_from_world(world: &RenderWorld, aspect: f32) -> CameraUniform 
         .as_ref()
         .map(|camera| camera.transform.translation)
         .unwrap_or_else(|| engine_core::math::Vec3::new(0.0, 0.0, 5.0));
-    let view = look_at_rh(
-        eye,
-        engine_core::math::Vec3::ZERO,
-        engine_core::math::Vec3::new(0.0, 1.0, 0.0),
-    );
+
+    // Use the explicit look-at pivot if provided (editor orbit camera sets this),
+    // otherwise fall back to deriving the target from the camera's transform rotation.
+    let target = world
+        .camera
+        .as_ref()
+        .and_then(|camera| camera.look_at_target)
+        .unwrap_or_else(|| {
+            // Extract the local +Z axis from the rotation quaternion in world space.
+            // q * (0,0,1) gives the camera's local +Z in world space.
+            // Since the camera looks along local -Z, the view direction is
+            // -(+Z) which is achieved by target = eye - fwd below.
+            let q = world
+                .camera
+                .as_ref()
+                .map(|c| c.transform.rotation)
+                .unwrap_or(engine_core::math::Quat::IDENTITY);
+            let fwd = engine_core::math::Vec3::new(
+                2.0 * (q.x * q.z + q.w * q.y),
+                2.0 * (q.y * q.z - q.w * q.x),
+                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+            );
+            // Negate because camera looks along -Z in its local space.
+            engine_core::math::Vec3::new(eye.x - fwd.x, eye.y - fwd.y, eye.z - fwd.z)
+        });
+
+    let view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
     let fov = world
         .camera
         .as_ref()
@@ -2127,67 +2529,6 @@ fn mesh_name(mesh: &DebugMesh) -> String {
         DebugMesh::Cube => "debug/cube".to_string(),
         DebugMesh::Sphere(_) => "debug/sphere".to_string(),
         DebugMesh::Plane => "debug/plane".to_string(),
-    }
-}
-
-/// Groups render objects by mesh name for batched instanced rendering.
-fn mesh_batches_from_world(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
-    let batch_capacity = (world.objects.len() + usize::from(!world.particles.is_empty())).min(32);
-    let mut batches: HashMap<&str, Vec<Instance>> = HashMap::with_capacity(batch_capacity);
-    for object in &world.objects {
-        let color = color_for_material(&object.material);
-        let t = object.transform;
-        let mesh = if object.mesh.is_empty() {
-            "debug/cube"
-        } else {
-            object.mesh.as_str()
-        };
-        batches.entry(mesh).or_default().push(Instance {
-            offset: [t.translation.x, t.translation.y, t.translation.z],
-            scale: [
-                t.scale.x.max(0.05),
-                t.scale.y.max(0.05),
-                t.scale.z.max(0.05),
-            ],
-            color,
-        });
-    }
-    // Particles go into their own particle mesh batch
-    if !world.particles.is_empty() {
-        let particle_instances: Vec<Instance> = world
-            .particles
-            .iter()
-            .map(|particle| {
-                let t = particle.transform;
-                Instance {
-                    offset: [t.translation.x, t.translation.y, t.translation.z],
-                    scale: [
-                        t.scale.x.max(0.01),
-                        t.scale.y.max(0.01),
-                        t.scale.z.max(0.01),
-                    ],
-                    color: particle.color,
-                }
-            })
-            .collect();
-        batches
-            .entry("debug/plane")
-            .or_default()
-            .extend(particle_instances);
-    }
-    batches
-        .into_iter()
-        .map(|(mesh, instances)| (mesh.to_owned(), instances))
-        .collect()
-}
-
-fn color_for_material(material: &str) -> [f32; 4] {
-    if material.contains("debug") {
-        [0.2, 0.65, 1.0, 1.0]
-    } else if material.contains("error") {
-        [1.0, 0.2, 0.45, 1.0]
-    } else {
-        [0.82, 0.86, 0.72, 1.0]
     }
 }
 
@@ -2461,12 +2802,6 @@ struct ModelUniform {
     model: mat4x4<f32>,
 };
 
-struct MaterialUniform {
-    base_color: vec4<f32>,
-    metallic: f32,
-    roughness: f32,
-};
-
 struct ForwardLight {
     position_type: vec4<f32>,
     direction_range: vec4<f32>,
@@ -2482,10 +2817,16 @@ struct LightingUniform {
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> model: ModelUniform;
-@group(0) @binding(2) var<uniform> material: MaterialUniform;
-@group(0) @binding(3) var material_texture: texture_2d<f32>;
-@group(0) @binding(4) var material_sampler: sampler;
-@group(0) @binding(5) var<uniform> lighting: LightingUniform;
+@group(0) @binding(2) var material_texture: texture_2d<f32>;
+@group(0) @binding(3) var material_sampler: sampler;
+@group(0) @binding(4) var<uniform> lighting: LightingUniform;
+@group(0) @binding(5) var shadow_map: texture_depth_2d;
+@group(0) @binding(6) var shadow_sampler: sampler_comparison;
+@group(0) @binding(7) var<uniform> shadow: ShadowUniform;
+
+struct ShadowUniform {
+    light_view_projection: mat4x4<f32>,
+};
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -2494,6 +2835,10 @@ struct VsIn {
     @location(3) offset: vec3<f32>,
     @location(4) scale: vec3<f32>,
     @location(5) color: vec4<f32>,
+    @location(6) rotation: vec4<f32>,
+    @location(7) metallic: f32,
+    @location(8) roughness: f32,
+    @location(9) emissive: vec3<f32>,
 };
 
 struct VsOut {
@@ -2502,12 +2847,54 @@ struct VsOut {
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) world_position: vec3<f32>,
+    @location(4) metallic: f32,
+    @location(5) roughness: f32,
+    @location(6) emissive: vec3<f32>,
 };
+
+const PI: f32 = 3.14159265359;
+const EPSILON: f32 = 0.001;
+
+fn distribution_ggx(n: vec3<f32>, h: vec3<f32>, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let ndoth = max(dot(n, h), 0.0);
+    let ndoth2 = ndoth * ndoth;
+    let denom = ndoth2 * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * denom * denom, EPSILON);
+}
+
+fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = r * r / 8.0;
+    let ndotv = max(dot(n, v), 0.0);
+    let ndotl = max(dot(n, l), 0.0);
+    let g1v = ndotv / (ndotv * (1.0 - k) + k);
+    let g1l = ndotl / (ndotl * (1.0 - k) + k);
+    return g1v * g1l;
+}
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+}
 
 @vertex
 fn vs_main(input: VsIn) -> VsOut {
     var out: VsOut;
-    let world_pos = input.position * input.scale + input.offset;
+    let scaled_position = input.position * input.scale;
+    let rotated_position = scaled_position
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_position)
+        + input.rotation.w * scaled_position);
+    let world_pos = rotated_position + input.offset;
     let world_pos4 = model.model * vec4<f32>(world_pos, 1.0);
     out.position = camera.view_projection * world_pos4;
     let normal_mat = mat3x3<f32>(
@@ -2515,19 +2902,40 @@ fn vs_main(input: VsIn) -> VsOut {
         model.model[1].xyz,
         model.model[2].xyz,
     );
-    out.world_normal = normalize(normal_mat * input.normal);
+    let rotated_normal = input.normal
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, input.normal)
+        + input.rotation.w * input.normal);
+    out.world_normal = normalize(normal_mat * rotated_normal);
     out.uv = input.uv;
     out.color = input.color;
     out.world_position = world_pos4.xyz;
+    out.metallic = input.metallic;
+    out.roughness = input.roughness;
+    out.emissive = input.emissive;
     return out;
 }
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(input.world_normal);
+    let v = normalize(camera.camera_position.xyz - input.world_position);
     let tex_color = textureSample(material_texture, material_sampler, input.uv);
-    let base = material.base_color.rgb * input.color.rgb * tex_color.rgb;
-    var radiance = lighting.ambient.rgb;
+    let base_color = input.color.rgb * tex_color.rgb;
+    let roughness = clamp(input.roughness, 0.04, 1.0);
+    let metallic = clamp(input.metallic, 0.0, 1.0);
+
+    let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+
+    var color = lighting.ambient.rgb * base_color;
+
+    let shadow_coord = shadow.light_view_projection * vec4<f32>(input.world_position, 1.0);
+    let shadow_ndc = shadow_coord.xyz / shadow_coord.w;
+    let shadow_uv = shadow_ndc.xy * 0.5 + 0.5;
+    var shadow_factor = 1.0;
+    if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
+        && shadow_ndc.z >= 0.0 && shadow_ndc.z <= 1.0) {
+        shadow_factor = textureSampleCompare(shadow_map, shadow_sampler, shadow_uv, shadow_ndc.z - 0.0005);
+    }
 
     for (var i: u32 = 0u; i < lighting.params.x; i = i + 1u) {
         let light = lighting.lights[i];
@@ -2543,8 +2951,8 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
         } else {
             let to_light = light.position_type.xyz - input.world_position;
             let distance = length(to_light);
-            light_dir = to_light / max(distance, 0.001);
-            let range = max(light.direction_range.w, 0.001);
+            light_dir = to_light / max(distance, EPSILON);
+            let range = max(light.direction_range.w, EPSILON);
             let falloff = max(1.0 - distance / range, 0.0);
             attenuation = falloff * falloff;
 
@@ -2555,12 +2963,37 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
         }
 
         let ndotl = max(dot(n, light_dir), 0.0);
-        radiance = radiance + light_color * intensity * ndotl * attenuation * spot;
+        if (ndotl <= 0.0) {
+            continue;
+        }
+
+        let h = normalize(v + light_dir);
+        let ndotv = max(dot(n, v), 0.0);
+        let vdoth = max(dot(v, h), 0.0);
+
+        let d = distribution_ggx(n, h, roughness);
+        let g = geometry_smith(n, v, light_dir, roughness);
+        let f = fresnel_schlick(vdoth, f0);
+
+        let specular = (d * g * f) / max(4.0 * ndotv * ndotl, EPSILON);
+        let kd = (1.0 - f) * (1.0 - metallic);
+        let diffuse = kd * base_color / PI;
+
+        var radiance = (diffuse + specular) * light_color * intensity * ndotl;
+
+        if (light_type < 0.5) {
+            radiance = radiance * shadow_factor;
+        }
+
+        color = color + radiance * attenuation * spot;
     }
 
-    let lit = base * min(radiance, vec3<f32>(3.0, 3.0, 3.0));
-    let alpha = material.base_color.a * input.color.a * tex_color.a;
-    return vec4<f32>(lit, alpha);
+    color = color + input.emissive * base_color;
+
+    color = aces_tonemap(color);
+
+    let alpha = input.color.a * tex_color.a;
+    return vec4<f32>(color, alpha);
 }
 "#;
 
@@ -2601,6 +3034,37 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let fade = 1.0 - smoothstep(fade_start, half_extent, dist);
     let alpha = input.alpha_factor * fade;
     return vec4<f32>(vec3<f32>(0.6), alpha);
+}
+"#;
+
+const SHADOW_SHADER: &str = r#"
+struct ShadowUniform {
+    light_view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> shadow: ShadowUniform;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) offset: vec3<f32>,
+    @location(4) scale: vec3<f32>,
+    @location(5) color: vec4<f32>,
+    @location(6) rotation: vec4<f32>,
+    @location(7) metallic: f32,
+    @location(8) roughness: f32,
+    @location(9) emissive: vec3<f32>,
+};
+
+@vertex
+fn vs_main(input: VsIn) -> @builtin(position) vec4<f32> {
+    let scaled_position = input.position * input.scale;
+    let rotated_position = scaled_position
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_position)
+        + input.rotation.w * scaled_position);
+    let world_pos = rotated_position + input.offset;
+    return shadow.light_view_projection * vec4<f32>(world_pos, 1.0);
 }
 "#;
 
@@ -2698,6 +3162,7 @@ mod tests {
         let world = RenderWorld {
             camera: None,
             objects: Vec::new(),
+            sprites: Vec::new(),
             lights: vec![light],
             particles: vec![],
         };
@@ -2719,11 +3184,12 @@ mod tests {
                 test_render_object(2, "debug/cube"),
                 test_render_object(3, "debug/sphere"),
             ],
+            sprites: Vec::new(),
             lights: Vec::new(),
             particles: Vec::new(),
         };
 
-        let batches = mesh_batches_from_world(&world);
+        let batches = test_mesh_batches(&world);
 
         assert_eq!(batch_len(&batches, "debug/cube"), Some(2));
         assert_eq!(batch_len(&batches, "debug/sphere"), Some(1));
@@ -2735,6 +3201,7 @@ mod tests {
         let world = RenderWorld {
             camera: None,
             objects: vec![test_render_object(1, "debug/plane")],
+            sprites: Vec::new(),
             lights: Vec::new(),
             particles: vec![engine_render::RenderParticle {
                 object: engine_core::EntityId::from_u128(2),
@@ -2744,9 +3211,40 @@ mod tests {
             }],
         };
 
-        let batches = mesh_batches_from_world(&world);
+        let batches = test_mesh_batches(&world);
 
         assert_eq!(batch_len(&batches, "debug/plane"), Some(2));
+    }
+
+    #[test]
+    fn mesh_batches_render_sprites_as_colored_planes() {
+        let mut transform = engine_core::math::Transform::IDENTITY;
+        transform.rotation = engine_core::math::Quat::from_euler_deg(0.0, 0.0, 90.0);
+        let world = RenderWorld {
+            sprites: vec![engine_render::RenderSprite {
+                object: engine_core::EntityId::from_u128(2),
+                transform,
+                texture: None,
+                color: [0.2, 0.4, 0.6, 0.5],
+                order_in_layer: 7,
+                layer: "Default".to_string(),
+                flip_h: true,
+                flip_v: false,
+            }],
+            ..RenderWorld::default()
+        };
+
+        let batches = test_mesh_batches(&world);
+        let instances = &batches
+            .iter()
+            .find(|(mesh, _)| mesh == "debug/plane")
+            .unwrap()
+            .1;
+
+        assert_eq!(instances.len(), 1);
+        assert!(instances[0].scale[0] < 0.0);
+        assert_eq!(instances[0].color, [0.2, 0.4, 0.6, 0.5]);
+        assert_ne!(instances[0].rotation, [0.0, 0.0, 0.0, 1.0]);
     }
 
     fn batch_len(batches: &[(String, Vec<Instance>)], mesh: &str) -> Option<usize> {
@@ -2754,6 +3252,107 @@ mod tests {
             .iter()
             .find(|(name, _)| name == mesh)
             .map(|(_, instances)| instances.len())
+    }
+
+    fn test_mesh_batches(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
+        use std::collections::HashMap;
+        let batch_capacity = (world.objects.len()
+            + usize::from(!world.sprites.is_empty())
+            + usize::from(!world.particles.is_empty()))
+        .min(32);
+        let mut batches: HashMap<&str, Vec<Instance>> = HashMap::with_capacity(batch_capacity);
+        for object in &world.objects {
+            let (color, metallic, roughness, emissive) = test_pbr(&object.material);
+            let t = object.transform;
+            let mesh = if object.mesh.is_empty() {
+                "debug/cube"
+            } else {
+                object.mesh.as_str()
+            };
+            batches.entry(mesh).or_default().push(Instance {
+                offset: [t.translation.x, t.translation.y, t.translation.z],
+                scale: [
+                    t.scale.x.max(0.05),
+                    t.scale.y.max(0.05),
+                    t.scale.z.max(0.05),
+                ],
+                color,
+                rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                metallic,
+                roughness,
+                emissive,
+            });
+        }
+        if !world.sprites.is_empty() {
+            let mut sprites = world.sprites.iter().collect::<Vec<_>>();
+            sprites.sort_by(|left, right| {
+                left.layer
+                    .cmp(&right.layer)
+                    .then(left.order_in_layer.cmp(&right.order_in_layer))
+            });
+            let sprite_instances = sprites.into_iter().map(|sprite| {
+                let t = sprite.transform;
+                let x = t.scale.x.abs().max(0.01) * if sprite.flip_h { -1.0 } else { 1.0 };
+                let y = t.scale.y.abs().max(0.01) * if sprite.flip_v { -1.0 } else { 1.0 };
+                Instance {
+                    offset: [
+                        t.translation.x,
+                        t.translation.y,
+                        t.translation.z + sprite.order_in_layer as f32 * 0.0001,
+                    ],
+                    scale: [x, y, t.scale.z.abs().max(0.01)],
+                    color: sprite.color,
+                    rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                    metallic: 0.0,
+                    roughness: 0.5,
+                    emissive: [0.0; 3],
+                }
+            });
+            batches
+                .entry("debug/plane")
+                .or_default()
+                .extend(sprite_instances);
+        }
+        if !world.particles.is_empty() {
+            let particle_instances: Vec<Instance> = world
+                .particles
+                .iter()
+                .map(|particle| {
+                    let t = particle.transform;
+                    Instance {
+                        offset: [t.translation.x, t.translation.y, t.translation.z],
+                        scale: [
+                            t.scale.x.max(0.01),
+                            t.scale.y.max(0.01),
+                            t.scale.z.max(0.01),
+                        ],
+                        color: particle.color,
+                        rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                        metallic: 0.0,
+                        roughness: 0.5,
+                        emissive: [0.0; 3],
+                    }
+                })
+                .collect();
+            batches
+                .entry("debug/plane")
+                .or_default()
+                .extend(particle_instances);
+        }
+        batches
+            .into_iter()
+            .map(|(mesh, instances)| (mesh.to_owned(), instances))
+            .collect()
+    }
+
+    fn test_pbr(material: &str) -> ([f32; 4], f32, f32, [f32; 3]) {
+        if material.contains("debug") {
+            ([0.2, 0.65, 1.0, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        } else if material.contains("error") {
+            ([1.0, 0.2, 0.45, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        } else {
+            ([0.82, 0.86, 0.72, 1.0], 0.0, 0.5, [0.0, 0.0, 0.0])
+        }
     }
 
     fn test_render_object(id: u128, mesh: &str) -> engine_render::RenderObject {
@@ -2783,6 +3382,7 @@ mod tests {
             vertical_fov_degrees: 60.0,
             near: 0.1,
             far: 50.0,
+            look_at_target: None,
         };
         let mut lights = vec![
             test_light(
@@ -2826,6 +3426,7 @@ mod tests {
         let world = RenderWorld {
             camera: Some(camera),
             objects: Vec::new(),
+            sprites: Vec::new(),
             lights,
             particles: Vec::new(),
         };

@@ -172,6 +172,9 @@ pub struct TaskAssignment {
 
     /// ISO-8601 deadline for this task (or None for no deadline).
     pub deadline: Option<String>,
+
+    /// Immutable project snapshot this task was decomposed from.
+    pub snapshot_id: SnapshotId,
 }
 
 // ── Worker Output (Worker → Manager) ─────────────────────────────────────────

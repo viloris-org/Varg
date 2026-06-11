@@ -10,15 +10,13 @@ rust-version.workspace = true
 [dependencies]
 bitflags.workspace = true
 engine-core.workspace = true
-egui = { workspace = true, optional = true }
-egui-winit = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 
 [features]
 default = []
 runtime-min = ["engine-core/runtime-min"]
 runtime-game = ["runtime-min", "dep:winit"]
-editor = ["engine-core/editor", "dep:egui", "dep:egui-winit", "dep:winit"]
+editor = ["engine-core/editor", "dep:winit"]
 agent-tools = ["engine-core/agent-tools"]
 script-python = ["engine-core/script-python"]
 dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "engine-core/dev-full"]

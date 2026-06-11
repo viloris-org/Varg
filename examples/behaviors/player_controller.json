@@ -1,0 +1,122 @@
+{
+  "entity": "PlayerController",
+  "description": "WASD movement with jump and sprint",
+  "behaviors": [
+    {
+      "type": "Parallel",
+      "name": "player_controls",
+      "children": [
+        {
+          "type": "Sequence",
+          "name": "forward_movement",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "KeyHeld": {
+                  "key": "W"
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "MoveForward": {
+                  "speed": 5.0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Sequence",
+          "name": "backward_movement",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "KeyHeld": {
+                  "key": "S"
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "MoveBackward": {
+                  "speed": 3.0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Sequence",
+          "name": "left_strafe",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "KeyHeld": {
+                  "key": "A"
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "StrafeLeft": {
+                  "speed": 4.0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Sequence",
+          "name": "right_strafe",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "KeyHeld": {
+                  "key": "D"
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "StrafeRight": {
+                  "speed": 4.0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Sequence",
+          "name": "jump",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "KeyPressed": {
+                  "key": "Space"
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "ApplyImpulse": {
+                  "force": [0, 15, 0]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -7,8 +7,9 @@
 
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-Aster is a Rust game engine with a native editor — make scenes, tweak physics, write
-scripts, and see results in real time.
+Aster is an AI-native game engine. Describe your game in natural language, and a cluster
+of autonomous agents builds it — scene, logic, UI, and all. A full visual editor is
+there for you to tweak, polish, and take control whenever you want.
 
 ![Aster Editor](docs/screenshots/editor.png)
 
@@ -34,19 +35,26 @@ bun tauri dev
 
 ## Features
 
-- **Scene editor** — place objects, tweak transforms, add components, all through a
-  visual interface. No hand-editing JSON.
-- **Live play mode** — hit Play, see physics and scripts run, hit Stop with zero
+- **AI-native at its core** — not just an assistant bolted on. A multi-agent cluster
+  plans, builds, and reviews your game autonomously. Natural language in, playable
+  scene out. Sandboxed review keeps your project safe.
+- **Declarative game description** — six complete declarative systems (behavior
+  trees, scene graphs, UI layouts, system configs, asset manifests, project
+  structure) let agents generate structured JSON instead of code. LLM success rate
+  jumps from ~50% to ~90% compared to raw scripting.
+- **Visual scene editor** — place objects, tweak transforms, add components through a
+  polished interface. Best of both worlds: let AI do the heavy lifting, then
+  hand-tune every detail.
+- **Live play mode** — hit Play, see physics and scripts run; hit Stop with zero
   cleanup. Your edit scene is never touched.
-- **AI-assisted editing** — describe what you want in natural language; the agent
-  plans and executes scene changes under a sandboxed review workflow.
 - **Asset pipeline** — drop glTF/PNG into the project panel. File watcher triggers
   import, hot reload pushes updates live.
 - **Pluggable rendering** — swap backends without touching engine code. Ships with
   WGPU; Vulkan in progress.
-- **Headless runtime** — the same engine runs servers, CI tests, or automated
+- **Headless runtime** — the same engine runs in servers, CI pipelines, or automated
   builds. No window required.
-- **No unsafe code** — every crate uses `#![forbid(unsafe_code)]`.
+- **Zero unsafe code** — every crate uses `#![forbid(unsafe_code)]`. Safe by
+  default.
 
 ## Project Structure
 
@@ -55,7 +63,6 @@ Aster/
 ├── editor/                  # Tauri desktop app (React + Rust)
 ├── crates/
 │   ├── engine-editor/       # Editor workflow, services, agent tooling
-│   ├── engine-editor-ui/    # egui panels, widgets, viewport rendering
 │   ├── engine-ecs/          # Scene, entity, transform, world
 │   ├── engine-assets/       # Database, importers, hot reload
 │   ├── engine-render/       # Render graph, device trait
@@ -93,7 +100,7 @@ Profiles select which subsystems are linked at compile time:
 
 | Profile | What you get |
 |---|---|
-| `editor` | Full editor with egui panels, wgpu viewports, agent tools |
+| `editor` | Editor services, wgpu viewports, and agent tools for the Tauri frontend |
 | `runtime-min` | Headless — CI smoke tests, servers, automated builds |
 | `runtime-game` | Headless + windowing |
 | `dev-full` | Everything: editor, physics, audio, script, agent, render |

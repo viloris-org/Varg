@@ -370,7 +370,7 @@ impl DefaultCapabilityIssuer {
         if request.requested_operations.iter().any(|op| {
             matches!(
                 op.as_str(),
-                "destroy_object" | "remove_component" | "execute_command"
+                "destroy_object" | "remove_component" | "execute_command" | "run_command"
             )
         }) || request.requested_tools.len() > 5
         {
@@ -406,7 +406,7 @@ impl DefaultCapabilityIssuer {
                 risk_audit_required: request
                     .requested_operations
                     .iter()
-                    .any(|op| op == "write_script" || op == "execute_command"),
+                    .any(|op| op == "write_script" || op == "execute_command" || op == "run_command"),
                 user_approval_required: true,
             },
             RiskClass::Medium => ReviewRoute {
@@ -459,11 +459,42 @@ impl DefaultCapabilityIssuer {
         }
     }
 
-    /// Validates that requested paths are inside canonical roots.
-    fn validate_paths(&self, _request: &CapabilityRequest) -> Result<(), Vec<String>> {
-        // For the MVP, we accept most paths under the workspace root.
-        // A full implementation would check each path against a canonical root map.
-        Ok(())
+    /// Validates that requested paths are inside the workspace root.
+    fn validate_paths(&self, request: &CapabilityRequest) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        // Normalise workspace root to canonical form (strip trailing separator)
+        for path in request
+            .requested_read_paths
+            .iter()
+            .chain(request.requested_write_paths.iter())
+        {
+            let canonical = path.trim_end_matches('/').trim_end_matches('\\');
+            if canonical.is_empty() {
+                continue;
+            }
+            // Reject absolute paths that escape the workspace root
+            if canonical.starts_with('/')
+                || canonical.starts_with("\\")
+                || (canonical.len() > 1 && canonical.as_bytes()[1] == b':')
+            {
+                errors.push(format!("absolute path outside workspace root: {path}"));
+                continue;
+            }
+            // Reject parent-directory traversal that escapes above the root
+            if canonical.starts_with("..")
+                || canonical.contains("/../")
+                || canonical.contains("\\..\\")
+            {
+                errors.push(format!("path traversal outside workspace root: {path}"));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Validates the task binding consistency.
@@ -723,17 +754,23 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn fast_random_byte() -> u8 {
-    // Deterministic pseudo-random for the MVP.
-    // A production system would use getrandom or similar.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    (nanos
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407)
-        >> 56) as u8
+    // Use getrandom for cryptographic-quality randomness.
+    // This is used for grant secrets that must be unpredictable.
+    let mut buf = [0u8; 1];
+    getrandom::fill(&mut buf).unwrap_or_else(|_| {
+        // Fallback: mixing wall-clock nanos should never happen on modern kernels,
+        // but handle it gracefully rather than panicking in a security context.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        buf[0] = (nanos
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            >> 56) as u8;
+    });
+    buf[0]
 }
 
 /// Returns the current timestamp as an ISO-8601 string.

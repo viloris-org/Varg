@@ -16,11 +16,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "agent-tools")]
 pub mod agent;
 
+pub mod memory;
 pub mod native;
 pub mod physics;
 pub mod render;
 
-// UI state types extracted from engine-editor-ui (HubState, EditorShell, ProjectContext, etc.)
+// UI-agnostic state shared by the Tauri editor and automation tools.
 pub mod ui_state;
 
 // Re-export the key UI state types for convenience
@@ -59,11 +60,101 @@ pub enum CopilotProvider {
     #[default]
     Stub,
     /// OpenAI-compatible API.
+    #[serde(alias = "open_a_i")]
+    #[serde(rename = "openai")]
     OpenAI,
+    /// OpenAI Codex using a ChatGPT subscription and OAuth.
+    #[serde(rename = "codex_oauth")]
+    CodexOAuth,
     /// Anthropic API.
     Anthropic,
+    /// Google Gemini API.
+    Gemini,
     /// Local Ollama instance.
     Ollama,
+    /// Custom OpenAI-compatible endpoint.
+    Custom,
+    /// Xiaomi MiMo (unified provider with region/billing config).
+    Mimo,
+    /// DeepSeek API.
+    DeepSeek,
+    /// GLM/Zhipu AI (unified provider with region/billing config).
+    Glm,
+}
+
+/// Billing mode for providers that support both subscription and pay-as-you-go.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingMode {
+    /// Token Plan / subscription billing.
+    #[default]
+    Subscription,
+    /// Pay-as-you-go API billing.
+    Api,
+}
+
+/// Region selection for Xiaomi MiMo.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MimoRegion {
+    /// China mainland cluster.
+    #[default]
+    China,
+    /// Singapore cluster.
+    Singapore,
+    /// Europe (Amsterdam) cluster.
+    Europe,
+}
+
+/// Region selection for GLM/Zhipu AI.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlmRegion {
+    /// Bigmodel.cn (mainland China).
+    #[default]
+    Bigmodel,
+    /// ZAI (international).
+    Zai,
+}
+
+/// Provider-specific configuration for MiMo.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct MimoConfig {
+    /// Billing mode: subscription (Token Plan) or pay-as-you-go API.
+    #[serde(default)]
+    pub billing: BillingMode,
+    /// Regional cluster selection.
+    #[serde(default)]
+    pub region: MimoRegion,
+}
+
+impl Default for MimoConfig {
+    fn default() -> Self {
+        Self {
+            billing: BillingMode::Subscription,
+            region: MimoRegion::China,
+        }
+    }
+}
+
+/// Provider-specific configuration for GLM/Zhipu AI.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct GlmConfig {
+    /// Billing mode: subscription or pay-as-you-go API.
+    #[serde(default)]
+    pub billing: BillingMode,
+    /// Regional cluster selection.
+    #[serde(default)]
+    pub region: GlmRegion,
+}
+
+impl Default for GlmConfig {
+    fn default() -> Self {
+        Self {
+            billing: BillingMode::Subscription,
+            region: GlmRegion::Bigmodel,
+        }
+    }
 }
 
 /// AI model configuration for the Editor Copilot.
@@ -79,15 +170,24 @@ pub struct CopilotSettings {
     #[serde(default)]
     pub api_endpoint: Option<String>,
     /// API key (stored locally, never serialized to project files).
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     /// Max tokens per response.
     #[serde(default = "default_copilot_max_tokens")]
     pub max_tokens: u32,
+    /// Exact editor command identifiers that may run without prompting.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// MiMo-specific configuration (billing mode and region).
+    #[serde(default)]
+    pub mimo_config: MimoConfig,
+    /// GLM-specific configuration (billing mode and region).
+    #[serde(default)]
+    pub glm_config: GlmConfig,
 }
 
 fn default_copilot_model() -> String {
-    "gpt-4".to_owned()
+    "claude-sonnet-4-20250514".to_owned()
 }
 
 fn default_copilot_max_tokens() -> u32 {
@@ -102,6 +202,9 @@ impl Default for CopilotSettings {
             api_endpoint: None,
             api_key: None,
             max_tokens: default_copilot_max_tokens(),
+            allowed_commands: Vec::new(),
+            mimo_config: MimoConfig::default(),
+            glm_config: GlmConfig::default(),
         }
     }
 }
@@ -586,7 +689,7 @@ pub struct CommandContext<'a> {
 }
 
 /// A function that executes an editor command and returns an undoable record.
-pub type CommandHandler = Box<dyn Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand>>;
+pub type CommandHandler = Box<dyn Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand> + Send>;
 
 /// A command with optional execution handler.
 pub struct ExecutableCommand {
@@ -627,7 +730,7 @@ impl CommandRegistry {
     pub fn register_executable(
         &mut self,
         command: EditorCommand,
-        handler: impl Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand> + 'static,
+        handler: impl Fn(&mut CommandContext<'_>) -> EngineResult<UndoCommand> + Send + 'static,
     ) {
         self.commands.insert(
             command.id.clone(),
@@ -1378,6 +1481,34 @@ mod tests {
         let error = validate_new_project(&request).unwrap_err().to_string();
 
         assert!(error.contains("engine/toolchain version is required"));
+    }
+
+    #[test]
+    fn copilot_settings_accept_api_key_but_do_not_serialize_it() {
+        // "openai" is the canonical form; "open_a_i" is accepted via alias
+        let settings: CopilotSettings = serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "api_key": "secret",
+            "max_tokens": 1024
+        }))
+        .unwrap();
+
+        assert_eq!(settings.provider, CopilotProvider::OpenAI);
+        assert_eq!(settings.api_key.as_deref(), Some("secret"));
+
+        let serialized = serde_json::to_value(&settings).unwrap();
+        assert!(serialized.get("api_key").is_none());
+        assert_eq!(serialized["provider"], "openai");
+
+        // Legacy alias still deserializes correctly
+        let legacy: CopilotSettings = serde_json::from_value(serde_json::json!({
+            "provider": "open_a_i",
+            "model": "gpt-4",
+            "max_tokens": 4096
+        }))
+        .unwrap();
+        assert_eq!(legacy.provider, CopilotProvider::OpenAI);
     }
 
     #[test]

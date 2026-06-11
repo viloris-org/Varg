@@ -112,6 +112,13 @@ export default function App() {
     setScreen('hub');
   }, [refreshHubState]);
 
+  const handleOpenSettings = useCallback(async () => {
+    await rpc('shell/close_project');
+    await rpc('hub/set_page', { page: 'settings' });
+    await refreshHubState();
+    setScreen('hub');
+  }, [refreshHubState]);
+
   const handleNavigate = useCallback(async (page: string) => {
     await rpc('hub/set_page', { page });
     setHubState(prev => prev ? { ...prev, page } : prev);
@@ -174,7 +181,7 @@ export default function App() {
 
   return (
     <I18nProvider locale={locale}>
-      <EditorPage onCloseProject={handleCloseProject} />
+      <EditorPage onCloseProject={handleCloseProject} onOpenSettings={handleOpenSettings} />
     </I18nProvider>
   );
 }

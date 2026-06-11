@@ -18,3 +18,4 @@ engine-editor = { workspace = true, features = ["agent-tools"] }
 engine-script-rhai.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "3", features = ["json"] }

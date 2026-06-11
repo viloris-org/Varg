@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Action": {
+      "properties": {
+        "do": {
+          "$ref": "#/definitions/ActionExpr"
+        },
+        "type": {
+          "const": "Action"
+        }
+      },
+      "required": [
+        "type",
+        "do"
+      ],
+      "type": "object"
+    },
+    "ActionExpr": {
+      "description": "Action expression (moveForward, chase, patrol, etc.)",
+      "type": "object"
+    },
+    "BehaviorNode": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/Sequence"
+        },
+        {
+          "$ref": "#/definitions/Selector"
+        },
+        {
+          "$ref": "#/definitions/Parallel"
+        },
+        {
+          "$ref": "#/definitions/Condition"
+        },
+        {
+          "$ref": "#/definitions/Action"
+        }
+      ]
+    },
+    "Condition": {
+      "properties": {
+        "check": {
+          "$ref": "#/definitions/ConditionExpr"
+        },
+        "type": {
+          "const": "Condition"
+        }
+      },
+      "required": [
+        "type",
+        "check"
+      ],
+      "type": "object"
+    },
+    "ConditionExpr": {
+      "description": "Condition expression (keyPressed, playerDistance, etc.)",
+      "type": "object"
+    },
+    "Parallel": {
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/definitions/BehaviorNode"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "Parallel"
+        }
+      },
+      "required": [
+        "type",
+        "children"
+      ],
+      "type": "object"
+    },
+    "Selector": {
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/definitions/BehaviorNode"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "Selector"
+        }
+      },
+      "required": [
+        "type",
+        "children"
+      ],
+      "type": "object"
+    },
+    "Sequence": {
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/definitions/BehaviorNode"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "Sequence"
+        }
+      },
+      "required": [
+        "type",
+        "children"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Declarative behavior tree schema for Aster game engine",
+  "properties": {
+    "behaviors": {
+      "description": "Root behavior nodes",
+      "items": {
+        "$ref": "#/definitions/BehaviorNode"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "description": {
+      "description": "Human-readable description of the behavior",
+      "type": "string"
+    },
+    "entity": {
+      "description": "Entity name for debugging",
+      "type": "string"
+    }
+  },
+  "required": [
+    "entity",
+    "behaviors"
+  ],
+  "title": "AsterBehaviorSchema",
+  "type": "object"
+}

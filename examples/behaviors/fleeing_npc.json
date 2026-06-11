@@ -1,0 +1,85 @@
+{
+  "entity": "FleeingNPC",
+  "description": "NPC that flees when player gets too close and heals when safe",
+  "behaviors": [
+    {
+      "type": "Selector",
+      "children": [
+        {
+          "type": "Sequence",
+          "name": "flee_when_close",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "PlayerDistance": {
+                  "comparison": {
+                    "LessThan": 5.0
+                  }
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "Flee": {
+                  "target": "player",
+                  "speed": 6.0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Sequence",
+          "name": "heal_when_damaged",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "Health": {
+                  "comparison": {
+                    "LessThan": 80
+                  }
+                }
+              }
+            },
+            {
+              "type": "Condition",
+              "check": {
+                "PlayerDistance": {
+                  "comparison": {
+                    "GreaterThan": 10.0
+                  }
+                }
+              }
+            },
+            {
+              "type": "Action",
+              "do": {
+                "Sequence": {
+                  "actions": [
+                    {
+                      "PlaySound": {
+                        "path": "sounds/heal.ogg"
+                      }
+                    },
+                    {
+                      "Wait": {
+                        "duration": 2.0
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "Action",
+          "do": "Idle"
+        }
+      ]
+    }
+  ]
+}

@@ -126,10 +126,9 @@ mod audio_tests {
 mod editor_tests {
     use engine_editor::{
         register_core_commands, register_core_panels, CommandRegistry, ConsoleEntry, ConsoleFilter,
-        ConsoleLevel, ConsoleService, ConsoleSource, EditorPreferences, PanelRegistry, Selection,
-        SelectionService,
+        ConsoleLevel, ConsoleService, ConsoleSource, EditorPreferences, EditorShell, HubPage,
+        HubState, PanelRegistry, Selection, SelectionService,
     };
-    use engine_editor_ui::{EditorShell, HubPage, HubState};
 
     #[test]
     fn core_panels_are_registered() {

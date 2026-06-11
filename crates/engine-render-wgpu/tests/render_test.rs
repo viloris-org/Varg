@@ -48,6 +48,7 @@ fn render_one_frame_with_debug_cube_succeeds() {
             vertical_fov_degrees: 60.0,
             near: 0.1,
             far: 100.0,
+            look_at_target: None,
         }),
         objects: vec![RenderObject {
             object: engine_core::EntityId::from_u128(2),
@@ -55,6 +56,7 @@ fn render_one_frame_with_debug_cube_succeeds() {
             mesh: "debug/cube".to_string(),
             material: "debug/default".to_string(),
         }],
+        sprites: vec![],
         lights: vec![],
         particles: vec![],
     };

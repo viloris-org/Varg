@@ -10,9 +10,9 @@ members = [
     "crates/engine-physics",
     "crates/engine-audio",
     "crates/engine-editor",
-    "crates/engine-editor-ui",
     "crates/engine-i18n",
     "crates/engine-script-rhai",
+    "crates/engine-script-declarative",
     "crates/engine-shader",
     "crates/engine-render-2d",
     "crates/engine-ui",
@@ -36,8 +36,6 @@ rust-version = "1.78"
 
 [workspace.dependencies]
 bitflags = "2.6"
-egui = "0.34.2"
-egui-winit = { version = "0.34.2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
@@ -62,9 +60,9 @@ engine-render-wgpu = { path = "crates/engine-render-wgpu", version = "0.1.0" }
 engine-physics = { path = "crates/engine-physics", version = "0.1.0" }
 engine-audio = { path = "crates/engine-audio", version = "0.1.0" }
 engine-editor = { path = "crates/engine-editor", version = "0.1.0" }
-engine-editor-ui = { path = "crates/engine-editor-ui", version = "0.1.0" }
 engine-i18n = { path = "crates/engine-i18n", version = "0.1.0" }
 engine-script-rhai = { path = "crates/engine-script-rhai", version = "0.1.0" }
+engine-script-declarative = { path = "crates/engine-script-declarative", version = "0.1.0" }
 engine-shader = { path = "crates/engine-shader", version = "0.1.0" }
 engine-render-2d = { path = "crates/engine-render-2d", version = "0.1.0" }
 engine-ui = { path = "crates/engine-ui", version = "0.1.0" }

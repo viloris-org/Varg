@@ -1,6 +1,7 @@
 //! Parses AI model responses into [`AgentOperation`] lists.
 //!
-//! Expects JSON array output. Handles common formatting issues:
+//! Accepts natural-language answers and optional structured operation blocks.
+//! Handles common formatting issues:
 //! - Leading/trailing text outside the JSON block
 //! - Code-fenced JSON blocks
 
@@ -20,13 +21,48 @@ pub fn parse_operations(raw: &str) -> EngineResult<Vec<AgentOperation>> {
         return Ok(ops);
     }
 
+    if let Some((message, operations)) = extract_aster_operations(trimmed)? {
+        let mut operations = operations;
+        if !message.is_empty() {
+            operations.push(AgentOperation::Complete {
+                summary: Some(message),
+            });
+        }
+        return Ok(operations);
+    }
+
     // Try to extract JSON array from code fences or surrounding text
-    let extracted = extract_json_array(trimmed).ok_or_else(|| {
-        EngineError::other(format!("failed to parse AI response as operations: {raw}"))
-    })?;
+    let Some(extracted) = extract_json_array(trimmed) else {
+        return Ok(vec![AgentOperation::Complete {
+            summary: Some(trimmed.to_owned()),
+        }]);
+    };
 
     serde_json::from_str::<Vec<AgentOperation>>(&extracted)
         .map_err(|e| EngineError::other(format!("failed to parse operations: {e}")))
+}
+
+fn extract_aster_operations(text: &str) -> EngineResult<Option<(String, Vec<AgentOperation>)>> {
+    let Some(start) = text.find("```aster_operations") else {
+        return Ok(None);
+    };
+    let after_fence = &text[start + "```aster_operations".len()..];
+    let end = after_fence
+        .find("```")
+        .ok_or_else(|| EngineError::other("unterminated aster_operations block"))?;
+    let json = after_fence[..end].trim();
+    let operations = serde_json::from_str::<Vec<AgentOperation>>(json)
+        .map_err(|error| EngineError::other(format!("failed to parse operations: {error}")))?;
+
+    let before = text[..start].trim();
+    let after = after_fence[end + 3..].trim();
+    let message = match (before.is_empty(), after.is_empty()) {
+        (false, false) => format!("{before}\n\n{after}"),
+        (false, true) => before.to_owned(),
+        (true, false) => after.to_owned(),
+        (true, true) => String::new(),
+    };
+    Ok(Some((message, operations)))
 }
 
 /// Extracts the first JSON array block from text that may include markdown fences
@@ -105,15 +141,38 @@ That should do it."#;
     }
 
     #[test]
-    fn returns_error_for_invalid_input() {
-        let input = "This is not JSON at all.";
-        let result = parse_operations(input);
-        assert!(result.is_err());
+    fn preserves_natural_language_as_an_assistant_response() {
+        let ops = parse_operations("I can inspect the scene and explain the project.").unwrap();
+        assert!(matches!(
+            &ops[0],
+            AgentOperation::Complete { summary: Some(summary) }
+                if summary == "I can inspect the scene and explain the project."
+        ));
     }
 
     #[test]
     fn parses_empty_array() {
         let ops = parse_operations("[]").unwrap();
         assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn parses_internal_operations_without_exposing_them_as_the_message() {
+        let ops = parse_operations(
+            r#"I'll add a light to the scene.
+
+```aster_operations
+[{"action":"create_object","name":"Sun","components":[{"type":"Light"}]}]
+```"#,
+        )
+        .unwrap();
+
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], AgentOperation::CreateObject { .. }));
+        assert!(matches!(
+            &ops[1],
+            AgentOperation::Complete { summary: Some(summary) }
+                if summary == "I'll add a light to the scene."
+        ));
     }
 }

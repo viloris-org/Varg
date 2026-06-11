@@ -12,7 +12,7 @@
 
 - `runtime-min` 只 tick headless renderer，没有真实窗口、输入、资源加载、脚本、物理、音频或游戏循环集成。
 - `engine-render` 有 RenderDevice/RenderGraph 抽象，但默认是 `HeadlessRenderDevice`，Vulkan crate 默认是 stub，不能把场景真正画出来。
-- `engine-editor-ui` 已有 Hub/Shell UI，但 Scene View/Game View 是 placeholder，Hierarchy/Project 也还没有绑定真实项目和场景。
+- Tauri 编辑器已有 Hub/Shell UI，但 Scene View/Game View、Hierarchy 和 Project 仍需继续绑定真实项目与场景能力。
 - `engine-assets` 有数据库、manifest、导入队列、CPU/GPU 缓存概念，但缺少真实导入器、文件监听、运行时加载和渲染/音频/场景引用闭环。
 - `engine-physics` 和 `engine-audio` 目前是完整 trait + null backend，接口方向对，但游戏功能不可用。
 - 示例项目只有 manifest、scene、prefab、preferences 和 build 配置，没有可玩的资源、脚本入口或构建产物。
@@ -46,7 +46,7 @@
 
 **需求**
 
-- 先选定一个首发后端。建议优先 `wgpu`，因为 `aster` 编辑器路径已经引入 `egui_wgpu::wgpu`；如果坚持 Vulkan，需要完成 `engine-render-vulkan` 的真实初始化、swapchain、pipeline 和资源上传。
+- 先选定一个首发后端。建议优先 `wgpu`，因为 Tauri 编辑器的视口读回路径已使用该后端；如果坚持 Vulkan，需要完成 `engine-render-vulkan` 的真实初始化、swapchain、pipeline 和资源上传。
 - 定义最小渲染组件：Camera、MeshRenderer、Light、MaterialRef。
 - 打通 Scene -> RenderWorld/RenderQueue -> RenderDevice 的提交流程。
 - Game View 和 Scene View 使用真实 offscreen target，而不是 placeholder。

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Editor UI state types extracted from engine-editor-ui.
+//! Editor UI state types shared by host frontends.
 //!
 //! These types describe the Hub (project picker) and Editor Shell (active editor)
 //! state. They contain no rendering code — just data structures and methods

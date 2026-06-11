@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { startPlayMode, stopPlayMode, viewportReadback } from '../api';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 /**
  * Game View — standalone fullscreen render target launched from the editor.
@@ -10,11 +11,16 @@ export default function GameView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const sizeRef = useRef({ width: 1280, height: 720 });
   const isActiveRef = useRef(true);
+  const [gameError, setGameError] = useState<string | null>(null);
 
   // Poll for frames via binary IPC with lazy rendering at ~60fps
   useEffect(() => {
     isActiveRef.current = true;
-    startPlayMode().catch(() => {});
+    startPlayMode().catch((err) => {
+      const msg = err?.message || String(err);
+      console.error('[gameview] failed to start play mode:', msg);
+      setGameError(msg);
+    });
 
     const poll = async () => {
       if (!isActiveRef.current) return;
@@ -43,8 +49,9 @@ export default function GameView() {
             ctx.putImageData(imageData, 0, 0);
           }
         }
-      } catch {
-        // viewport not ready yet
+      } catch (e) {
+        // Log errors so they are visible in devtools
+        console.error('[gameview] readback error:', e);
       }
       setTimeout(poll, 16); // ~60fps target
     };
@@ -52,7 +59,9 @@ export default function GameView() {
     poll();
     return () => {
       isActiveRef.current = false;
-      stopPlayMode().catch(() => {});
+      stopPlayMode().catch((err) => {
+        console.error('[gameview] failed to stop play mode:', err?.message || String(err));
+      });
     };
   }, []);
 
@@ -76,10 +85,15 @@ export default function GameView() {
     return () => observer.disconnect();
   }, []);
 
-  // Close on Escape
+  // Close on Escape — use Tauri native API
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') window.close();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        getCurrentWindow().close().catch((err) => {
+          console.error('[gameview] failed to close window:', err?.message || String(err));
+        });
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -87,6 +101,12 @@ export default function GameView() {
 
   return (
     <div ref={containerRef} className="gameview-container">
+      {gameError && (
+        <div className="gameview-error">
+          <p>Failed to start play mode:</p>
+          <pre>{gameError}</pre>
+        </div>
+      )}
       <canvas ref={canvasRef} className="gameview-canvas" />
     </div>
   );

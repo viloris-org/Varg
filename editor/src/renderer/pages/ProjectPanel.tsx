@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { rpc } from '../api';
 import { useTranslation } from '../i18n';
+import { IconFolder, IconFile, IconPlus, IconRefresh, IconEdit, IconCopy, IconTrash, assetIcon } from '../icons';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,13 @@ interface AssetMeta {
   importer: string;
 }
 
+interface ContextMenuState {
+  x: number;
+  y: number;
+  asset: AssetMeta;
+  deleteConfirm?: boolean;
+}
+
 interface ProjectAssets {
   entries: AssetEntry[];
   assets: AssetMeta[];
@@ -28,59 +36,6 @@ interface TreeNode {
   isDir: boolean;
   children: TreeNode[];
   meta?: AssetMeta;
-}
-
-// ─── Icons ──────────────────────────────────────────────────────────────────
-
-const IconFolder = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-  </svg>
-);
-
-const IconFile = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-    <polyline points="14 2 14 8 20 8" />
-  </svg>
-);
-
-const IconImage = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-    <circle cx="8.5" cy="8.5" r="1.5" />
-    <polyline points="21 15 16 10 5 21" />
-  </svg>
-);
-
-const IconCode = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <polyline points="16 18 22 12 16 6" />
-    <polyline points="8 6 2 12 8 18" />
-  </svg>
-);
-
-const IconPlus = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-  </svg>
-);
-
-const IconRefresh = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <polyline points="23 4 23 10 17 10" />
-    <polyline points="1 20 1 14 7 14" />
-    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-  </svg>
-);
-
-// ─── Kind icon mapping ──────────────────────────────────────────────────────
-
-function assetIcon(kind: string): React.ReactNode {
-  const k = kind.toLowerCase();
-  if (k.includes('texture') || k.includes('image') || k.includes('sprite')) return <IconImage />;
-  if (k.includes('script') || k.includes('shader')) return <IconCode />;
-  return <IconFile />;
 }
 
 // ─── Build tree from flat asset list ────────────────────────────────────────
@@ -126,16 +81,32 @@ function buildTree(assets: AssetMeta[]): { tree: TreeNode[]; folderCount: number
   return { tree: root, folderCount };
 }
 
-// ─── Tree Node Component ────────────────────────────────────────────────────
+// ─── Tree Node Component (with context menu and rename) ──────────────────────
 
 function TreeNodeItem({
   node,
   depth,
   search,
+  onContextMenu,
+  onRename,
+  renaming,
+  renameText,
+  setRenameText,
+  onRenameSubmit,
+  onRenameCancel,
+  onOpenScript,
 }: {
   node: TreeNode;
   depth: number;
   search: string;
+  onContextMenu?: (e: React.MouseEvent, asset: AssetMeta) => void;
+  onRename?: (asset: AssetMeta) => void;
+  renaming?: string | null;
+  renameText?: string;
+  setRenameText?: (v: string) => void;
+  onRenameSubmit?: () => void;
+  onRenameCancel?: () => void;
+  onOpenScript?: (path: string, language: 'rhai' | 'python') => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const hasChildren = node.children.length > 0;
@@ -148,32 +119,74 @@ function TreeNodeItem({
   if (search && !matchesSearch && !childrenMatch && !node.isDir) return null;
   if (search && !matchesSearch && !childrenMatch && node.isDir && !hasChildren) return null;
 
+  const isRenaming = renaming === node.path;
+  const meta = node.meta;
+
   return (
     <>
       <div
         className={`project-tree-item ${node.isDir ? 'project-tree-dir' : 'project-tree-file'}`}
         style={{ paddingLeft: 8 + depth * 16 }}
         onClick={() => { if (hasChildren) setExpanded(!expanded); }}
+        onDoubleClick={() => {
+          if (!node.isDir && onOpenScript) {
+            const ext = node.name.split('.').pop()?.toLowerCase();
+            if (ext === 'rhai' || ext === 'py') {
+              onOpenScript(node.path, ext === 'py' ? 'python' : 'rhai');
+            }
+          }
+        }}
+        onContextMenu={(e) => {
+          if (meta && onContextMenu) {
+            e.preventDefault();
+            onContextMenu(e, meta);
+          }
+        }}
         title={node.path}
       >
         {node.isDir ? (
           <span className="project-tree-caret">{expanded ? '▼' : '▶'}</span>
         ) : (
           <span className="project-tree-icon">
-            {node.meta ? assetIcon(node.meta.kind) : <IconFile />}
+            {meta ? assetIcon(meta.kind) : <IconFile />}
           </span>
         )}
-        <span className={`project-tree-name ${!matchesSearch && childrenMatch ? 'project-tree-dimmed' : ''}`}>
-          {node.name}
-        </span>
-        {node.meta && (
-          <span className="project-tree-kind">{node.meta.kind}</span>
+        {isRenaming ? (
+          <input
+            className="project-tree-rename-input"
+            value={renameText || ''}
+            onChange={(e) => setRenameText?.(e.target.value)}
+            onBlur={onRenameSubmit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onRenameSubmit?.();
+              if (e.key === 'Escape') onRenameCancel?.();
+              e.stopPropagation();
+            }}
+            autoFocus
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <>
+            <span className={`project-tree-name ${!matchesSearch && childrenMatch ? 'project-tree-dimmed' : ''}`}>
+              {node.name}
+            </span>
+            {meta && (
+              <span className="project-tree-kind">{meta.kind}</span>
+            )}
+          </>
         )}
       </div>
       {node.isDir && expanded && hasChildren && (
         <>
           {node.children.map((child, i) => (
-            <TreeNodeItem key={child.path + i} node={child} depth={depth + 1} search={search} />
+            <TreeNodeItem
+              key={child.path + i} node={child} depth={depth + 1} search={search}
+              onContextMenu={onContextMenu}
+              onRename={onRename}
+              renaming={renaming} renameText={renameText}
+              setRenameText={setRenameText} onRenameSubmit={onRenameSubmit} onRenameCancel={onRenameCancel}
+              onOpenScript={onOpenScript}
+            />
           ))}
           {search && node.children.length === 0 && (
             <div className="project-tree-empty" style={{ paddingLeft: 24 + depth * 16 }}>
@@ -188,7 +201,11 @@ function TreeNodeItem({
 
 // ─── Project Panel ──────────────────────────────────────────────────────────
 
-export default function ProjectPanel() {
+interface ProjectPanelProps {
+  onOpenScript?: (path: string, language: 'rhai' | 'python') => void;
+}
+
+export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {
   const { t } = useTranslation();
   const [assets, setAssets] = useState<AssetMeta[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
@@ -197,6 +214,10 @@ export default function ProjectPanel() {
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [scriptName, setScriptName] = useState('');
   const [scriptBackend, setScriptBackend] = useState<'rhai' | 'python'>('rhai');
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState('');
+  // delete confirm is now scoped inside contextMenu state
 
   const loadAssets = useCallback(async () => {
     setLoading(true);
@@ -213,6 +234,14 @@ export default function ProjectPanel() {
 
   useEffect(() => { loadAssets(); }, [loadAssets]);
 
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = () => setContextMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [contextMenu]);
+
   const handleCreateScript = useCallback(async () => {
     if (!scriptName.trim()) return;
     try {
@@ -227,6 +256,80 @@ export default function ProjectPanel() {
       console.error('Failed to create script:', err);
     }
   }, [scriptName, scriptBackend, loadAssets]);
+
+  // ── Context menu handlers ──
+
+  const handleAssetContextMenu = useCallback((e: React.MouseEvent, asset: AssetMeta) => {
+    setContextMenu({ x: e.clientX, y: e.clientY, asset, deleteConfirm: false });
+  }, []);
+
+  const handleDeleteAsset = useCallback(async (path: string) => {
+    setContextMenu((prev) => {
+      if (!prev) return prev;
+      if (prev.asset.source_path !== path) return prev; // safety: only act on the scoped asset
+      if (prev.deleteConfirm) {
+        // Actually delete
+        rpc('project/delete_asset', { path })
+          .then(() => loadAssets())
+          .catch((err) => console.error('Failed to delete asset:', err));
+        return null; // close context menu
+      }
+      // First click: ask for confirmation
+      return { ...prev, deleteConfirm: true };
+    });
+  }, [loadAssets]);
+
+  const handleRenameStart = useCallback((asset: AssetMeta) => {
+    setRenaming(asset.source_path);
+    // Extract filename without extension
+    const name = asset.source_path.split('/').pop() || asset.source_path;
+    const dotIdx = name.lastIndexOf('.');
+    setRenameText(dotIdx > 0 ? name.substring(0, dotIdx) : name);
+    setContextMenu(null);
+  }, []);
+
+  const handleRenameSubmit = useCallback(async () => {
+    if (!renaming || !renameText.trim()) {
+      setRenaming(null);
+      return;
+    }
+    try {
+      await rpc('project/rename_asset', { old_path: renaming, new_name: renameText.trim() });
+      setRenaming(null);
+      await loadAssets();
+    } catch (err) {
+      console.error('Failed to rename asset:', err);
+      setRenaming(null);
+    }
+  }, [renaming, renameText, loadAssets]);
+
+  const handleRenameCancel = useCallback(() => {
+    setRenaming(null);
+  }, []);
+
+  const handleCopyGuid = useCallback((guid: string) => {
+    navigator.clipboard.writeText(guid).catch(console.error);
+    setContextMenu(null);
+  }, []);
+
+  const handleOpenInFileManager = useCallback(async (path: string) => {
+    try {
+      await rpc('app/open_folder', { path });
+    } catch {
+      // not supported
+    }
+    setContextMenu(null);
+  }, []);
+
+  const handleReimport = useCallback(async (path: string) => {
+    try {
+      await rpc('project/reimport_asset', { path });
+      setContextMenu(null);
+      await loadAssets();
+    } catch (err) {
+      console.error('Failed to reimport asset:', err);
+    }
+  }, [loadAssets]);
 
   return (
     <div className="project-panel">
@@ -303,10 +406,48 @@ export default function ProjectPanel() {
           <p className="panel-empty">{t('project_empty')}</p>
         ) : (
           tree.map((node, i) => (
-            <TreeNodeItem key={node.path + i} node={node} depth={0} search={search} />
+            <TreeNodeItem
+              key={node.path + i} node={node} depth={0} search={search}
+              onContextMenu={handleAssetContextMenu}
+              onRename={handleRenameStart}
+              renaming={renaming} renameText={renameText}
+              setRenameText={setRenameText}
+              onRenameSubmit={handleRenameSubmit}
+              onRenameCancel={handleRenameCancel}
+              onOpenScript={onOpenScript}
+            />
           ))
         )}
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 1000 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button className="context-menu-item" onClick={() => handleRenameStart(contextMenu.asset)}>
+            <IconEdit size={12} /> Rename
+          </button>
+          <button className="context-menu-item" onClick={() => handleCopyGuid(contextMenu.asset.guid)}>
+            <IconCopy size={12} /> Copy GUID
+          </button>
+          <button className="context-menu-item" onClick={() => handleReimport(contextMenu.asset.source_path)}>
+            <IconRefresh size={12} /> Reimport
+          </button>
+          <button className="context-menu-item" onClick={() => handleOpenInFileManager(contextMenu.asset.source_path)}>
+            <IconFolder size={12} /> Show in File Manager
+          </button>
+          <div className="context-menu-sep" />
+          <button
+            className={`context-menu-item danger ${contextMenu.deleteConfirm ? 'confirming' : ''}`}
+            onClick={() => handleDeleteAsset(contextMenu.asset.source_path)}
+          >
+            <IconTrash size={12} /> {contextMenu.deleteConfirm ? 'Confirm Delete' : 'Delete'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

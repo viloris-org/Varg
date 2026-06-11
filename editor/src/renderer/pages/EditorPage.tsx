@@ -1,10 +1,31 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  openGameView, openScene, rpc, saveSceneAs, viewportReadback,
+  fetchSceneGuides,
+  openGameView,
+  rpc,
+  viewportReadback,
 } from '../api';
 import { useTranslation } from '../i18n';
-import CopilotPanel from './CopilotPanel';
-import ProjectPanel from './ProjectPanel';
+import AiPanel, { type AiWorkspaceState } from './AiPanel';
+import { CloseProjectDialog } from './Dialogs';
+import { ViewportGrid, OrientationGizmo } from './ViewportOverlays';
+import { type GuideEntity } from './SceneGuides';
+import {
+  type Vec3,
+  createViewMatrix,
+  createPerspectiveMatrix,
+  createOrthographicMatrix,
+  projectToScreen,
+} from './gizmoMath';
+import {
+  IconCheck,
+  IconCode,
+  IconFile,
+  IconPlay,
+  IconProjects,
+  IconSparkles,
+  IconX,
+} from '../icons';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -15,12 +36,6 @@ interface ShellState {
   can_undo: boolean;
   can_redo: boolean;
   scene_version?: number;
-  desktop_integration?: {
-    desktop_environment: string;
-    prefers_native_chrome: boolean;
-    window_background: string;
-    window_backend?: string;
-  };
 }
 
 interface SceneObject {
@@ -31,38 +46,85 @@ interface SceneObject {
   parent_id?: string | null;
 }
 
-interface ConsoleEntry {
-  timestamp: string;
-  level: string;
-  subsystem: string;
-  message: string;
-  file?: string;
-  line?: number;
-}
-
-interface EntityDetails {
-  id: string;
-  name: string;
-  tag: string;
-  transform: {
-    position: [number, number, number];
-    rotation: [number, number, number, number];
-    scale: [number, number, number];
-  };
-  components: Array<{
-    type: string;
-    data?: Record<string, unknown>;
-  }>;
-}
-
 interface Props {
   onCloseProject: () => void;
+  onOpenSettings?: () => void;
 }
 
-// ─── Drag Handle Hook ────────────────────────────────────────────────────────
+interface ArtifactSelection {
+  kind: 'model' | 'code' | 'document';
+  label: string;
+  context: string;
+  x: number;
+  y: number;
+}
+
+function WorkspaceInspector({ object, onFocus, onPositionChange }: {
+  object: SceneObject;
+  onFocus: () => void;
+  onPositionChange: (position: [number, number, number]) => Promise<void>;
+}) {
+  const [position, setPosition] = useState<[string, string, string]>(() => (
+    object.position.map(value => value.toFixed(2)) as [string, string, string]
+  ));
+
+  useEffect(() => {
+    setPosition(object.position.map(value => value.toFixed(2)) as [string, string, string]);
+  }, [object.id, object.position]);
+
+  const commitPosition = useCallback(async () => {
+    const next = position.map(Number) as [number, number, number];
+    if (next.some(value => !Number.isFinite(value))) {
+      setPosition(object.position.map(value => value.toFixed(2)) as [string, string, string]);
+      return;
+    }
+    await onPositionChange(next);
+  }, [object.position, onPositionChange, position]);
+
+  return (
+    <div className="workspace-selection-card">
+      <div className="workspace-selection-title">
+        <div>
+          <strong>{object.name}</strong>
+          <span>{object.tag || 'Untagged entity'}</span>
+        </div>
+        <span className="workspace-live-badge">Live</span>
+      </div>
+      <label className="workspace-property-label">Position</label>
+      <div className="workspace-position workspace-position-editable">
+        {position.map((value, index) => (
+          <label key={index}>
+            <span>{['X', 'Y', 'Z'][index]}</span>
+            <input
+              value={value}
+              inputMode="decimal"
+              aria-label={`${['X', 'Y', 'Z'][index]} position`}
+              onChange={event => setPosition(current => {
+                const next = [...current] as [string, string, string];
+                next[index] = event.target.value;
+                return next;
+              })}
+              onBlur={commitPosition}
+              onKeyDown={event => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+                if (event.key === 'Escape') {
+                  setPosition(object.position.map(item => item.toFixed(2)) as [string, string, string]);
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+          </label>
+        ))}
+      </div>
+      <button onClick={onFocus}>Focus in viewport</button>
+    </div>
+  );
+}
+
+// ─── Resize Handle Hook ─────────────────────────────────────────────────────
 
 function useDragHandle(
-  axis: 'horizontal' | 'vertical',
+  axis: 'horizontal',
   onDelta: (delta: number) => void,
 ) {
   const dragging = useRef(false);
@@ -72,11 +134,11 @@ function useDragHandle(
     (e: React.MouseEvent) => {
       e.preventDefault();
       dragging.current = true;
-      startPos.current = axis === 'horizontal' ? e.clientX : e.clientY;
+      startPos.current = e.clientX;
 
       const onMouseMove = (ev: MouseEvent) => {
         if (!dragging.current) return;
-        const current = axis === 'horizontal' ? ev.clientX : ev.clientY;
+        const current = ev.clientX;
         onDelta(current - startPos.current);
         startPos.current = current;
       };
@@ -90,110 +152,70 @@ function useDragHandle(
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     },
-    [axis, onDelta],
+    [onDelta],
   );
 
   return onMouseDown;
 }
 
-// ─── Resizable Panel ─────────────────────────────────────────────────────────
-
-function ResizablePanel({
-  side,
-  width,
-  minWidth,
-  onResize,
-  collapsed,
-  onToggle,
-  header,
-  children,
-}: {
-  side: 'left' | 'right';
-  width: number;
-  minWidth: number;
-  onResize: (w: number) => void;
-  collapsed: boolean;
-  onToggle: () => void;
-  header: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const handleMouseDown = useDragHandle('horizontal', (delta) => {
-    const newW = side === 'left' ? width + delta : width - delta;
-    onResize(Math.max(minWidth, Math.min(newW, 600)));
-  });
-
-  return (
-    <>
-      <aside
-        className={`panel panel-${side}`}
-        style={{ width: collapsed ? 0 : width, overflow: collapsed ? 'hidden' : undefined }}
-      >
-        <div className="panel-header">
-          <span>{header}</span>
-          <button className="panel-toggle" onClick={onToggle} title={`Toggle ${side} panel`}>
-            {side === 'left' ? '\u00AB' : '\u00BB'}
-          </button>
-        </div>
-        <div
-          className="panel-content"
-          style={{ display: collapsed ? 'none' : undefined }}
-        >
-          {children}
-        </div>
-      </aside>
-      <div
-        className={`resize-handle resize-handle-${side}`}
-        onMouseDown={handleMouseDown}
-      />
-    </>
-  );
-}
-
 // ─── Viewport ────────────────────────────────────────────────────────────────
 
-function ViewportCanvas({ sceneVersion = 0 }: { sceneVersion?: number }) {
+function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, viewMode }: {
+  sceneVersion?: number;
+  cameraRef?: React.MutableRefObject<{
+    yaw: number; pitch: number; distance: number;
+    targetX: number; targetY: number; targetZ: number;
+  }>;
+  onCameraChange?: () => void;
+  viewMode: '2d' | '3d';
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sizeRef = useRef({ width: 640, height: 480 });
   const isActiveRef = useRef(true);
   const versionRef = useRef(sceneVersion);
   const lastRenderedVersionRef = useRef<number | null>(null);
-  const cameraRef = useRef({ yaw: -0.5, pitch: 0.3, distance: 6, targetX: 0, targetY: 1, targetZ: 0 });
+  const internalCameraRef = useRef({
+    yaw: -0.5, pitch: 0.3, distance: 6,
+    targetX: 0, targetY: 1, targetZ: 0,
+  });
+  const camRef = cameraRef ?? internalCameraRef;
   const dragging = useRef<'orbit' | 'pan' | null>(null);
-  const dragStart = useRef({ x: 0, y: 0, yaw: 0, pitch: 0, targetX: 0, targetY: 0, targetZ: 0 });
+  const dragStart = useRef({
+    x: 0, y: 0, yaw: 0, pitch: 0, targetX: 0, targetY: 0, targetZ: 0,
+  });
 
-  // Keep version ref in sync
   versionRef.current = sceneVersion;
 
-  // Poll for frames via binary IPC with lazy rendering
+  // Poll for frames via binary IPC
   useEffect(() => {
     isActiveRef.current = true;
-
+    lastRenderedVersionRef.current = null;
     const poll = async () => {
       if (!isActiveRef.current) return;
       const { width, height } = sizeRef.current;
-      const cam = cameraRef.current;
+      const cam = camRef.current;
       try {
         const buffer = await viewportReadback({
           width, height,
           lastVersion: lastRenderedVersionRef.current ?? undefined,
-          yaw: cam.yaw,
-          pitch: cam.pitch,
-          distance: cam.distance,
-          targetX: cam.targetX,
-          targetY: cam.targetY,
-          targetZ: cam.targetZ,
+          yaw: cam.yaw, pitch: cam.pitch, distance: cam.distance,
+          targetX: cam.targetX, targetY: cam.targetY, targetZ: cam.targetZ,
+          viewMode,
         });
         if (!isActiveRef.current || !canvasRef.current) return;
-
         const uint8 = new Uint8Array(buffer);
         const header = new Uint32Array(uint8.buffer, uint8.byteOffset, 2);
         const w = header[0];
         const h = header[1];
-
         if (w > 0 && h > 0) {
           lastRenderedVersionRef.current = versionRef.current;
-          const ctx = canvasRef.current.getContext('2d');
+          const canvas = canvasRef.current;
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+          }
+          const ctx = canvas.getContext('2d');
           if (ctx) {
             const imageData = new ImageData(
               new Uint8ClampedArray(uint8.buffer, uint8.byteOffset + 8, w * h * 4),
@@ -202,30 +224,32 @@ function ViewportCanvas({ sceneVersion = 0 }: { sceneVersion?: number }) {
             ctx.putImageData(imageData, 0, 0);
           }
         }
-      } catch {
-        // viewport not ready yet
+      } catch (e) {
+        console.error('[viewport] readback error:', e);
       }
       setTimeout(poll, 100);
     };
-
     poll();
     return () => { isActiveRef.current = false; };
-  }, []);
+  }, [viewMode]);
 
   // Resize observer
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    const initRect = container.getBoundingClientRect();
+    sizeRef.current = {
+      width: Math.round(initRect.width) || 640,
+      height: Math.round(initRect.height) || 480,
+    };
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          const w = Math.round(width);
-          const h = Math.round(height);
-          sizeRef.current = { width: w, height: h };
+          sizeRef.current = { width: Math.round(width), height: Math.round(height) };
           lastRenderedVersionRef.current = null;
           const canvas = canvasRef.current;
-          if (canvas) { canvas.width = w; canvas.height = h; }
+          if (canvas) { canvas.width = Math.round(width); canvas.height = Math.round(height); }
         }
       }
     });
@@ -233,62 +257,50 @@ function ViewportCanvas({ sceneVersion = 0 }: { sceneVersion?: number }) {
     return () => observer.disconnect();
   }, []);
 
-  // ── Mouse handlers ──
-
+  // Mouse handlers for orbit/pan
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button === 2) {
-      // Right-click → orbit
-      dragging.current = 'orbit';
-      dragStart.current = { x: e.clientX, y: e.clientY, ...cameraRef.current };
+      dragging.current = viewMode === '2d' ? 'pan' : 'orbit';
+      dragStart.current = { x: e.clientX, y: e.clientY, ...camRef.current };
       e.preventDefault();
     } else if (e.button === 1) {
-      // Middle-click → pan
       dragging.current = 'pan';
-      dragStart.current = { x: e.clientX, y: e.clientY, ...cameraRef.current };
+      dragStart.current = { x: e.clientX, y: e.clientY, ...camRef.current };
       e.preventDefault();
     }
-  }, []);
+  }, [viewMode]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!dragging.current) return;
-      const dx = e.clientX - dragStart.current.x;
-      const dy = e.clientY - dragStart.current.y;
-
+      const dpiScale = window.devicePixelRatio || 1;
+      const dx = (e.clientX - dragStart.current.x) / dpiScale;
+      const dy = (e.clientY - dragStart.current.y) / dpiScale;
       if (dragging.current === 'orbit') {
-        cameraRef.current.yaw = dragStart.current.yaw - dx * 0.005;
-        cameraRef.current.pitch = Math.max(-1.5, Math.min(1.5, dragStart.current.pitch + dy * 0.005));
+        camRef.current.yaw = dragStart.current.yaw - dx * 0.005;
+        camRef.current.pitch = Math.max(-1.5, Math.min(1.5, dragStart.current.pitch + dy * 0.005));
       } else if (dragging.current === 'pan') {
-        const d = cameraRef.current.distance * 0.002;
-        const yaw = cameraRef.current.yaw;
-        const sinY = Math.sin(yaw);
-        const cosY = Math.cos(yaw);
-        cameraRef.current.targetX = dragStart.current.targetX + (-dx * cosY - dy * sinY * 0.5) * d;
-        cameraRef.current.targetY = dragStart.current.targetY + dy * d * 0.5;
-        cameraRef.current.targetZ = dragStart.current.targetZ + (dx * sinY - dy * cosY * 0.5) * d;
+        const d = camRef.current.distance * 0.002;
+        const yaw = camRef.current.yaw;
+        camRef.current.targetX = dragStart.current.targetX + (-dx * Math.cos(yaw) - dy * Math.sin(yaw) * 0.5) * d;
+        camRef.current.targetY = dragStart.current.targetY + dy * d * 0.5;
+        camRef.current.targetZ = dragStart.current.targetZ + (dx * Math.sin(yaw) - dy * Math.cos(yaw) * 0.5) * d;
       }
-
-      // Force re-render by resetting the last version
       lastRenderedVersionRef.current = null;
+      onCameraChange?.();
     };
-
-    const handleMouseUp = () => {
-      dragging.current = null;
-    };
-
+    const handleMouseUp = () => { dragging.current = null; };
     const handleWheel = (e: WheelEvent) => {
       if (containerRef.current && containerRef.current.contains(e.target as Node)) {
-        const cam = cameraRef.current;
-        cam.distance = Math.max(0.5, Math.min(100, cam.distance + e.deltaY * 0.01));
+        camRef.current.distance = Math.max(0.5, Math.min(100, camRef.current.distance + e.deltaY * 0.01));
         lastRenderedVersionRef.current = null;
+        onCameraChange?.();
         e.preventDefault();
       }
     };
-
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('wheel', handleWheel, { passive: false });
-
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
@@ -304,794 +316,491 @@ function ViewportCanvas({ sceneVersion = 0 }: { sceneVersion?: number }) {
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas ref={canvasRef} className="viewport-canvas" />
+      <ViewportGrid show={true} />
+      {viewMode === '3d' && <OrientationGizmo onSnapToAxis={(axis) => {
+        switch (axis) {
+          case 'top':    camRef.current.pitch = 1.5;  camRef.current.yaw = 0;     break;
+          case 'bottom': camRef.current.pitch = -1.5; camRef.current.yaw = 0;     break;
+          case 'left':   camRef.current.pitch = 0;    camRef.current.yaw = 1.5;   break;
+          case 'right':  camRef.current.pitch = 0;    camRef.current.yaw = -1.5;  break;
+          case 'front':  camRef.current.pitch = 0;    camRef.current.yaw = 0;     break;
+          case 'back':   camRef.current.pitch = 0;    camRef.current.yaw = 3.14;  break;
+        }
+        lastRenderedVersionRef.current = null;
+        onCameraChange?.();
+      }} />}
     </div>
   );
 }
+// ─── Click-to-Pick Utility ──────────────────────────────────────────────────
 
-// ─── Hierarchy Panel ─────────────────────────────────────────────────────────
+const PICK_RADIUS_PX = 30;
+const VIEWPORT_FOV_DEG = 60;
 
-function HierarchyPanel({
-  objects,
-  selectedId,
-  onSelect,
-  onCreateObject,
-  onDeleteObject,
-  onDuplicateObject,
-  onRename,
-  onRefresh,
-}: {
-  objects: SceneObject[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onCreateObject: (parentId?: string) => Promise<void>;
-  onDeleteObject: (id: string) => Promise<void>;
-  onDuplicateObject: (id: string) => Promise<void>;
-  onRename: (id: string, name: string) => Promise<void>;
-  onRefresh: () => Promise<void>;
-}) {
-  const { t } = useTranslation();
-  const [search, setSearch] = useState('');
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{
-    id: string;
-    x: number;
-    y: number;
-  } | null>(null);
-  const [renameId, setRenameId] = useState<string | null>(null);
-  const [renameText, setRenameText] = useState('');
+/**
+ * Given a click position in the viewport, find the closest scene object.
+ * Returns the entity ID or null if nothing is close enough.
+ */
+function pickEntityAtScreen(
+  clickX: number,
+  clickY: number,
+  vpWidth: number,
+  vpHeight: number,
+  sceneTree: SceneObject[],
+  camera: { yaw: number; pitch: number; distance: number; targetX: number; targetY: number; targetZ: number },
+  viewMode: '2d' | '3d',
+): string | null {
+  if (sceneTree.length === 0 || vpWidth <= 0 || vpHeight <= 0) return null;
 
-  // Close context menu on outside click
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handler = () => setContextMenu(null);
-    window.addEventListener('click', handler);
-    return () => window.removeEventListener('click', handler);
-  }, [contextMenu]);
-
-  // Build tree: root objects first, then children grouped by parent_id
-  const buildTree = useCallback(() => {
-    const filtered = search
-      ? objects.filter(obj => obj.name.toLowerCase().includes(search.toLowerCase()))
-      : objects;
-
-    const byParent = new Map<string | null, SceneObject[]>();
-    for (const obj of filtered) {
-      const parentKey = obj.parent_id ?? null;
-      if (!byParent.has(parentKey)) byParent.set(parentKey, []);
-      byParent.get(parentKey)!.push(obj);
-    }
-
-    // Recursively render
-    const renderChildren = (parentKey: string | null, depth: number): React.ReactNode[] => {
-      const children = byParent.get(parentKey) ?? [];
-      return children.flatMap(obj => {
-        const isRenaming = renameId === obj.id;
-        const items: React.ReactNode[] = [
-          <div
-            key={obj.id}
-            className={`hierarchy-item ${selectedId === obj.id ? 'selected' : ''}`}
-            style={{ paddingLeft: 10 + depth * 16 }}
-            onClick={() => onSelect(obj.id)}
-            onDoubleClick={() => {
-              setRenameId(obj.id);
-              setRenameText(obj.name);
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({ id: obj.id, x: e.clientX, y: e.clientY });
-            }}
-            title={`Tag: ${obj.tag}\nPosition: ${obj.position.map((v) => v.toFixed(2)).join(', ')}`}
-          >
-            <span className={`entity-icon entity-icon-${obj.tag.toLowerCase()}`} />
-            {isRenaming ? (
-              <input
-                className="hierarchy-rename-input"
-                value={renameText}
-                onChange={(e) => setRenameText(e.target.value)}
-                onBlur={() => {
-                  if (renameText.trim() && renameText !== obj.name) {
-                    onRename(obj.id, renameText.trim());
-                  }
-                  setRenameId(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    (e.target as HTMLInputElement).blur();
-                  } else if (e.key === 'Escape') {
-                    setRenameId(null);
-                  }
-                  e.stopPropagation();
-                }}
-                autoFocus
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <>
-                <span className="entity-name">{obj.name}</span>
-                <span className="entity-tag">{obj.tag}</span>
-              </>
-            )}
-          </div>,
-          ...renderChildren(obj.id, depth + 1),
-        ];
-        return items;
-      });
-    };
-
-    return renderChildren(null, 0);
-  }, [objects, search, selectedId, renameId, renameText, onSelect, onRename]);
-
-  return (
-    <>
-      {/* Search bar */}
-      <div className="hierarchy-search-row">
-        <input
-          className="hierarchy-search"
-          type="text"
-          placeholder={t('hierarchy_search')}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        {search && (
-          <span className="hierarchy-search-count">
-            {objects.filter(o => o.name.toLowerCase().includes(search.toLowerCase())).length}
-          </span>
-        )}
-      </div>
-
-      {/* Toolbar row */}
-      <div className="hierarchy-toolbar">
-        <span className="hierarchy-count">{objects.length}</span>
-        <div style={{ position: 'relative' }}>
-          <button
-            className="hierarchy-add-btn"
-            onClick={() => setCreateMenuOpen(!createMenuOpen)}
-            title={t('hierarchy_create')}
-          >+</button>
-          {createMenuOpen && (
-            <div className="context-menu" style={{ top: '100%', left: 0 }}>
-              <button className="context-menu-item" onClick={async () => {
-                setCreateMenuOpen(false);
-                await onCreateObject(selectedId ?? undefined);
-              }}>
-                {t('hierarchy_create_empty')}
-              </button>
-              <button className="context-menu-item" onClick={async () => {
-                setCreateMenuOpen(false);
-                const { id } = await rpc<{ id: string }>('shell/create_object', {});
-                await rpc('shell/add_component', { id, component_type: 'Camera' });
-                await onRefresh();
-              }}>
-                {t('hierarchy_create_camera')}
-              </button>
-              <button className="context-menu-item" onClick={async () => {
-                setCreateMenuOpen(false);
-                const { id } = await rpc<{ id: string }>('shell/create_object', {});
-                await rpc('shell/add_component', { id, component_type: 'Light' });
-                await onRefresh();
-              }}>
-                {t('hierarchy_create_light')}
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Object tree */}
-      <div className="hierarchy-scroll">
-        {objects.length === 0 ? (
-          <p className="panel-empty">{t('hierarchy_no_objects')}</p>
-        ) : buildTree().length === 0 ? (
-          <p className="panel-empty">{t('hierarchy_search_no_matches')}</p>
-        ) : (
-          buildTree()
-        )}
-      </div>
-
-      {/* Context menu */}
-      {contextMenu && (
-        <div
-          className="context-menu"
-          style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 1000 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            className="context-menu-item"
-            onClick={() => { onDuplicateObject(contextMenu.id); setContextMenu(null); }}
-          >
-            {t('hierarchy_duplicate')}
-          </button>
-          <div className="context-menu-sep" />
-          <button
-            className="context-menu-item danger"
-            onClick={() => { onDeleteObject(contextMenu.id); setContextMenu(null); }}
-          >
-            {t('hierarchy_delete')}
-          </button>
-        </div>
-      )}
-    </>
+  const viewMatrix = createViewMatrix(
+    viewMode === '2d' ? 0 : camera.yaw,
+    viewMode === '2d' ? 0 : camera.pitch,
+    camera.distance,
+    camera.targetX, camera.targetY, camera.targetZ,
   );
+  const fovRad = VIEWPORT_FOV_DEG * Math.PI / 180;
+  const projMatrix = viewMode === '2d'
+    ? createOrthographicMatrix(camera.distance * 2, vpWidth / vpHeight, 0.01, 1000)
+    : createPerspectiveMatrix(fovRad, vpWidth / vpHeight, 0.1, 1000);
+
+  let bestId: string | null = null;
+  let bestDist = PICK_RADIUS_PX;
+  let bestDepth = Infinity;
+
+  for (const obj of sceneTree) {
+    const screen = projectToScreen(obj.position, viewMatrix, projMatrix, vpWidth, vpHeight);
+    if (!screen) continue;
+
+    const dx = screen.x - clickX;
+    const dy = screen.y - clickY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < bestDist || (dist === bestDist && screen.depth < bestDepth)) {
+      bestDist = dist;
+      bestDepth = screen.depth;
+      bestId = obj.id;
+    }
+  }
+
+  return bestId;
 }
 
-// ─── Component Field Editor ─────────────────────────────────────────────────
+// ─── Selection Overlay ──────────────────────────────────────────────────────
 
-function ComponentFieldEditor({
-  componentType,
-  data,
-  entityId,
-  onRefresh,
-}: {
-  componentType: string;
-  data: Record<string, unknown> | null;
-  entityId: string;
-  onRefresh: () => void;
+function SelectionOverlay({ sceneTree, selectedId, camera, width, height, viewMode }: {
+  sceneTree: SceneObject[];
+  selectedId: string | null;
+  camera: { yaw: number; pitch: number; distance: number; targetX: number; targetY: number; targetZ: number };
+  width: number;
+  height: number;
+  viewMode: '2d' | '3d';
 }) {
-  const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState(true);
+  const selected = selectedId ? sceneTree.find(o => o.id === selectedId) : null;
 
-  // Debounced field update
-  const updateField = useCallback((field: string, value: unknown) => {
-    rpc('shell/update_component', {
-      id: entityId,
-      component_type: componentType,
-      data: { [field]: value },
-    }).catch(console.error);
-  }, [entityId, componentType]);
-
-  // Schema definition for known component types
-  type FieldSchema = { key: string; label: string; type: 'f32' | 'bool' | 'string' | 'enum'; options?: string[] };
-
-  const fieldSchemas: Record<string, FieldSchema[]> = {
-    Camera: [
-      { key: 'vertical_fov_degrees', label: 'FOV', type: 'f32' },
-      { key: 'near', label: 'Near', type: 'f32' },
-      { key: 'far', label: 'Far', type: 'f32' },
-    ],
-    Light: [
-      { key: 'intensity', label: 'Intensity', type: 'f32' },
-      { key: 'range', label: 'Range', type: 'f32' },
-      { key: 'spot_angle', label: 'Spot Angle', type: 'f32' },
-    ],
-    Rigidbody: [
-      { key: 'mass', label: 'Mass', type: 'f32' },
-      { key: 'linear_damping', label: 'Linear Damping', type: 'f32' },
-      { key: 'angular_damping', label: 'Angular Damping', type: 'f32' },
-    ],
-    Collider: [
-      { key: 'is_trigger', label: 'Is Trigger', type: 'bool' },
-    ],
-    AudioSource: [
-      { key: 'volume', label: 'Volume', type: 'f32' },
-    ],
-    MeshRenderer: [],  // No editable scalar fields currently
-  };
-
-  const schema = fieldSchemas[componentType];
-  const hasFields = schema && schema.length > 0;
-
-  // Color vector editor (3-component)
-  const renderColorEditor = (key: string, val: unknown) => {
-    if (!Array.isArray(val) || val.length < 3) return null;
-    const numVal = val as number[];
-    return (
-      <div className="inspector-color-row">
-        <div
-          className="inspector-color-swatch"
-          style={{
-            background: `rgb(${Math.round(numVal[0] * 255)}, ${Math.round(numVal[1] * 255)}, ${Math.round(numVal[2] * 255)})`,
-          }}
-        />
-        {['R', 'G', 'B'].map((axis, ai) => (
-          <span key={ai} className="inspector-vec3-input-wrap" style={{ width: 'auto', flex: 1 }}>
-            <span className="inspector-vec3-label">{axis}</span>
-            <input
-              type="text"
-              defaultValue={numVal[ai].toFixed(2)}
-              onBlur={(e) => {
-                const newVal = [...numVal];
-                newVal[ai] = parseFloat(e.target.value) || 0;
-                updateField(key, newVal);
-                onRefresh();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-              }}
-              style={{ width: '100%' }}
-            />
-          </span>
-        ))}
-      </div>
+  const screenPos = useMemo(() => {
+    if (!selected) return null;
+    const viewMatrix = createViewMatrix(
+      viewMode === '2d' ? 0 : camera.yaw,
+      viewMode === '2d' ? 0 : camera.pitch,
+      camera.distance,
+      camera.targetX, camera.targetY, camera.targetZ,
     );
-  };
+    const fovRad = VIEWPORT_FOV_DEG * Math.PI / 180;
+    const aspect = width / Math.max(height, 1);
+    const projMatrix = viewMode === '2d'
+      ? createOrthographicMatrix(camera.distance * 2, aspect, 0.01, 1000)
+      : createPerspectiveMatrix(fovRad, aspect, 0.01, 1000);
+    return projectToScreen(selected.position, viewMatrix, projMatrix, width, height);
+  }, [selected, camera.yaw, camera.pitch, camera.distance, camera.targetX, camera.targetY, camera.targetZ, width, height, viewMode]);
+
+  if (!selected || !screenPos) return null;
 
   return (
-    <div className="inspector-component">
-      <button
-        className="inspector-component-header"
-        onClick={() => setCollapsed(!collapsed)}
+    <svg
+      className="selection-overlay"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 20 }}
+    >
+      {/* Selection ring */}
+      <circle
+        cx={screenPos.x}
+        cy={screenPos.y}
+        r={18}
+        fill="none"
+        stroke="var(--accent, #60A5FA)"
+        strokeWidth={2}
+        strokeDasharray="4 3"
+        opacity={0.9}
+      />
+      {/* Entity name label */}
+      <rect
+        x={screenPos.x + 22}
+        y={screenPos.y - 10}
+        width={Math.max(60, selected.name.length * 7 + 16)}
+        height={20}
+        rx={4}
+        fill="rgba(37, 99, 235, 0.85)"
+      />
+      <text
+        x={screenPos.x + 30}
+        y={screenPos.y + 4}
+        fill="white"
+        fontSize={11}
+        fontFamily="var(--font-sans)"
+        fontWeight={500}
       >
-        <span className="inspector-component-caret">{collapsed ? '▶' : '▼'}</span>
-        <span className="inspector-component-type">{componentType}</span>
-        <button
-          className="inspector-remove-btn"
-          onClick={(e) => {
-            e.stopPropagation();
-            rpc('shell/remove_component', { id: entityId, component_type: componentType })
-              .then(() => onRefresh())
-              .catch(console.error);
-          }}
-          title={t('inspector_remove_component')}
-        >
-          ×
-        </button>
-      </button>
-      {!collapsed && (
-        <div className="inspector-component-fields">
-          {data && 'color' in data && renderColorEditor('color', data.color)}
-          {hasFields && data ? schema.map((field) => {
-            const val = data[field.key];
-            if (val === undefined) return null;
-
-            switch (field.type) {
-              case 'f32': {
-                const numVal = typeof val === 'number' ? val : parseFloat(String(val)) || 0;
-                return (
-                  <div key={field.key} className="inspector-field">
-                    <label>{field.label}</label>
-                    <input
-                      type="text"
-                      className="inspector-field-input"
-                      defaultValue={numVal.toFixed(2)}
-                      onBlur={(e) => {
-                        updateField(field.key, parseFloat(e.target.value) || 0);
-                        onRefresh();
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                      }}
-                    />
-                  </div>
-                );
-              }
-              case 'bool': {
-                const boolVal = typeof val === 'boolean' ? val : val === 'true';
-                return (
-                  <div key={field.key} className="inspector-field inspector-field-row">
-                    <label>{field.label}</label>
-                    <input
-                      type="checkbox"
-                      checked={boolVal}
-                      onChange={(e) => {
-                        updateField(field.key, e.target.checked);
-                        onRefresh();
-                      }}
-                    />
-                  </div>
-                );
-              }
-              default:
-                return null;
-            }
-          }) : !hasFields && (
-            <p className="inspector-field-empty">{t('common_no_editable_fields')}</p>
-          )}
-        </div>
-      )}
-    </div>
+        {selected.name}
+      </text>
+    </svg>
   );
 }
 
-// ─── Inspector Panel ─────────────────────────────────────────────────────────
+// ─── Editor Page (AI-First Layout) ──────────────────────────────────────────
 
-type TransformKey = 'position' | 'rotation' | 'scale';
-
-function InspectorPanel({
-  selectedId,
-  onRefresh,
-}: {
-  selectedId: string | null;
-  onRefresh: () => void;
-}) {
+export default function EditorPage({ onCloseProject, onOpenSettings }: Props) {
   const { t } = useTranslation();
-  const [details, setDetails] = useState<EntityDetails | null>(null);
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
-  const [refreshVersion, setRefreshVersion] = useState(0);
 
-  const loadDetails = useCallback(async () => {
-    if (!selectedId) { setDetails(null); return; }
-    try {
-      const d = await rpc<EntityDetails>('shell/get_entity', { id: selectedId });
-      setDetails(d);
-      setRefreshVersion((v) => v + 1);
-    } catch { setDetails(null); }
-  }, [selectedId]);
-
-  useEffect(() => { loadDetails(); }, [loadDetails]);
-
-  // ── Transform update helper ──
-
-  const updateTransform = useCallback(
-    (key: TransformKey, axis: number, value: string) => {
-      if (!selectedId || !details) return;
-      const num = parseFloat(value);
-      if (isNaN(num)) return;
-      const arr = [...details.transform[key]] as number[];
-      arr[axis] = num;
-      const newTransform = { ...details.transform, [key]: arr };
-      setDetails({ ...details, transform: newTransform });
-      // Debounced save
-      rpc('shell/update_transform', { id: selectedId, [key]: arr }).catch(console.error);
-    },
-    [selectedId, details],
-  );
-
-  // ── Component add / remove ──
-
-  const addComponent = useCallback(
-    async (compType: string) => {
-      if (!selectedId) return;
-      await rpc('shell/add_component', { id: selectedId, component_type: compType });
-      setAddMenuOpen(false);
-      await loadDetails();
-      onRefresh();
-    },
-    [selectedId, loadDetails, onRefresh],
-  );
-
-  const removeComponent = useCallback(
-    async (compType: string) => {
-      if (!selectedId) return;
-      await rpc('shell/remove_component', { id: selectedId, component_type: compType });
-      await loadDetails();
-      onRefresh();
-    },
-    [selectedId, loadDetails, onRefresh],
-  );
-
-  // ── Render ──
-
-  if (!selectedId) {
-    return <p className="panel-empty">{t('inspector_select_hint')}</p>;
-  }
-
-  if (!details) {
-    return <p className="panel-empty">{t('loading')}</p>;
-  }
-
-  const labelAxis = (label: string) => ['X', 'Y', 'Z', 'W'].map((a) => `${label}${a}`);
-
-  const vec3Inputs = (
-    key: TransformKey,
-    values: number[],
-    decimals = 2,
-  ) => (
-    <div className="inspector-vec3">
-      {values.map((v, i) => (
-        <span key={i} className="inspector-vec3-input-wrap">
-          <span className="inspector-vec3-label">{['X', 'Y', 'Z', 'W'][i]}</span>
-          <input
-            type="text"
-            value={v.toFixed(decimals)}
-            onChange={(e) => updateTransform(key, i, e.target.value)}
-            onBlur={() => loadDetails()}
-            title={labelAxis(key)[i] || String(i)}
-          />
-        </span>
-      ))}
-    </div>
-  );
-
-  // Available component types to add (excluding already-added)
-  const allComponentTypes = [
-    'Camera', 'Light', 'MeshRenderer', 'Rigidbody',
-    'Collider', 'AudioSource', 'Script',
-  ];
-  const existingTypes = details.components.map((c) => c.type);
-  const addableTypes = allComponentTypes.filter((t) => !existingTypes.includes(t));
-
-  return (
-    <div className="inspector">
-      {/* Entity header */}
-      <div className="inspector-header">
-        <h3>{details.name}</h3>
-        <span className="inspector-tag">{details.tag}</span>
-      </div>
-
-      {/* Transform */}
-      <div className="inspector-section">
-        <div className="inspector-section-title">{t('inspector_transform')}</div>
-        <div className="inspector-field">
-          <label>{t('inspector_position')}</label>
-          {vec3Inputs('position', details.transform.position)}
-        </div>
-        <div className="inspector-field">
-          <label>{t('inspector_rotation')}</label>
-          {vec3Inputs('rotation', details.transform.rotation, 2)}
-        </div>
-        <div className="inspector-field">
-          <label>{t('inspector_scale')}</label>
-          {vec3Inputs('scale', details.transform.scale)}
-        </div>
-      </div>
-
-      {/* Components */}
-      <div className="inspector-section">
-        <div className="inspector-section-title">{t('inspector_components')}</div>
-        {details.components.map((c) => (
-          <ComponentFieldEditor
-            key={`${selectedId}-${c.type}-${refreshVersion}`}
-            componentType={c.type}
-            data={c.data ?? null}
-            entityId={selectedId}
-            onRefresh={loadDetails}
-          />
-        ))}
-        {details.components.length === 0 && (
-          <p className="panel-empty">{t('common_none')}</p>
-        )}
-      </div>
-
-      {/* Add Component */}
-      <div className="inspector-add-component">
-        <button
-          className="tool-btn"
-          onClick={() => setAddMenuOpen(!addMenuOpen)}
-          disabled={addableTypes.length === 0}
-        >
-          {t('inspector_add_component')}
-        </button>
-        {addMenuOpen && (
-          <div className="inspector-add-menu">
-            {addableTypes.map((t) => (
-              <button
-                key={t}
-                className="inspector-add-option"
-                onClick={() => addComponent(t)}
-              >
-                {t}
-              </button>
-            ))}
-            {addableTypes.length === 0 && (
-              <span className="panel-empty">{t('inspector_all_components_added')}</span>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Console Panel ───────────────────────────────────────────────────────────
-
-function ConsolePanel({ entries }: { entries: ConsoleEntry[] }) {
-  const { t } = useTranslation();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [entries]);
-
-  return (
-    <div ref={scrollRef} className="console">
-      {entries.map((entry, i) => (
-        <div key={i} className={`console-entry console-${entry.level}`}>
-          <span className="console-level">{entry.level.toUpperCase()}</span>
-          <span className="console-subsystem">[{entry.subsystem}]</span>
-          <span className="console-message">{entry.message}</span>
-        </div>
-      ))}
-      {entries.length === 0 && (
-        <p className="panel-empty">{t('console_no_messages')}</p>
-      )}
-    </div>
-  );
-}
-
-// ─── Editor Page ─────────────────────────────────────────────────────────────
-
-export default function EditorPage({ onCloseProject }: Props) {
-  const { t, t_fmt } = useTranslation();
-  // Panel sizes
-  const [leftWidth, setLeftWidth] = useState(220);
-  const [rightWidth, setRightWidth] = useState(280);
-  const [bottomHeight, setBottomHeight] = useState(140);
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [bottomCollapsed, setBottomCollapsed] = useState(false);
-
-  // Data
+  // State
   const [shellState, setShellState] = useState<ShellState | null>(null);
   const [sceneTree, setSceneTree] = useState<SceneObject[]>([]);
-  const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sceneVersion, setSceneVersion] = useState(0);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showCloseDialog, setShowCloseDialog] = useState(false);
+  const [aiPanelWidth, setAiPanelWidth] = useState(() => {
+    const saved = Number(window.localStorage.getItem('aster.aiPanelWidth'));
+    return Number.isFinite(saved) && saved >= 360 && saved <= 720 ? saved : 440;
+  });
+  const [workspaceView, setWorkspaceView] = useState<'prd' | 'tasks' | 'game' | 'scripts'>('prd');
+  const [aiWorkspace, setAiWorkspace] = useState<AiWorkspaceState | null>(null);
+  const [scripts, setScripts] = useState<string[]>([]);
+  const [selectedScript, setSelectedScript] = useState<string | null>(null);
+  const [scriptContent, setScriptContent] = useState('');
+  const [scriptLineRange, setScriptLineRange] = useState<[number, number] | null>(null);
+  const [artifactSelection, setArtifactSelection] = useState<ArtifactSelection | null>(null);
+  const [artifactQuestionOpen, setArtifactQuestionOpen] = useState(false);
+  const [artifactQuestion, setArtifactQuestion] = useState('');
+  const [contextualRequest, setContextualRequest] = useState<{ id: number; prompt: string } | null>(null);
+  const [guides, setGuides] = useState<GuideEntity[]>([]);
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d');
+  const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
+  const [, setCameraRevision] = useState(0);
   const prevSceneVersionRef = useRef(0);
+  const cameraRef = useRef({
+    yaw: -0.5, pitch: 0.3, distance: 6,
+    targetX: 0, targetY: 1, targetZ: 0,
+  });
 
-  // Periodic lightweight state poll (every 2s)
+  // Gizmo state
+  const [activeTool] = useState<'view' | 'move' | 'rotate' | 'scale'>('move');
+  const [transformSpace] = useState<'global' | 'local'>('global');
+  const [selectedPosition, setSelectedPosition] = useState<Vec3 | null>(null);
+  const viewportMainRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const viewport = viewportMainRef.current;
+    if (!viewport) return;
+
+    const updateSize = () => {
+      const rect = viewport.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setViewportSize({
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
+      }
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleCameraChange = useCallback(() => {
+    setCameraRevision(revision => revision + 1);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem('aster.aiPanelWidth', String(aiPanelWidth));
+  }, [aiPanelWidth]);
+
+  // Periodic state poll
   useEffect(() => {
     const poll = async () => {
       try {
         const state = await rpc<ShellState>('shell/get_state');
         setShellState(state);
-
         const newVer = state.scene_version ?? 0;
         if (newVer !== prevSceneVersionRef.current) {
           prevSceneVersionRef.current = newVer;
           setSceneVersion(newVer);
-
-          // Scene changed — fetch updated scene tree
           const { objects } = await rpc<{ objects: SceneObject[] }>('shell/get_scene_tree');
           setSceneTree(objects);
         }
-      } catch {
-        // not ready
-      }
+      } catch { /* not ready */ }
     };
-
     poll();
     const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch console entries only when the panel is visible
-  const consoleVisible = !bottomCollapsed;
   useEffect(() => {
-    if (!consoleVisible) return;
-    let active = true;
-    const poll = async () => {
-      if (!active) return;
-      try {
-        const { entries } = await rpc<{ entries: ConsoleEntry[] }>('console/get_entries');
-        if (active) setConsoleEntries(entries);
-      } catch { /* ignore */ }
-      setTimeout(poll, 2000);
-    };
-    poll();
-    return () => { active = false; };
-  }, [consoleVisible]);
+    if (!shellState?.has_project) return;
+    rpc<{ entries: Array<{ path: string; kind: string }> }>('project/list_assets')
+      .then(result => {
+        const paths = result.entries
+          .filter(entry => /script/i.test(entry.kind) || /\.(rhai|js|ts|lua)$/i.test(entry.path))
+          .map(entry => entry.path);
+        setScripts(paths);
+        setSelectedScript(current => current && paths.includes(current) ? current : paths[0] ?? null);
+      })
+      .catch(() => setScripts([]));
+  }, [sceneVersion, shellState?.has_project]);
 
-  // Immediate scene tree refresh (called after add/remove component)
-  const refreshSceneTree = useCallback(async () => {
+  useEffect(() => {
+    if (!selectedScript) {
+      setScriptContent('');
+      return;
+    }
+    rpc<{ content: string }>('project/read_file', { path: selectedScript })
+      .then(result => setScriptContent(result.content))
+      .catch(() => setScriptContent('// Unable to load this script.'));
+  }, [selectedScript]);
+
+  useEffect(() => {
+    setScriptLineRange(null);
+    setArtifactSelection(null);
+    setArtifactQuestionOpen(false);
+  }, [selectedScript, workspaceView]);
+
+  // Track selected position
+  useEffect(() => {
+    if (selectedId) {
+      const obj = sceneTree.find(o => o.id === selectedId);
+      setSelectedPosition(obj ? ([...obj.position] as Vec3) : null);
+    } else {
+      setSelectedPosition(null);
+    }
+  }, [selectedId, sceneTree]);
+
+  // Fetch scene guides
+  useEffect(() => {
+    if (!shellState?.has_project) return;
+    fetchSceneGuides()
+      .then(res => setGuides(res.guides ?? []))
+      .catch(() => setGuides([]));
+  }, [sceneVersion, shellState?.has_project]);
+
+  // Scene tree refresh — returns the new scene objects list
+  const refreshSceneTree = useCallback(async (): Promise<SceneObject[]> => {
     try {
-      // Fetch fresh state to get the new scene_version
       const state = await rpc<ShellState>('shell/get_state');
       setShellState(state);
       const newVer = state.scene_version ?? 0;
       prevSceneVersionRef.current = newVer;
       setSceneVersion(newVer);
-      // Fetch the updated tree
       const { objects } = await rpc<{ objects: SceneObject[] }>('shell/get_scene_tree');
       setSceneTree(objects);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+      return objects;
+    } catch { /* ignore */ }
+    return [];
   }, []);
 
-  const runEditorAction = useCallback(async (
-    action: () => Promise<void>,
-    success?: string,
-  ) => {
-    setErrorMessage(null);
-    try {
-      await action();
-      await refreshSceneTree();
-      if (success) setStatusMessage(success);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+  // Focus camera on a given position with smooth lerp
+  const focusOnPosition = useCallback((target: [number, number, number]) => {
+    const cam = cameraRef.current;
+    const startX = cam.targetX;
+    const startY = cam.targetY;
+    const startZ = cam.targetZ;
+    const [endX, endY, endZ] = target;
+    let t = 0;
+    const animate = () => {
+      t += 0.08;
+      if (t >= 1) {
+        cam.targetX = endX;
+        cam.targetY = endY;
+        cam.targetZ = endZ;
+        handleCameraChange();
+        return;
+      }
+      const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      cam.targetX = startX + (endX - startX) * ease;
+      cam.targetY = startY + (endY - startY) * ease;
+      cam.targetZ = startZ + (endZ - startZ) * ease;
+      handleCameraChange();
+      requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }, [handleCameraChange]);
+
+  // Handle scene changes from AI panel — detect new entities and focus
+  const sceneTreeRef = useRef(sceneTree);
+  sceneTreeRef.current = sceneTree;
+
+  const handleAiSceneChanged = useCallback(async () => {
+    const prevIds = new Set(sceneTreeRef.current.map(o => o.id));
+    const newObjects = await refreshSceneTree();
+    // Find newly created objects
+    const created = newObjects.filter(o => !prevIds.has(o.id));
+    if (created.length > 0) {
+      // Focus on the first new object and select it
+      const first = created[0];
+      focusOnPosition(first.position);
+      setSelectedId(first.id);
+      rpc('shell/select_entity', { id: first.id });
+    }
+  }, [refreshSceneTree, focusOnPosition]);
+
+  // Quick actions from AI panel
+  const handleQuickAction = useCallback(async (action: string) => {
+    switch (action) {
+      case 'save':
+        await rpc('shell/save_scene').catch(() => {});
+        await refreshSceneTree();
+        break;
+      case 'undo':
+        await rpc('shell/undo').catch(() => {});
+        await refreshSceneTree();
+        break;
+      case 'play':
+        openGameView();
+        break;
     }
   }, [refreshSceneTree]);
 
-  // ── Scene CRUD handlers ──
-
-  const handleCreateObject = useCallback(async (parentId?: string) => {
-    await runEditorAction(async () => {
-      const params: Record<string, unknown> = {};
-      if (parentId) params.parent_id = parentId;
-      await rpc('shell/create_object', params);
-    }, t('editor_status_object_created'));
-  }, [runEditorAction]);
-
-  const handleDeleteObject = useCallback(async (id: string) => {
-    await runEditorAction(async () => {
-      await rpc('shell/delete_object', { id });
-      if (selectedId === id) {
-        setSelectedId(null);
-      }
-    }, t('editor_status_object_deleted'));
-  }, [runEditorAction, selectedId]);
-
-  const handleDuplicateObject = useCallback(async (id: string) => {
-    await runEditorAction(async () => {
-      await rpc('shell/duplicate_object', { id });
-    }, t('editor_status_object_duplicated'));
-  }, [runEditorAction]);
-
-  const handleSaveScene = useCallback(async () => {
-    await runEditorAction(async () => {
-      await rpc('shell/save_scene');
-    }, t('editor_status_scene_saved'));
-  }, [runEditorAction]);
-
-  const handleUndo = useCallback(async () => {
-    await runEditorAction(async () => {
-      await rpc('shell/undo');
-    });
-  }, [runEditorAction]);
-
-  const handleRedo = useCallback(async () => {
-    await runEditorAction(async () => {
-      await rpc('shell/redo');
-    });
-  }, [runEditorAction]);
-
+  // Close project handler
   const handleClose = useCallback(() => {
-    if (shellState?.scene_dirty && !window.confirm(t('dialog_close_unsaved'))) {
-      return;
+    if (shellState?.scene_dirty) {
+      setShowCloseDialog(true);
+    } else {
+      onCloseProject();
     }
-    onCloseProject();
   }, [onCloseProject, shellState?.scene_dirty]);
 
-  // ── File handlers ──
-
-  const handleOpenScene = useCallback(async () => {
-    await runEditorAction(async () => {
-      const result = await openScene();
-      if (result) setStatusMessage(t_fmt('editor_status_opened', { path: result }));
-    });
-  }, [runEditorAction]);
-
-  const handleSaveSceneAs = useCallback(async () => {
-    await runEditorAction(async () => {
-      const result = await saveSceneAs();
-      if (result) setStatusMessage(t_fmt('editor_status_saved', { path: result }));
-    });
-  }, [runEditorAction]);
-
-  // Keyboard shortcuts
+  // Keyboard shortcuts (minimal set)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Ignore if typing in an input/textarea
-      if (e.target instanceof HTMLElement && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
-        return;
+      if (e.target instanceof HTMLElement) {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (e.target.isContentEditable) return;
       }
-
-      // Ctrl+O → Open Scene
-      if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 's') {
         e.preventDefault();
-        handleOpenScene();
-        return;
+        rpc('shell/save_scene').then(() => refreshSceneTree());
       }
-
-      // Ctrl+Shift+S → Save As
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 's') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
         e.preventDefault();
-        handleSaveSceneAs();
-        return;
+        rpc('shell/undo').then(() => refreshSceneTree());
       }
-
-      // Delete/Backspace → remove selected object
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
-        handleDeleteObject(selectedId);
+      if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+        e.preventDefault();
+        rpc('shell/redo').then(() => refreshSceneTree());
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedId, handleDeleteObject, handleOpenScene, handleSaveSceneAs]);
+  }, [refreshSceneTree]);
 
-  const [rightTab, setRightTab] = useState<'inspector' | 'copilot'>('inspector');
-  const [bottomTab, setBottomTab] = useState<'console' | 'project'>('console');
-
-  // Bottom resize handle
-  const bottomHandleDown = useDragHandle('vertical', (delta) => {
-    setBottomHeight((h) => {
-      const newH = h - delta; // dragging up = reduce
-      return Math.max(40, Math.min(newH, 500));
-    });
+  // Resize handle for AI panel
+  const handleResizeDown = useDragHandle('horizontal', (delta) => {
+    setAiPanelWidth((w) => Math.max(360, Math.min(w - delta, 720)));
   });
+
+  // Viewport click-to-pick
+  const handleViewportClick = useCallback((e: React.MouseEvent) => {
+    // Only left-click, not on buttons or gizmo elements
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.transform-gizmo') || target.closest('.scene-guides') || target.closest('.orientation-gizmo')) return;
+
+    const container = e.currentTarget as HTMLElement;
+    const rect = container.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    const vpWidth = rect.width;
+    const vpHeight = rect.height;
+
+    const hitId = pickEntityAtScreen(
+      clickX, clickY, vpWidth, vpHeight,
+      sceneTree, cameraRef.current,
+      viewMode,
+    );
+
+    if (hitId) {
+      const object = sceneTree.find(item => item.id === hitId);
+      setSelectedId(hitId);
+      rpc('shell/select_entity', { id: hitId });
+      if (object) {
+        setArtifactSelection({
+          kind: 'model',
+          label: object.name,
+          context: `Scene model: ${object.name}\nEntity ID: ${object.id}\nTag: ${object.tag || 'Untagged'}\nPosition: ${object.position.join(', ')}`,
+          x: e.clientX,
+          y: e.clientY,
+        });
+        setArtifactQuestionOpen(false);
+      }
+    } else {
+      setSelectedId(null);
+      rpc('shell/select_entity', {});
+      setArtifactSelection(null);
+    }
+  }, [sceneTree, viewMode]);
+
+  const selectDocumentText = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    const selection = window.getSelection();
+    const text = selection?.toString().trim();
+    if (!text || text.length < 2) return;
+    setArtifactSelection({
+      kind: 'document',
+      label: text.length > 48 ? `${text.slice(0, 48)}…` : text,
+      context: `PRD excerpt:\n${text}`,
+      x: event.clientX,
+      y: event.clientY,
+    });
+    setArtifactQuestionOpen(false);
+  }, []);
+
+  const selectScriptLine = useCallback((line: number, extend: boolean, event: React.MouseEvent) => {
+    const nextRange: [number, number] = extend && scriptLineRange
+      ? [Math.min(scriptLineRange[0], line), Math.max(scriptLineRange[1], line)]
+      : [line, line];
+    setScriptLineRange(nextRange);
+    const lines = scriptContent.split('\n').slice(nextRange[0] - 1, nextRange[1]);
+    setArtifactSelection({
+      kind: 'code',
+      label: `${selectedScript || 'script'}:${nextRange[0]}${nextRange[1] === nextRange[0] ? '' : `-${nextRange[1]}`}`,
+      context: `Script: ${selectedScript}\nLines ${nextRange[0]}-${nextRange[1]}:\n${lines.join('\n')}`,
+      x: event.clientX,
+      y: event.clientY,
+    });
+    setArtifactQuestionOpen(false);
+  }, [scriptContent, scriptLineRange, selectedScript]);
+
+  const submitArtifactQuestion = useCallback(() => {
+    if (!artifactSelection || !artifactQuestion.trim()) return;
+    setContextualRequest({
+      id: Date.now(),
+      prompt: `${artifactQuestion.trim()}\n\n[Selected context]\n${artifactSelection.context}`,
+    });
+    setArtifactQuestion('');
+    setArtifactQuestionOpen(false);
+  }, [artifactQuestion, artifactSelection]);
+
+  // Derive selected entity name
+  const selectedEntityName = selectedId
+    ? sceneTree.find(o => o.id === selectedId)?.name ?? null
+    : null;
+  const selectedObject = selectedId
+    ? sceneTree.find(o => o.id === selectedId) ?? null
+    : null;
+  const taskSteps = ['Describe outcome', 'Inspect project', 'Review plan', 'Apply changes', 'Verify result'];
+  const taskStepIndex = aiWorkspace?.status === 'thinking' ? 1
+    : aiWorkspace?.status === 'ready' ? 2
+      : aiWorkspace?.status === 'executing' ? 3
+        : aiWorkspace?.status === 'complete' ? 4 : 0;
 
   // ── Render ──
 
@@ -1100,167 +809,132 @@ export default function EditorPage({ onCloseProject }: Props) {
   }
 
   return (
-    <div className="editor">
-      <div className="editor-toolbar">
-        <button
-          className="tool-btn"
-          onClick={handleUndo}
-          disabled={!shellState.can_undo}
-          title={t('command_undo')}
-        >↩</button>
-        <button
-          className="tool-btn"
-          onClick={handleRedo}
-          disabled={!shellState.can_redo}
-          title={t('command_redo')}
-        >↪</button>
-        <div className="toolbar-sep" />
-        <button className="tool-btn" onClick={handleOpenScene} title={t('command_open_scene')}>
-          {t('command_open_scene')}
-        </button>
-        <button className="tool-btn" onClick={handleSaveSceneAs} title={t('command_save_as')}>
-          {t('command_save_as')}
-        </button>
-        <button className="tool-btn" onClick={handleSaveScene} disabled={!shellState.scene_dirty} title={t('command_save')}>
-          {t('command_save')}
-        </button>
-        <div className="toolbar-sep" />
-        <button className="tool-btn play-btn" onClick={openGameView} title={t('command_play')}>
-          ▶ {t('command_play')}
-        </button>
-        <div className="toolbar-sep" />
-        <button className="tool-btn" onClick={handleClose} title={t('command_close_project')}>
-          {t('command_close_project')}
-        </button>
+    <div className="editor editor-ai-first">
+      {/* Minimal toolbar */}
+      <div className="editor-toolbar editor-toolbar-minimal">
+        <div className="toolbar-project">
+          <span className="toolbar-project-kicker">Aster workspace</span>
+          <span className="toolbar-project-name">{shellState.project_name || 'Untitled'}</span>
+        </div>
+        <span className="ai-only-badge">AI only</span>
+        <button className="tool-btn play-btn" onClick={() => setWorkspaceView('game')} title="Open Game View"><IconPlay /></button>
+        <button className="tool-btn" onClick={handleClose} title="Close"><IconX /></button>
       </div>
 
-      {/* Main Editor Body (hierarchy | scene view | inspector) */}
-      <div className="editor-body">
-        <ResizablePanel
-          side="left"
-          width={leftWidth}
-          minWidth={160}
-          onResize={setLeftWidth}
-          collapsed={leftCollapsed}
-          onToggle={() => setLeftCollapsed(!leftCollapsed)}
-          header={t('panel_hierarchy')}
-        >
-          <HierarchyPanel
-            objects={sceneTree}
-            selectedId={selectedId}
-            onSelect={(id) => {
-              setSelectedId(id);
-              rpc('shell/select_entity', { id });
-            }}
-            onCreateObject={handleCreateObject}
-            onDeleteObject={handleDeleteObject}
-            onDuplicateObject={handleDuplicateObject}
-            onRename={async (id, name) => {
-              await rpc('shell/rename_object', { id, name });
-              await refreshSceneTree();
-            }}
-            onRefresh={refreshSceneTree}
-          />
-        </ResizablePanel>
+      {/* Main body: viewport + AI panel */}
+      <div className="editor-body editor-body-ai">
+        <main className="ai-product-workspace" ref={viewportMainRef}>
+          <nav className="product-tabs" role="tablist" aria-label="Project outputs">
+            {([
+              ['prd', 'PRD', <IconFile key="prd" />],
+              ['tasks', 'Tasks', <IconCheck key="tasks" />],
+              ['game', 'Game View', <IconPlay key="game" />],
+              ['scripts', 'Scripts', <IconCode key="scripts" />],
+            ] as const).map(([view, label, icon]) => (
+              <button key={view} className={workspaceView === view ? 'active' : ''} onClick={() => setWorkspaceView(view)} role="tab" aria-selected={workspaceView === view}>
+                {icon}<span>{label}</span>
+                {view === 'tasks' && aiWorkspace?.plan && <b>{aiWorkspace.plan.operations.length}</b>}
+                {view === 'scripts' && scripts.length > 0 && <b>{scripts.length}</b>}
+              </button>
+            ))}
+          </nav>
 
-        <main className="panel panel-center">
-          <div className="panel-header">
-            <span>{t('panel_scene_view')}</span>
-          </div>
-          <ViewportCanvas sceneVersion={sceneVersion} />
+          <section className={`product-view product-view-${workspaceView}`}>
+            {workspaceView === 'prd' && <article className="prd-document" onMouseUp={selectDocumentText}>
+              <header><span>Product requirements</span><strong>{shellState.project_name || 'Untitled game'}</strong><p>Living brief maintained by Aster from the current project and conversation.</p></header>
+              <section><h2>Vision</h2><p>Build a coherent, playable game experience through outcome-driven AI iteration. The project currently contains {sceneTree.length} scene objects and {scripts.length} scripts.</p></section>
+              <section><h2>Current scope</h2><div className="prd-grid"><div><span>Player experience</span><strong>Playable core loop</strong></div><div><span>World</span><strong>{sceneTree.length} authored objects</strong></div><div><span>Automation</span><strong>Review before apply</strong></div><div><span>Delivery</span><strong>Game View verification</strong></div></div></section>
+              <section><h2>Acceptance criteria</h2><ul><li>The game launches into a playable state.</li><li>AI-generated changes remain reviewable before write operations.</li><li>Every task ends with a Game View verification pass.</li><li>Scripts remain inspectable without exposing manual scene editing.</li></ul></section>
+            </article>}
+
+            {workspaceView === 'tasks' && <div className="task-board">
+              <header><div><span>Execution plan</span><h1>{aiWorkspace?.status === 'idle' || !aiWorkspace ? 'Waiting for an outcome' : aiWorkspace.status}</h1></div><small>{shellState.project_name} · {sceneTree.length} objects</small></header>
+              <ol className="task-progress">{taskSteps.map((step, index) => <li key={step} className={index < taskStepIndex ? 'complete' : index === taskStepIndex ? 'active' : ''}><span>{index < taskStepIndex ? <IconCheck /> : index + 1}</span><div><strong>{step}</strong><small>{index === taskStepIndex ? 'Current step' : index < taskStepIndex ? 'Complete' : 'Pending'}</small></div></li>)}</ol>
+              <section className="task-operations"><div className="task-section-title"><span>Proposed operations</span></div>
+                {!aiWorkspace?.plan ? <div className="product-empty"><IconProjects /><strong>No active plan</strong><span>Describe a result in chat. Aster's plan will appear here.</span></div> : aiWorkspace.plan.operations.map(operation => <div key={operation.index}><span className={operation.permission_kind}>{operation.permission_kind.toUpperCase()}</span><p>{operation.preview}</p><small>{operation.permission_kind === 'read' ? 'Auto allowed' : aiWorkspace.approved.has(operation.index) ? 'Allowed' : aiWorkspace.denied.has(operation.index) ? 'Denied once' : 'Awaiting permission in chat'}</small></div>)}
+              </section>
+              {aiWorkspace?.plan && <footer><button className="btn btn-ghost" onClick={aiWorkspace.discardProposal}>Discard</button><button className="btn btn-primary" disabled={aiWorkspace.approved.size === 0} onClick={aiWorkspace.applyApproved}>Continue with allowed ({aiWorkspace.approved.size})</button></footer>}
+            </div>}
+
+            {workspaceView === 'game' && <div className="game-preview"><div className="game-preview-bar"><div><span className="live-dot" />Live Game View</div><div className="viewport-mode-switch"><button className={viewMode === '2d' ? 'active' : ''} onClick={() => setViewMode('2d')}>2D</button><button className={viewMode === '3d' ? 'active' : ''} onClick={() => setViewMode('3d')}>3D</button><button onClick={openGameView}><IconPlay /> Run window</button></div></div><div className="game-preview-canvas" onClick={handleViewportClick}><ViewportCanvas sceneVersion={sceneVersion} cameraRef={cameraRef} onCameraChange={handleCameraChange} viewMode={viewMode} /></div></div>}
+
+            {workspaceView === 'scripts' && <div className="script-preview"><aside><header>Project scripts <span>{scripts.length}</span></header>{scripts.length === 0 ? <p>No scripts found.</p> : scripts.map(path => <button key={path} className={selectedScript === path ? 'active' : ''} onClick={() => setSelectedScript(path)}><IconCode /><span>{path.split('/').pop()}</span><small>{path}</small></button>)}</aside><article><header><span>{selectedScript || 'Select a script'}</span><b>CLICK · SHIFT+CLICK TO SELECT LINES</b></header><pre className="selectable-code"><code>{(scriptContent || '// Aster-generated scripts will appear here.').split('\n').map((line, index) => { const lineNumber = index + 1; const selected = scriptLineRange && lineNumber >= scriptLineRange[0] && lineNumber <= scriptLineRange[1]; return <button key={lineNumber} className={selected ? 'selected' : ''} onClick={event => selectScriptLine(lineNumber, event.shiftKey, event)}><span>{lineNumber}</span><i>{line || ' '}</i></button>; })}</code></pre></article></div>}
+          </section>
+
+          {artifactSelection && <div className={`artifact-ask-popover ${artifactQuestionOpen ? 'expanded' : ''}`} style={{ left: artifactSelection.x, top: artifactSelection.y }}>
+            {!artifactQuestionOpen ? <button onClick={() => setArtifactQuestionOpen(true)}><IconSparkles /> Ask Aster about {artifactSelection.kind}</button> : <div><header><span>{artifactSelection.label}</span><button onClick={() => setArtifactSelection(null)}><IconX /></button></header><div><input autoFocus value={artifactQuestion} onChange={event => setArtifactQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') submitArtifactQuestion(); if (event.key === 'Escape') setArtifactQuestionOpen(false); }} placeholder="Ask about this selection…" /><button onClick={submitArtifactQuestion} disabled={!artifactQuestion.trim()}>Ask</button></div></div>}
+          </div>}
         </main>
 
-        <ResizablePanel
-          side="right"
-          width={rightWidth}
-          minWidth={220}
-          onResize={setRightWidth}
-          collapsed={rightCollapsed}
-          onToggle={() => setRightCollapsed(!rightCollapsed)}
-          header={
-            <div className="panel-tabs">
-              <button
-                className={`panel-tab ${rightTab === 'inspector' ? 'active' : ''}`}
-                onClick={() => setRightTab('inspector')}
-              >
-                {t('panel_inspector')}
-              </button>
-              <button
-                className={`panel-tab ${rightTab === 'copilot' ? 'active' : ''}`}
-                onClick={() => setRightTab('copilot')}
-              >
-                {t('panel_copilot')}
-              </button>
-            </div>
-          }
-        >
-          {rightTab === 'inspector' ? (
-            <InspectorPanel selectedId={selectedId} onRefresh={refreshSceneTree} />
-          ) : (
-            <CopilotPanel />
-          )}
-        </ResizablePanel>
-      </div>
+        {/* Resize handle */}
+        <div
+          className="resize-handle resize-handle-right"
+          onMouseDown={handleResizeDown}
+          role="separator"
+          aria-label="Resize AI workspace"
+          aria-orientation="vertical"
+          aria-valuemin={360}
+          aria-valuemax={720}
+          aria-valuenow={aiPanelWidth}
+          tabIndex={0}
+          onKeyDown={event => {
+            if (event.key === 'ArrowLeft') setAiPanelWidth(width => Math.min(720, width + 16));
+            if (event.key === 'ArrowRight') setAiPanelWidth(width => Math.max(360, width - 16));
+          }}
+        />
 
-      {/* Bottom Panel (Console / Project) */}
-      <div
-        className={`panel panel-bottom${bottomCollapsed ? ' collapsed' : ''}`}
-        style={{ height: bottomCollapsed ? 28 : bottomHeight }}
-      >
-        <div className="panel-header">
-          <div className="panel-tabs">
-            <button
-              className={`panel-tab ${bottomTab === 'console' ? 'active' : ''}`}
-              onClick={() => setBottomTab('console')}
-            >
-              {t('panel_console')}
-            </button>
-            <button
-              className={`panel-tab ${bottomTab === 'project' ? 'active' : ''}`}
-              onClick={() => setBottomTab('project')}
-            >
-              {t('panel_project')}
-            </button>
-          </div>
-          <button
-            className="panel-toggle"
-            onClick={() => setBottomCollapsed(!bottomCollapsed)}
-            title={t('panel_console')}
-          >
-            {bottomCollapsed ? '\u25B2' : '\u25BC'}
-          </button>
-        </div>
-        {!bottomCollapsed && (
-          bottomTab === 'console' ? (
-            <ConsolePanel entries={consoleEntries} />
-          ) : (
-            <ProjectPanel />
-          )
-        )}
+        {/* AI Panel (right side) */}
+        <aside className="ai-panel-container" style={{ width: aiPanelWidth }}>
+          <AiPanel
+            projectName={shellState.project_name}
+            selectedEntity={selectedId}
+            selectedEntityName={selectedEntityName}
+            sceneObjectCount={sceneTree.length}
+            sceneObjects={sceneTree}
+            onQuickAction={handleQuickAction}
+            onSceneChanged={handleAiSceneChanged}
+            onFocusPosition={focusOnPosition}
+            chatOnly
+            onWorkspaceStateChange={setAiWorkspace}
+            contextualRequest={contextualRequest}
+            onContextualRequestConsumed={id => setContextualRequest(current => current?.id === id ? null : current)}
+            onOpenSettings={onOpenSettings}
+          />
+        </aside>
       </div>
-
-      {/* Resize handle for bottom panel */}
-      <div className="resize-handle resize-handle-bottom" onMouseDown={bottomHandleDown} />
 
       {/* Status Bar */}
       <footer className="editor-statusbar">
-        <span className="status-item">
-          {shellState.project_name || t('status_no_project')}
-        </span>
-        {errorMessage && (
-          <span className="status-item status-error">
-            {errorMessage}
-          </span>
-        )}
-        {!errorMessage && statusMessage && (
-          <span className="status-item">
-            {statusMessage}
-          </span>
-        )}
-        <span className="status-item" style={{ color: 'var(--accent)' }}>
-          v0.1.0
-        </span>
+        <div className="status-group">
+          <span className="status-item">{shellState.project_name || 'No project'}</span>
+          <span className="status-divider" />
+          <span className="status-item">{sceneTree.length} objects</span>
+          {selectedEntityName && <><span className="status-divider" /><span className="status-item status-selection">Selected: {selectedEntityName}</span></>}
+        </div>
+        <div className="status-group">
+          {shellState.scene_dirty ? (
+            <span className="status-item status-dirty"><span className="status-dot" />Unsaved changes</span>
+          ) : (
+            <span className="status-item status-saved">Saved</span>
+          )}
+          <span className="status-divider" />
+          <span className="status-item" style={{ color: 'var(--accent)' }}>v0.1.0</span>
+        </div>
       </footer>
+
+      {/* Close Project Dialog */}
+      {showCloseDialog && shellState && (
+        <CloseProjectDialog
+          projectName={shellState.project_name || 'project'}
+          onSave={async () => {
+            setShowCloseDialog(false);
+            await rpc('shell/save_scene').catch(() => {});
+            onCloseProject();
+          }}
+          onDiscard={() => { setShowCloseDialog(false); onCloseProject(); }}
+          onCancel={() => setShowCloseDialog(false)}
+        />
+      )}
     </div>
   );
 }

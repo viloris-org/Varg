@@ -572,7 +572,7 @@ The Policy Daemon exposes a narrow IPC interface (Unix domain socket, local-only
 - Is the sole signer of capability grants and transaction bundles. If the Policy Daemon did not sign it, the tool layer rejects it.
 
 This design means:
-- A memory corruption bug in the AI orchestration code, the model provider client, the egui renderer, or a third-party asset importer cannot reach the Policy Daemon's memory space.
+- A memory corruption bug in the AI orchestration code, the model provider client, the editor renderer, or a third-party asset importer cannot reach the Policy Daemon's memory space.
 - A compromised dependency in the editor process cannot forge a grant signature or tamper with an audit report.
 - The blast radius of any single-process vulnerability stops at the Policy Daemon boundary.
 - The Policy Daemon's correctness can be audited, fuzzed, and verified independently of the much larger editor and AI codebase.

@@ -1,6 +1,11 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { rpc, selectProjectLocation } from '../api';
 import { useTranslation } from '../i18n';
+import {
+  IconProjects, IconInstalls, IconSettings, IconFolder, IconPlus, IconTrash, IconPlay,
+  IconSun, IconMoon, IconMonitor, IconPackage, IconAlertTriangle, IconX, IconEmpty,
+  AsterLogo,
+} from '../icons';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -57,100 +62,6 @@ function getInitials(name: string): string {
     .slice(0, 2) || '?';
 }
 
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-const IconProjects = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
-    <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
-  </svg>
-);
-
-const IconInstalls = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-    <polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" />
-  </svg>
-);
-
-const IconSettings = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  </svg>
-);
-
-const IconFolder = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-  </svg>
-);
-
-const IconPlus = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-  </svg>
-);
-
-const IconTrash = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-  </svg>
-);
-
-const IconPlay = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <polygon points="5 3 19 12 5 21 5 3" />
-  </svg>
-);
-
-const IconSun = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-    <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-  </svg>
-);
-
-const IconMoon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-  </svg>
-);
-
-const IconMonitor = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
-  </svg>
-);
-
-const IconPackage = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
-    <line x1="16.5" y1="9.4" x2="7.5" y2="4.21" /><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-    <polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" />
-  </svg>
-);
-
-const IconAlertTriangle = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
-    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-    <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-  </svg>
-);
-
-const IconX = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
-    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-
-const IconEmpty = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" width="48" height="48">
-    <rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
-  </svg>
-);
-
 // ─── Sidebar ────────────────────────────────────────────────────────────────
 
 function Sidebar({
@@ -181,9 +92,7 @@ function Sidebar({
     <aside className="hub-sidebar">
       {/* Logo */}
       <div className="hub-logo">
-        <svg width="24" height="24" viewBox="0 0 16 16">
-          <polygon points="8,1 15,5 15,11 8,15 1,11 1,5" fill="#22C55E" opacity="0.9" />
-        </svg>
+        <AsterLogo />
         <div>
           <h1>Aster</h1>
           <span>{t('app_tagline')}</span>
@@ -263,8 +172,8 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
         template_id: templates[templateIdx].id,
         toolchain_version: installs[versionIdx]?.version || '0.1.0',
       });
-    } catch (e: any) {
-      setError(typeof e === 'string' ? e : e.message || t('dialog_new_project'));
+    } catch (e: unknown) {
+      setError(typeof e === 'string' ? e : (e instanceof Error ? e.message : t('dialog_new_project')));
       setCreating(false);
     }
   }, [name, location, templateIdx, versionIdx, installs, onCreate]);
@@ -615,6 +524,390 @@ function InstallsPage({ installs }: { installs: InstallInfo[] }) {
   );
 }
 
+// ─── Copilot Settings ────────────────────────────────────────────────────────
+
+interface ModelInfo {
+  id: string;
+  display_name: string;
+  provider: string;
+  context_window: number;
+  default_max_tokens: number;
+  capabilities: {
+    can_reason: boolean;
+    supports_vision: boolean;
+    supports_tools: boolean;
+  };
+}
+
+interface ProviderMeta {
+  provider: string;
+  display_name: string;
+  requires_api_key: boolean;
+  requires_endpoint: boolean;
+  default_endpoint: string | null;
+  models: ModelInfo[];
+}
+
+interface MimoConfig {
+  billing: 'subscription' | 'api';
+  region: 'china' | 'singapore' | 'europe';
+}
+
+interface GlmConfig {
+  billing: 'subscription' | 'api';
+  region: 'bigmodel' | 'zai';
+}
+
+interface CopilotSettingsData {
+  provider: 'stub' | 'anthropic' | 'openai' | 'codex_oauth' | 'gemini' | 'ollama' | 'custom' | 'mimo' | 'deepseek' | 'glm';
+  model: string;
+  api_endpoint: string | null;
+  api_key: string | null;
+  has_api_key?: boolean;
+  max_tokens: number;
+  mimo_config?: MimoConfig;
+  glm_config?: GlmConfig;
+}
+
+const PROVIDER_OPTIONS: Array<{ value: CopilotSettingsData['provider']; label: string }> = [
+  { value: 'anthropic', label: 'Anthropic (Claude)' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'codex_oauth', label: 'Codex OAuth (ChatGPT)' },
+  { value: 'gemini', label: 'Google Gemini' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'mimo', label: 'Xiaomi MiMo' },
+  { value: 'glm', label: 'GLM/Zhipu AI' },
+  { value: 'ollama', label: 'Ollama (Local)' },
+  { value: 'custom', label: 'Custom (OpenAI-Compatible)' },
+  { value: 'stub', label: 'None (Disabled)' },
+];
+
+function CopilotSettingsSection() {
+  const [settings, setSettings] = useState<CopilotSettingsData>({
+    provider: 'stub',
+    model: '',
+    api_endpoint: null,
+    api_key: null,
+    max_tokens: 4096,
+  });
+  const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [providerMetas, setProviderMetas] = useState<ProviderMeta[]>([]);
+  const [codexConnected, setCodexConnected] = useState(false);
+  const [codexCode, setCodexCode] = useState<string | null>(null);
+  const [codexAuthBusy, setCodexAuthBusy] = useState(false);
+  const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [keyChanged, setKeyChanged] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      rpc<CopilotSettingsData>('app/get_copilot_settings').catch(() => null),
+      rpc<{ providers: ProviderMeta[] }>('app/get_model_registry').catch(() => ({ providers: [] })),
+    ]).then(([s, reg]) => {
+      if (s) {
+        const providerMap: Record<string, CopilotSettingsData['provider']> = { open_a_i: 'openai' };
+        const normalized = providerMap[s.provider] ?? s.provider;
+        setSettings({ ...s, provider: normalized as CopilotSettingsData['provider'] });
+      }
+      setProviderMetas(reg.providers);
+      setLoaded(true);
+    });
+    rpc<{ connected: boolean }>('app/codex_oauth_status')
+      .then(status => setCodexConnected(status.connected))
+      .catch(() => setCodexConnected(false));
+  }, []);
+
+  const currentMeta = useMemo(
+    () => providerMetas.find(p => p.provider === settings.provider),
+    [providerMetas, settings.provider]
+  );
+
+  const handleProviderChange = useCallback((provider: CopilotSettingsData['provider']) => {
+    setSettings(s => ({ ...s, provider, api_endpoint: null }));
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      const payload = { ...settings };
+      if (!keyChanged) delete (payload as any).api_key;
+      await rpc('app/update_copilot_settings', payload);
+      setSaved(true);
+      setKeyChanged(false);
+      setTimeout(() => setSaved(false), 2000);
+    } catch { /* ignore */ }
+    setSaving(false);
+  }, [settings, keyChanged]);
+
+  const handleCodexLogin = useCallback(async () => {
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      const auth = await rpc<{ url: string; user_code: string; interval_seconds: number }>(
+        'app/codex_oauth_start',
+      );
+      setCodexCode(auth.user_code);
+      await rpc('app/open_folder', { path: auth.url });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, (auth.interval_seconds + 3) * 1000));
+        const result = await rpc<{ status: 'pending' | 'connected' }>('app/codex_oauth_poll');
+        if (result.status === 'connected') {
+          setCodexConnected(true);
+          setCodexCode(null);
+          setSettings(current => ({ ...current, provider: 'codex_oauth' }));
+          return;
+        }
+      }
+      throw new Error('Codex authorization timed out');
+    } catch (err: any) {
+      setCodexAuthError(typeof err === 'string' ? err : err.message || 'Authorization failed');
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  }, []);
+
+  const handleCodexLogout = useCallback(async () => {
+    await rpc('app/codex_oauth_logout');
+    setCodexConnected(false);
+    setCodexCode(null);
+  }, []);
+
+  const showApiKey = currentMeta?.requires_api_key ?? (settings.provider !== 'ollama' && settings.provider !== 'stub');
+  // MiMo and GLM have auto-determined endpoints based on region/billing config
+  const endpointAutoDetermined = settings.provider === 'mimo' || settings.provider === 'glm';
+  const showEndpoint = settings.provider !== 'stub' && !endpointAutoDetermined;
+  const endpointRequired = settings.provider === 'custom';
+
+  if (!loaded) return null;
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">AI Provider</div>
+
+      {/* Provider */}
+      <div className="settings-row">
+        <div>
+          <div className="settings-label">Provider</div>
+          <div className="settings-desc">Select your AI model provider</div>
+        </div>
+        <div className="settings-control">
+          <select
+            value={settings.provider}
+            onChange={(e) => handleProviderChange(e.target.value as CopilotSettingsData['provider'])}
+            style={{ minWidth: 200 }}
+          >
+            {PROVIDER_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* API Key */}
+      {showApiKey && (
+        <div className="settings-row">
+          <div>
+            <div className="settings-label">API Key</div>
+            <div className="settings-desc">Authentication credential for the provider</div>
+          </div>
+          <div className="settings-control">
+            <input
+              type="password"
+              value={settings.api_key ?? ''}
+              placeholder={settings.has_api_key ? '••••••••••••' : 'sk-...'}
+              onChange={(e) => {
+                setSettings(s => ({ ...s, api_key: e.target.value || null }));
+                setKeyChanged(true);
+              }}
+              style={{ minWidth: 200 }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Codex OAuth */}
+      {settings.provider === 'codex_oauth' && (
+        <div className="settings-row">
+          <div>
+            <div className="settings-label">ChatGPT Account</div>
+            <div className="settings-desc">Sign in with your ChatGPT subscription</div>
+          </div>
+          <div className="settings-control" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={codexConnected ? handleCodexLogout : handleCodexLogin}
+              disabled={codexAuthBusy}
+            >
+              {codexAuthBusy ? 'Waiting for authorization...' : codexConnected ? 'Sign out' : 'Sign in with ChatGPT'}
+            </button>
+            {codexConnected && <small style={{ color: 'var(--success)' }}>Connected</small>}
+            {codexCode && <small>Enter code <strong>{codexCode}</strong> in the browser.</small>}
+            {codexAuthError && <small style={{ color: 'var(--error)' }}>{codexAuthError}</small>}
+          </div>
+        </div>
+      )}
+
+      {/* Endpoint */}
+      {showEndpoint && (
+        <div className="settings-row">
+          <div>
+            <div className="settings-label">
+              Endpoint {endpointRequired ? '' : <small style={{ opacity: 0.6 }}>(optional override)</small>}
+            </div>
+            <div className="settings-desc">API base URL for the provider</div>
+          </div>
+          <div className="settings-control">
+            <input
+              type="text"
+              value={settings.api_endpoint ?? ''}
+              placeholder={currentMeta?.default_endpoint ?? 'https://api.example.com/v1'}
+              onChange={(e) => setSettings(s => ({ ...s, api_endpoint: e.target.value || null }))}
+              style={{ minWidth: 200 }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* MiMo Configuration */}
+      {settings.provider === 'mimo' && (
+        <>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label">Billing Mode</div>
+              <div className="settings-desc">Token Plan subscription or pay-as-you-go API</div>
+            </div>
+            <div className="settings-control">
+              <select
+                value={settings.mimo_config?.billing ?? 'subscription'}
+                onChange={(e) => setSettings(s => ({
+                  ...s,
+                  mimo_config: {
+                    ...s.mimo_config,
+                    billing: e.target.value as 'subscription' | 'api',
+                    region: s.mimo_config?.region ?? 'china',
+                  }
+                }))}
+                style={{ minWidth: 150 }}
+              >
+                <option value="subscription">Token Plan</option>
+                <option value="api">Pay-as-you-go</option>
+              </select>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label">Region</div>
+              <div className="settings-desc">Regional cluster for Token Plan</div>
+            </div>
+            <div className="settings-control">
+              <select
+                value={settings.mimo_config?.region ?? 'china'}
+                onChange={(e) => setSettings(s => ({
+                  ...s,
+                  mimo_config: {
+                    ...s.mimo_config,
+                    billing: s.mimo_config?.billing ?? 'subscription',
+                    region: e.target.value as 'china' | 'singapore' | 'europe',
+                  }
+                }))}
+                style={{ minWidth: 150 }}
+              >
+                <option value="china">China</option>
+                <option value="singapore">Singapore</option>
+                <option value="europe">Europe</option>
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* GLM Configuration */}
+      {settings.provider === 'glm' && (
+        <>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label">Billing Mode</div>
+              <div className="settings-desc">Subscription or pay-as-you-go API</div>
+            </div>
+            <div className="settings-control">
+              <select
+                value={settings.glm_config?.billing ?? 'subscription'}
+                onChange={(e) => setSettings(s => ({
+                  ...s,
+                  glm_config: {
+                    ...s.glm_config,
+                    billing: e.target.value as 'subscription' | 'api',
+                    region: s.glm_config?.region ?? 'bigmodel',
+                  }
+                }))}
+                style={{ minWidth: 150 }}
+              >
+                <option value="subscription">Subscription</option>
+                <option value="api">Pay-as-you-go</option>
+              </select>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label">Region</div>
+              <div className="settings-desc">Bigmodel (China) or ZAI (International)</div>
+            </div>
+            <div className="settings-control">
+              <select
+                value={settings.glm_config?.region ?? 'bigmodel'}
+                onChange={(e) => setSettings(s => ({
+                  ...s,
+                  glm_config: {
+                    ...s.glm_config,
+                    billing: s.glm_config?.billing ?? 'subscription',
+                    region: e.target.value as 'bigmodel' | 'zai',
+                  }
+                }))}
+                style={{ minWidth: 150 }}
+              >
+                <option value="bigmodel">Bigmodel (China)</option>
+                <option value="zai">ZAI (International)</option>
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Max Tokens */}
+      {settings.provider !== 'stub' && (
+        <div className="settings-row">
+          <div>
+            <div className="settings-label">Max Tokens</div>
+            <div className="settings-desc">Maximum response length</div>
+          </div>
+          <div className="settings-control">
+            <input
+              type="number"
+              value={settings.max_tokens}
+              min={256}
+              max={128000}
+              onChange={(e) => setSettings(s => ({ ...s, max_tokens: parseInt(e.target.value) || 4096 }))}
+              style={{ width: 100 }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Save button */}
+      <div className="settings-row">
+        <div />
+        <div className="settings-control">
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving...' : saved ? 'Saved!' : 'Save AI Settings'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Settings Page ──────────────────────────────────────────────────────────
 
 function SettingsPage({
@@ -688,6 +981,9 @@ function SettingsPage({
           </div>
         </div>
 
+        {/* AI Provider */}
+        <CopilotSettingsSection />
+
         {/* About */}
         <div className="settings-section">
           <div className="settings-section-title">{t('settings_about')}</div>
@@ -731,8 +1027,9 @@ export default function HubPage({ state, onOpenProject, onNavigate, onSetTheme, 
       toolchain_version: req.toolchain_version,
     });
     setShowNewDialog(false);
-    // Open the newly created project
-    const createdPath = `${req.location}/${req.name}`;
+    // Open the newly created project — use native path separator
+    const sep = req.location.includes('\\') ? '\\' : '/';
+    const createdPath = `${req.location}${sep}${req.name}`;
     await onOpenProject(createdPath);
   }, [onOpenProject]);
 

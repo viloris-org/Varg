@@ -378,6 +378,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
         // ── render_submit ──────────────────────────────────────────────
         self.render_world = extract_render_world(&self.scene);
+        Self::resolve_render_materials(&mut self.render_world, &self.mesh_resources);
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
         };
@@ -398,6 +399,27 @@ impl<R: RenderDevice> RuntimeServices<R> {
             + usize::from(self.render_world.camera.is_some());
         self.frame_counter.advance();
         Ok(())
+    }
+
+    /// Resolves material names on render objects using imported model
+    /// materials. When a render object references a model but has no explicit
+    /// material asset assignment, the first material from the model is used.
+    fn resolve_render_materials(
+        world: &mut RenderWorld,
+        mesh_resources: &HashMap<engine_core::AssetId, ModelResource>,
+    ) {
+        for obj in &mut world.objects {
+            let Some(model_guid) = parse_asset_guid(&obj.mesh) else {
+                continue;
+            };
+            let Some(model) = mesh_resources.get(&model_guid) else {
+                continue;
+            };
+            if model.materials.is_empty() {
+                continue;
+            }
+            obj.material = format!("material:{:032x}:0", model_guid.as_u128());
+        }
     }
 
     /// Current frame index.
@@ -783,6 +805,18 @@ impl<R: RenderDevice> RuntimeServices<R> {
                         &mesh.texcoords,
                         &mesh.indices,
                     )?;
+                }
+                // Register PBR materials from the model so the renderer can
+                // look up parameters by material name at render time.
+                for (mat_idx, material) in model.materials.iter().enumerate() {
+                    let material_name = format!("material:{:032x}:{}", guid.as_u128(), mat_idx);
+                    self.renderer.register_material_params(
+                        &material_name,
+                        material.base_color,
+                        material.metallic,
+                        material.roughness,
+                        material.emissive,
+                    );
                 }
                 self.mesh_resources.insert(guid.as_asset_id(), model);
             }
@@ -1658,7 +1692,16 @@ fn camera_to_render(
         vertical_fov_degrees: camera.vertical_fov_degrees,
         near: camera.near,
         far: camera.far,
+        look_at_target: None,
     }
+}
+
+/// Parses an asset GUID from a mesh/material name string formatted as
+/// `"asset:{:032x}"` or `"asset:{:032x}:N"` (multi-mesh model suffix).
+fn parse_asset_guid(name: &str) -> Option<engine_core::AssetId> {
+    let hex = name.strip_prefix("asset:")?.split(':').next()?;
+    let value = u128::from_str_radix(hex, 16).ok()?;
+    Some(engine_core::AssetId::from_u128(value))
 }
 
 fn mesh_to_render(

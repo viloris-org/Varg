@@ -10,9 +10,6 @@ pub mod pipeline;
 pub mod resource;
 pub mod target;
 
-#[cfg(feature = "editor")]
-pub mod egui_convert;
-
 pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass};
 pub use pipeline::{
     GuiDrawList, GuiTextureId, MaterialHandle, PipelineDesc, ShaderHandle, ShaderStage,
@@ -60,6 +57,12 @@ pub struct RenderCamera {
     pub near: f32,
     /// Far clipping plane.
     pub far: f32,
+    /// Optional explicit look-at target in world space.
+    ///
+    /// When `Some`, the renderer uses this point as the `look_at` target instead
+    /// of deriving the direction from `transform.rotation`. Used by the editor
+    /// orbit camera to correctly apply pan offsets.
+    pub look_at_target: Option<engine_core::math::Vec3>,
 }
 
 /// Camera projection used by a render view.
@@ -91,6 +94,27 @@ pub struct RenderObject {
     pub mesh: String,
     /// Material identifier, either a built-in name or asset label.
     pub material: String,
+}
+
+/// 2D sprite draw data extracted from a scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderSprite {
+    /// Source scene object.
+    pub object: EntityId,
+    /// World transform.
+    pub transform: Transform,
+    /// Optional texture asset label.
+    pub texture: Option<String>,
+    /// Sprite tint color.
+    pub color: [f32; 4],
+    /// Draw order within the sorting layer.
+    pub order_in_layer: i32,
+    /// Sorting layer name.
+    pub layer: String,
+    /// Whether the sprite is flipped horizontally.
+    pub flip_h: bool,
+    /// Whether the sprite is flipped vertically.
+    pub flip_v: bool,
 }
 
 /// Light data extracted from a scene for rendering.
@@ -154,6 +178,8 @@ pub struct RenderWorld {
     pub camera: Option<RenderCamera>,
     /// Queued mesh renderers.
     pub objects: Vec<RenderObject>,
+    /// Queued 2D sprites.
+    pub sprites: Vec<RenderSprite>,
     /// Queued lights.
     pub lights: Vec<RenderLight>,
     /// Queued particle instances.
@@ -163,7 +189,8 @@ pub struct RenderWorld {
 impl RenderWorld {
     /// Returns true when there is visible geometry and a camera.
     pub fn is_visible(&self) -> bool {
-        self.camera.is_some() && (!self.objects.is_empty() || !self.particles.is_empty())
+        self.camera.is_some()
+            && (!self.objects.is_empty() || !self.sprites.is_empty() || !self.particles.is_empty())
     }
 
     /// Extracts renderable data from a [`Scene`](engine_ecs::Scene).
@@ -171,6 +198,7 @@ impl RenderWorld {
     /// Iterates all active game objects. For each object, extracts:
     /// - `Camera` → [`RenderCamera`] (stored as `self.camera`)
     /// - `MeshRenderer` + transform → [`RenderObject`]
+    /// - `Sprite2D` + transform → [`RenderSprite`]
     /// - `Light` → [`RenderLight`]
     ///
     /// Inactive objects and objects without any renderable component are skipped.
@@ -194,6 +222,7 @@ impl RenderWorld {
                             vertical_fov_degrees: cam.vertical_fov_degrees,
                             near: cam.near,
                             far: cam.far,
+                            look_at_target: None,
                         });
                     }
                     engine_ecs::ComponentData::MeshRenderer(mesh) => {
@@ -217,6 +246,35 @@ impl RenderWorld {
                             transform,
                             mesh: mesh_name,
                             material: material_name,
+                        });
+                    }
+                    engine_ecs::ComponentData::Camera2D(camera) => {
+                        let mut camera_transform = transform;
+                        camera_transform.translation.z += 10.0;
+                        world.camera = Some(RenderCamera {
+                            object: obj.id,
+                            transform: camera_transform,
+                            projection: RenderProjection::Orthographic {
+                                vertical_size: 10.0 / camera.zoom.max(0.01),
+                            },
+                            vertical_fov_degrees: 60.0,
+                            near: 0.01,
+                            far: 1000.0,
+                            look_at_target: Some(transform.translation),
+                        });
+                    }
+                    engine_ecs::ComponentData::Sprite2D(sprite) => {
+                        world.sprites.push(RenderSprite {
+                            object: obj.id,
+                            transform,
+                            texture: sprite
+                                .texture
+                                .map(|id| format!("asset:{:016x}", id.as_u128())),
+                            color: sprite.color,
+                            order_in_layer: sprite.order_in_layer,
+                            layer: sprite.layer.clone(),
+                            flip_h: sprite.flip_h,
+                            flip_v: sprite.flip_v,
                         });
                     }
                     engine_ecs::ComponentData::Light(light) => {
@@ -347,6 +405,21 @@ pub trait RenderDevice {
         _bone_count: u32,
     ) -> EngineResult<()> {
         Ok(())
+    }
+
+    /// Registers PBR material parameters keyed by material name.
+    ///
+    /// The name must match the string produced by the scene extraction step for
+    /// `RenderObject::material`. Backends that support per-material PBR
+    /// parameters override this; others use the default no-op.
+    fn register_material_params(
+        &mut self,
+        _name: &str,
+        _base_color: [f32; 4],
+        _metallic: f32,
+        _roughness: f32,
+        _emissive: [f32; 3],
+    ) {
     }
 }
 
@@ -627,5 +700,47 @@ mod tests {
 
         assert!(world.is_visible());
         assert!(!world.particles.is_empty());
+    }
+
+    #[test]
+    fn extracts_2d_camera_and_sprites() {
+        let mut scene = Scene::new();
+        let camera = scene.create_object("2D Camera").unwrap();
+        scene
+            .upsert_component(
+                camera,
+                ComponentData::Camera2D(engine_ecs::Camera2DComponentData {
+                    zoom: 2.0,
+                    ..engine_ecs::Camera2DComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let sprite = scene.create_object("Sprite").unwrap();
+        scene
+            .upsert_component(
+                sprite,
+                ComponentData::Sprite2D(engine_ecs::Sprite2DComponentData {
+                    color: [0.25, 0.5, 0.75, 0.5],
+                    flip_h: true,
+                    order_in_layer: 3,
+                    layer: "Foreground".to_string(),
+                    ..engine_ecs::Sprite2DComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let world = RenderWorld::extract(&scene);
+
+        assert!(world.is_visible());
+        assert_eq!(world.sprites.len(), 1);
+        assert_eq!(world.sprites[0].color, [0.25, 0.5, 0.75, 0.5]);
+        assert!(world.sprites[0].flip_h);
+        assert_eq!(world.sprites[0].order_in_layer, 3);
+        assert_eq!(world.sprites[0].layer, "Foreground");
+        assert_eq!(
+            world.camera.unwrap().projection,
+            RenderProjection::Orthographic { vertical_size: 5.0 }
+        );
     }
 }

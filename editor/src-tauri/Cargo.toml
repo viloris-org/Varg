@@ -17,10 +17,16 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools"] }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+base64 = "0.22"
+ureq = { version = "3", features = ["json"] }
 
 image = { workspace = true, default-features = false, features = ["png"] }
 
+rfd = "0.17"
+
 engine-ai.workspace = true
+
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor.workspace = true
@@ -29,10 +35,6 @@ engine-render.workspace = true
 engine-render-wgpu.workspace = true
 engine-assets.workspace = true
 runtime-min = { workspace = true, features = ["editor", "wgpu", "physics", "script-rhai"] }
-tauri-plugin-dialog = "2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.12.3", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

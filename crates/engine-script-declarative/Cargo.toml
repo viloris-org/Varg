@@ -1,0 +1,22 @@
+[package]
+name = "engine-script-declarative"
+description = "Aster declarative behavior scripting backend optimized for LLM code generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+script-declarative = []
+
+[dependencies]
+engine-core.workspace = true
+engine-ecs.workspace = true
+engine-platform.workspace = true
+engine-physics.workspace = true
+engine-assets.workspace = true
+engine-editor.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

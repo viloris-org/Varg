@@ -163,11 +163,11 @@ where
     M: engine_ai::AiModel,
 {
     fn generate(&self, system: &str, user: &str) -> EngineResult<String> {
-        let request = engine_ai::AiRequest {
-            system: system.to_string(),
-            context: serde_json::Value::Null,
-            user: user.to_string(),
-        };
+        let request = engine_ai::AiRequest::single_turn(
+            system.to_string(),
+            serde_json::Value::Null,
+            user.to_string(),
+        );
         let response = self.inner.chat(request)?;
         Ok(response.content)
     }

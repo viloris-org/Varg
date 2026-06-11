@@ -5,11 +5,14 @@
 
 use std::{
     cell::UnsafeCell,
-    path::PathBuf,
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    thread::ThreadId,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine as _;
 use engine_ai::{AgentPlan, AgentSession};
 use engine_core::{EngineConfig, EngineError, EngineResult, RuntimeProfile};
 use engine_editor::agent::PermissionPolicy;
@@ -22,12 +25,122 @@ use engine_i18n::{Locale, Translations};
 use engine_render::ImageFormat;
 use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 use runtime_min::{headless_services_from_scene, RuntimeServices};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{image::Image, utils::config::Color, Manager, State};
+use tauri::{image::Image, utils::config::Color, Emitter, Manager, State};
 
 const APP_WINDOW_ICON: Image<'static> = tauri::include_image!("./icons/128x128.png");
 
 const WINDOW_BACKGROUND: &str = "#181818";
+
+fn normalize_relative_path(path: &str) -> EngineResult<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(EngineError::config("path must stay inside the project"));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(EngineError::config("path must not be empty"));
+    }
+
+    Ok(normalized)
+}
+
+fn validate_file_name(name: &str) -> EngineResult<()> {
+    let mut components = Path::new(name).components();
+    if matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none() {
+        Ok(())
+    } else {
+        Err(EngineError::config(
+            "file name must not contain path separators",
+        ))
+    }
+}
+
+fn asset_meta_path_for_source(path: &Path) -> PathBuf {
+    let mut meta_path = path.to_path_buf();
+    if let Some(name) = path.file_name() {
+        let mut meta_name = name.to_os_string();
+        meta_name.push(".meta");
+        meta_path.set_file_name(meta_name);
+    } else {
+        meta_path.set_extension("meta");
+    }
+    meta_path
+}
+
+fn resolve_existing_relative_path(root: &Path, path: &str) -> EngineResult<PathBuf> {
+    let relative = normalize_relative_path(path)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|source| EngineError::Filesystem {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    let full_path = canonical_root.join(relative);
+    let canonical = full_path
+        .canonicalize()
+        .map_err(|source| EngineError::Filesystem {
+            path: full_path.clone(),
+            source,
+        })?;
+
+    if !canonical.starts_with(&canonical_root) {
+        return Err(EngineError::config("path is outside the project"));
+    }
+
+    Ok(canonical)
+}
+
+fn resolve_writable_relative_path(root: &Path, path: &str) -> EngineResult<PathBuf> {
+    let relative = normalize_relative_path(path)?;
+    std::fs::create_dir_all(root).map_err(|source| EngineError::Filesystem {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|source| EngineError::Filesystem {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    let full_path = canonical_root.join(relative);
+
+    if full_path.exists() {
+        let canonical = full_path
+            .canonicalize()
+            .map_err(|source| EngineError::Filesystem {
+                path: full_path.clone(),
+                source,
+            })?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(EngineError::config("path is outside the project"));
+        }
+        return Ok(canonical);
+    }
+
+    let mut probe = full_path.parent().unwrap_or(&canonical_root);
+    while !probe.exists() {
+        probe = probe.parent().unwrap_or(&canonical_root);
+    }
+    let canonical_probe = probe
+        .canonicalize()
+        .map_err(|source| EngineError::Filesystem {
+            path: probe.to_path_buf(),
+            source,
+        })?;
+    if !canonical_probe.starts_with(&canonical_root) {
+        return Err(EngineError::config("path is outside the project"));
+    }
+
+    Ok(full_path)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DesktopEnvironment {
@@ -120,58 +233,116 @@ impl DesktopIntegration {
     }
 }
 
-/// Stub AI model for development — maps keywords to canned JSON responses.
-struct StubAiModel;
+// ─── Credentials file (separate from durable state for security) ────────────
 
-impl engine_ai::AiModel for StubAiModel {
-    fn chat(
-        &self,
-        request: engine_ai::AiRequest,
-    ) -> engine_core::EngineResult<engine_ai::AiResponse> {
-        let prompt = request.user.to_lowercase();
+/// Credentials stored in a separate TOML file (not committed to projects).
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct CredentialsFile {
+    /// API key for the copilot provider.
+    #[serde(default)]
+    copilot_api_key: Option<String>,
+    /// ChatGPT OAuth credentials for the Codex provider.
+    #[serde(default)]
+    codex_oauth: Option<CodexOAuthCredential>,
+}
 
-        let json = if prompt.contains("create")
-            && (prompt.contains("player") || prompt.contains("cube"))
-        {
-            let name = if prompt.contains("player") {
-                "Player"
-            } else {
-                "Cube"
-            };
-            format!(
-                r#"[[
-                    {{"action":"create_object","name":"{name}","components":[{{"type":"MeshRenderer"}}],"position":[0,0,0]}},
-                    {{"action":"complete","summary":"Created {name}"}}
-                ]]
-            "#
-            )
-        } else if prompt.contains("create") && prompt.contains("camera") {
-            r#"[[
-                {"action":"create_object","name":"Camera","components":[{"type":"Camera"}],"position":[0,2,5]},
-                {"action":"complete","summary":"Created Camera"}
-            ]]
-            "#.to_owned()
-        } else if prompt.contains("add") && prompt.contains("light") {
-            r#"[[
-                {"action":"create_object","name":"Point Light","components":[{"type":"Light"}],"position":[2,3,0]},
-                {"action":"set_property","entity":"1:1","component":"Light","field":"intensity","value":2.0},
-                {"action":"complete","summary":"Added Point Light"}
-            ]]
-            "#.to_owned()
-        } else if prompt.contains("help") || prompt.contains("what") || prompt.contains("list") {
-            r#"[[
-                {"action":"complete","summary":"I can create objects (player, cube, camera), add components (light, rigidbody), and modify scene properties. Try \"create a player\" or \"add a light\"."}
-            ]]
-            "#.to_owned()
-        } else {
-            r#"[[
-                {"action":"complete","summary":"I'm not sure what you want to do. Try \"create a player\", \"add a light\", or \"help\"."}
-            ]]
-            "#.to_owned()
-        };
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CodexOAuthCredential {
+    access_token: String,
+    refresh_token: String,
+    expires_at_ms: u64,
+    account_id: Option<String>,
+}
 
-        Ok(engine_ai::AiResponse { content: json })
+#[derive(Debug)]
+struct PendingCodexOAuth {
+    device_auth_id: String,
+    user_code: String,
+    interval_seconds: u64,
+}
+
+struct PreparedCopilotRequest {
+    request: engine_ai::AiRequest,
+    enriched_prompt: String,
+    provider: String,
+    model: String,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+    max_tokens: u32,
+    codex_oauth: Option<engine_ai::providers::CodexOAuthCredentials>,
+    mimo_config: Option<engine_editor::MimoConfig>,
+    glm_config: Option<engine_editor::GlmConfig>,
+}
+
+struct CompletedCopilotRequest {
+    enriched_prompt: String,
+    response: Result<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct CopilotRequestState {
+    completed: std::sync::Arc<Mutex<HashMap<String, CompletedCopilotRequest>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTokenResponse {
+    access_token: String,
+    refresh_token: String,
+    #[serde(default = "default_oauth_expires_in")]
+    expires_in: u64,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+fn default_oauth_expires_in() -> u64 {
+    3600
+}
+
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn exchange_codex_token(form: &[(&str, &str)]) -> EngineResult<CodexTokenResponse> {
+    let mut response = ureq::post(format!("{CODEX_OAUTH_ISSUER}/oauth/token"))
+        .send_form(form.iter().copied())
+        .map_err(|error| EngineError::other(format!("Codex token exchange failed: {error}")))?;
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|error| EngineError::other(format!("invalid Codex token response: {error}")))
+}
+
+fn codex_credential_from_tokens(tokens: CodexTokenResponse) -> CodexOAuthCredential {
+    let account_id = tokens
+        .id_token
+        .as_deref()
+        .and_then(extract_codex_account_id)
+        .or_else(|| extract_codex_account_id(&tokens.access_token));
+    CodexOAuthCredential {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at_ms: unix_time_ms().saturating_add(tokens.expires_in.saturating_mul(1000)),
+        account_id,
     }
+}
+
+fn extract_codex_account_id(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    claims["chatgpt_account_id"]
+        .as_str()
+        .or_else(|| claims["https://api.openai.com/auth"]["chatgpt_account_id"].as_str())
+        .or_else(|| claims["organizations"][0]["id"].as_str())
+        .map(str::to_owned)
 }
 
 // ─── Editor host state ───────────────────────────────────────────────────────
@@ -204,6 +375,14 @@ pub struct EditorHost {
     play_version: u64,
     /// Cached copilot plan awaiting user approval.
     last_copilot_plan: Option<AgentPlan>,
+    /// Copilot provider configuration.
+    copilot_settings: engine_editor::CopilotSettings,
+    /// Persisted ChatGPT OAuth credentials for Codex.
+    codex_oauth: Option<CodexOAuthCredential>,
+    /// Active device authorization request.
+    pending_codex_oauth: Option<PendingCodexOAuth>,
+    /// Active copilot conversation history for multi-turn dialogue.
+    copilot_conversation: Vec<engine_ai::ChatMessage>,
 }
 
 impl EditorHost {
@@ -211,6 +390,19 @@ impl EditorHost {
         let durable_state = store.load().unwrap_or_default();
         let hub = HubState::from_durable_state(durable_state.clone());
         let locale = hub.preferences().locale;
+
+        // Load copilot settings from durable state, then overlay credentials
+        let mut copilot_settings = durable_state.preferences.copilot.clone();
+        let mut credentials = CredentialsFile::default();
+        if let Some(credentials_path) = store.path().parent().map(|p| p.join("credentials.toml")) {
+            if let Ok(cred_text) = std::fs::read_to_string(&credentials_path) {
+                if let Ok(creds) = toml::from_str::<CredentialsFile>(&cred_text) {
+                    credentials = creds;
+                }
+            }
+        }
+        copilot_settings.api_key = credentials.copilot_api_key.clone();
+
         let mut host = Self {
             hub,
             shell: EditorShell::with_core_services(EditorPreferences::default()),
@@ -225,6 +417,10 @@ impl EditorHost {
             play_last_frame: None,
             play_version: 1,
             last_copilot_plan: None,
+            copilot_settings,
+            codex_oauth: credentials.codex_oauth,
+            pending_codex_oauth: None,
+            copilot_conversation: Vec::new(),
         };
 
         host.reopen_last_project_if_needed();
@@ -251,6 +447,11 @@ impl EditorHost {
             "project/list_assets" => self.project_list_assets(params),
             "project/import_file" => self.project_import_file(params),
             "project/create_script" => self.project_create_script(params),
+            "project/rename_asset" => self.project_rename_asset(params),
+            "project/delete_asset" => self.project_delete_asset(params),
+            "project/reimport_asset" => self.project_reimport_asset(params),
+            "project/read_file" => self.project_read_file(params),
+            "project/write_file" => self.project_write_file(params),
 
             // ── Console ──
             "console/get_entries" => self.console_get_entries(params),
@@ -268,6 +469,17 @@ impl EditorHost {
             // ── Copilot ──
             "copilot/plan" => self.copilot_plan(params),
             "copilot/apply" => self.copilot_apply(params),
+            "copilot/allow_command" => self.copilot_allow_command(params),
+            "copilot/clear_conversation" => self.copilot_clear_conversation(params),
+            "copilot/get_conversation_length" => self.copilot_get_conversation_length(params),
+            "app/get_copilot_settings" => self.get_copilot_settings(params),
+            "app/update_copilot_settings" => self.update_copilot_settings(params),
+            "app/detect_models" => self.detect_models(params),
+            "app/get_model_registry" => self.get_model_registry(params),
+            "app/codex_oauth_status" => self.codex_oauth_status(params),
+            "app/codex_oauth_start" => self.codex_oauth_start(params),
+            "app/codex_oauth_poll" => self.codex_oauth_poll(params),
+            "app/codex_oauth_logout" => self.codex_oauth_logout(params),
 
             // ── Shell ──
             "shell/get_state" => self.shell_get_state(params),
@@ -287,7 +499,11 @@ impl EditorHost {
             "shell/delete_object" => self.shell_delete_object(params),
             "shell/rename_object" => self.shell_rename_object(params),
             "shell/duplicate_object" => self.shell_duplicate_object(params),
+            "shell/reparent_object" => self.shell_reparent_object(params),
             "shell/close_project" => self.shell_close_project(params),
+
+            // ── Scene Guides ──
+            "scene/get_guides" => self.scene_get_guides(params),
 
             _ => Err(EngineError::config(format!("unknown method: {method}"))),
         }
@@ -703,6 +919,252 @@ fn on_update(entity, dt) {
         }))
     }
 
+    fn project_rename_asset(&mut self, params: &Value) -> EngineResult<Value> {
+        let old_path_str = params
+            .get("old_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'old_path'"))?;
+        let new_name = params
+            .get("new_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'new_name'"))?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        validate_file_name(new_name)?;
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let old_path = resolve_existing_relative_path(&asset_root, old_path_str)?;
+        let parent = old_path
+            .parent()
+            .ok_or_else(|| EngineError::config("cannot rename root directory"))?;
+        let ext = old_path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let new_path = parent.join(format!("{}{}", new_name, ext));
+        let canonical_asset_root =
+            asset_root
+                .canonicalize()
+                .map_err(|source| EngineError::Filesystem {
+                    path: asset_root.clone(),
+                    source,
+                })?;
+        if !new_path.starts_with(&canonical_asset_root) {
+            return Err(EngineError::config("path is outside the project"));
+        }
+
+        std::fs::rename(&old_path, &new_path).map_err(|source| EngineError::Filesystem {
+            path: old_path.clone(),
+            source,
+        })?;
+
+        // Also rename the .meta file if it exists
+        let old_meta = asset_meta_path_for_source(&old_path);
+        if old_meta.exists() {
+            let new_meta = asset_meta_path_for_source(&new_path);
+            std::fs::rename(&old_meta, &new_meta).ok();
+        }
+
+        // Rescan to update the database
+        project.rescan_assets()?;
+
+        self.console.push(engine_editor::ConsoleEntry {
+            timestamp: timestamp_now(),
+            level: engine_editor::ConsoleLevel::Info,
+            source: engine_editor::ConsoleSource {
+                subsystem: "editor".into(),
+                file: Some(new_path.clone()),
+                line: None,
+            },
+            message: format!("Renamed asset: {} → {}", old_path_str, new_path.display()),
+        });
+
+        Ok(serde_json::json!({ "new_path": new_path.to_string_lossy() }))
+    }
+
+    fn project_delete_asset(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let path = resolve_existing_relative_path(&asset_root, path_str)?;
+
+        // Delete the file
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|source| EngineError::Filesystem {
+                path: path.clone(),
+                source,
+            })?;
+        } else {
+            std::fs::remove_file(&path).map_err(|source| EngineError::Filesystem {
+                path: path.clone(),
+                source,
+            })?;
+            // Also delete the .meta file
+            let meta_path = asset_meta_path_for_source(&path);
+            if meta_path.exists() {
+                std::fs::remove_file(&meta_path).ok();
+            }
+        }
+
+        // Rescan to update the database
+        project.rescan_assets()?;
+
+        self.console.push(engine_editor::ConsoleEntry {
+            timestamp: timestamp_now(),
+            level: engine_editor::ConsoleLevel::Info,
+            source: engine_editor::ConsoleSource {
+                subsystem: "editor".into(),
+                file: None,
+                line: None,
+            },
+            message: format!("Deleted asset: {path_str}"),
+        });
+
+        Ok(serde_json::json!({ "deleted": true }))
+    }
+
+    fn project_reimport_asset(&mut self, params: &Value) -> EngineResult<Value> {
+        let reimport_all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        if reimport_all {
+            let Some(project) = self.shell.project_mut() else {
+                return Err(EngineError::config("no project open"));
+            };
+
+            let asset_root = project.root.join(&project.manifest.asset_root);
+            let mut stack = vec![asset_root.clone()];
+            while let Some(path) = stack.pop() {
+                let entries = match std::fs::read_dir(&path) {
+                    Ok(entries) => entries,
+                    Err(source) => {
+                        return Err(EngineError::Filesystem { path, source });
+                    }
+                };
+                for entry in entries {
+                    let entry = entry.map_err(|source| EngineError::Filesystem {
+                        path: asset_root.clone(),
+                        source,
+                    })?;
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        stack.push(entry_path);
+                    } else if entry_path.extension().is_some_and(|ext| ext == "meta") {
+                        std::fs::remove_file(&entry_path).ok();
+                    }
+                }
+            }
+
+            project.rescan_assets()?;
+            self.console.push(engine_editor::ConsoleEntry {
+                timestamp: timestamp_now(),
+                level: engine_editor::ConsoleLevel::Info,
+                source: engine_editor::ConsoleSource {
+                    subsystem: "editor".into(),
+                    file: None,
+                    line: None,
+                },
+                message: "Reimported all assets".into(),
+            });
+
+            return Ok(serde_json::json!({ "reimported": true }));
+        }
+
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        // Delete existing meta file to force reimport
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let path = resolve_existing_relative_path(&asset_root, path_str)?;
+        let meta_path = asset_meta_path_for_source(&path);
+        if meta_path.exists() {
+            std::fs::remove_file(&meta_path).ok();
+        }
+
+        project.rescan_assets()?;
+
+        self.console.push(engine_editor::ConsoleEntry {
+            timestamp: timestamp_now(),
+            level: engine_editor::ConsoleLevel::Info,
+            source: engine_editor::ConsoleSource {
+                subsystem: "editor".into(),
+                file: None,
+                line: None,
+            },
+            message: format!("Reimported asset: {path_str}"),
+        });
+
+        Ok(serde_json::json!({ "reimported": true }))
+    }
+
+    fn project_read_file(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let full_path = resolve_existing_relative_path(&asset_root, path_str)?;
+
+        let content =
+            std::fs::read_to_string(&full_path).map_err(|source| EngineError::Filesystem {
+                path: full_path.clone(),
+                source,
+            })?;
+
+        Ok(serde_json::json!({ "content": content }))
+    }
+
+    fn project_write_file(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+        let content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'content'"))?;
+
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let full_path = resolve_writable_relative_path(&asset_root, path_str)?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        std::fs::write(&full_path, content).map_err(|source| EngineError::Filesystem {
+            path: full_path.clone(),
+            source,
+        })?;
+
+        Ok(serde_json::json!({ "saved": true }))
+    }
+
     // ── Console handlers ──
 
     fn console_get_entries(&mut self, _params: &Value) -> EngineResult<Value> {
@@ -782,7 +1244,8 @@ fn on_update(entity, dt) {
     /// If `last_version` param matches the current `scene_version`, skips rendering
     /// and returns `(0, 0, empty_vec)` as a no-change signal.
     fn render_viewport(&mut self, params: &Value) -> EngineResult<(u32, u32, Vec<u8>)> {
-        use engine_core::math::Vec3;
+        use engine_core::math::{Transform, Vec3};
+        use engine_render::{RenderCamera, RenderProjection};
         use runtime_min::extract_render_world;
 
         let play_mode = params
@@ -822,8 +1285,11 @@ fn on_update(entity, dt) {
             extract_render_world(&project.scene)
         };
 
-        // Set up editor camera if we have one
-        if let Some(ref mut camera) = world.camera {
+        // Scene View always uses an editor-controlled camera. Game View keeps
+        // the camera extracted from the scene, including Camera2D.
+        // If entity_id is provided, render from that entity's camera perspective.
+        let entity_id_str = params.get("entity_id").and_then(|v| v.as_str());
+        if !play_mode {
             let camera_yaw = params.get("yaw").and_then(|v| v.as_f64()).unwrap_or(-0.5) as f32;
             let camera_pitch = params.get("pitch").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
             let camera_dist = params
@@ -842,12 +1308,109 @@ fn on_update(entity, dt) {
                 .get("target_z")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0) as f32;
+            let target = Vec3::new(target_x, target_y, target_z);
+            let view_mode = params
+                .get("view_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("3d");
 
-            let eye_x = target_x + camera_dist * camera_pitch.cos() * camera_yaw.sin();
-            let eye_y = target_y + camera_dist * camera_pitch.sin();
-            let eye_z = target_z + camera_dist * camera_pitch.cos() * camera_yaw.cos();
+            // If entity_id is provided, try to use that entity's camera component
+            let use_entity_camera = if let Some(id_str) = entity_id_str {
+                if let Some(project) = self.shell.project() {
+                    let entity_id = engine_core::EntityId::from_u128(
+                        u128::from_str_radix(id_str, 16).unwrap_or(0),
+                    );
+                    if let Some(entity) = project.scene.find_by_id(entity_id) {
+                        if let Some(obj) = project.scene.object(entity) {
+                            let has_camera = obj
+                                .components
+                                .iter()
+                                .any(|c| matches!(c, engine_ecs::ComponentData::Camera(_)));
+                            if has_camera {
+                                let transform =
+                                    project.scene.transforms().world(entity).unwrap_or_default();
+                                let cam_comp = obj.components.iter().find_map(|c| {
+                                    if let engine_ecs::ComponentData::Camera(cam) = c {
+                                        Some(cam)
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(cam) = cam_comp {
+                                    let object = world
+                                        .camera
+                                        .as_ref()
+                                        .map(|camera| camera.object)
+                                        .unwrap_or_else(|| engine_core::EntityId::from_u128(0));
+                                    world.camera = Some(RenderCamera {
+                                        object,
+                                        transform: Transform {
+                                            translation: transform.translation,
+                                            rotation: transform.rotation,
+                                            ..Transform::IDENTITY
+                                        },
+                                        projection: RenderProjection::Perspective,
+                                        vertical_fov_degrees: cam.vertical_fov_degrees,
+                                        near: cam.near,
+                                        far: cam.far,
+                                        look_at_target: None,
+                                    });
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
-            camera.transform.translation = Vec3::new(eye_x, eye_y, eye_z);
+            if !use_entity_camera {
+                let object = world
+                    .camera
+                    .as_ref()
+                    .map(|camera| camera.object)
+                    .unwrap_or_else(|| engine_core::EntityId::from_u128(0));
+                let (translation, projection) = if view_mode == "2d" {
+                    (
+                        Vec3::new(target_x, target_y, target_z + camera_dist),
+                        RenderProjection::Orthographic {
+                            vertical_size: camera_dist * 2.0,
+                        },
+                    )
+                } else {
+                    (
+                        Vec3::new(
+                            target_x + camera_dist * camera_pitch.cos() * camera_yaw.sin(),
+                            target_y + camera_dist * camera_pitch.sin(),
+                            target_z + camera_dist * camera_pitch.cos() * camera_yaw.cos(),
+                        ),
+                        RenderProjection::Perspective,
+                    )
+                };
+                world.camera = Some(RenderCamera {
+                    object,
+                    transform: Transform {
+                        translation,
+                        ..Transform::IDENTITY
+                    },
+                    projection,
+                    vertical_fov_degrees: 60.0,
+                    near: 0.01,
+                    far: 1000.0,
+                    look_at_target: Some(target),
+                });
+            }
         }
 
         // Lazily create the wgpu render device (with proper error handling)
@@ -968,43 +1531,526 @@ fn on_update(entity, dt) {
         engine_ecs::Scene::from_json(&scene_json)
     }
 
+    fn get_copilot_settings(&self, _params: &Value) -> EngineResult<Value> {
+        let mut value = serde_json::to_value(&self.copilot_settings).unwrap_or_default();
+        value["has_api_key"] = serde_json::json!(self.copilot_settings.api_key.is_some());
+        Ok(value)
+    }
+
+    fn update_copilot_settings(&mut self, params: &Value) -> EngineResult<Value> {
+        let mut settings: engine_editor::CopilotSettings =
+            serde_json::from_value(params.clone())
+                .map_err(|e| EngineError::config(format!("invalid copilot settings: {e}")))?;
+
+        // Preserve existing API key when not explicitly provided in the request
+        if !params
+            .as_object()
+            .map_or(false, |m| m.contains_key("api_key"))
+        {
+            settings.api_key = self.copilot_settings.api_key.clone();
+        }
+        if !params
+            .as_object()
+            .map_or(false, |m| m.contains_key("allowed_commands"))
+        {
+            settings.allowed_commands = self.copilot_settings.allowed_commands.clone();
+        }
+
+        // Persist non-secret settings into durable state
+        let mut settings_for_state = settings.clone();
+        settings_for_state.api_key = None; // Never store key in main state file
+        self.durable_state.preferences.copilot = settings_for_state;
+        self.sync_durable_state();
+
+        self.copilot_settings = settings;
+        self.persist_credentials()?;
+        Ok(Value::Null)
+    }
+
+    fn copilot_allow_command(&mut self, params: &Value) -> EngineResult<Value> {
+        let command = params
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .ok_or_else(|| EngineError::config("missing 'command'"))?;
+
+        if !self
+            .copilot_settings
+            .allowed_commands
+            .iter()
+            .any(|allowed| allowed == command)
+        {
+            self.copilot_settings
+                .allowed_commands
+                .push(command.to_owned());
+            self.copilot_settings.allowed_commands.sort();
+            self.copilot_settings.allowed_commands.dedup();
+
+            let mut settings_for_state = self.copilot_settings.clone();
+            settings_for_state.api_key = None;
+            self.durable_state.preferences.copilot = settings_for_state;
+            self.sync_durable_state();
+        }
+
+        Ok(serde_json::json!({ "allowed": true, "command": command }))
+    }
+
+    fn persist_credentials(&self) -> EngineResult<()> {
+        let Some(path) = self
+            .store
+            .path()
+            .parent()
+            .map(|parent| parent.join("credentials.toml"))
+        else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let text = toml::to_string_pretty(&CredentialsFile {
+            copilot_api_key: self.copilot_settings.api_key.clone(),
+            codex_oauth: self.codex_oauth.clone(),
+        })
+        .map_err(|error| EngineError::other(format!("failed to encode credentials: {error}")))?;
+        std::fs::write(&path, text).map_err(|source| EngineError::Filesystem {
+            path: path.clone(),
+            source,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |source| EngineError::Filesystem {
+                    path: path.clone(),
+                    source,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn codex_oauth_status(&self, _params: &Value) -> EngineResult<Value> {
+        Ok(serde_json::json!({
+            "connected": self.codex_oauth.is_some(),
+            "account_id": self.codex_oauth.as_ref().and_then(|auth| auth.account_id.as_deref()),
+        }))
+    }
+
+    fn codex_oauth_start(&mut self, _params: &Value) -> EngineResult<Value> {
+        let mut response = ureq::post(format!(
+            "{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode"
+        ))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", concat!("aster/", env!("CARGO_PKG_VERSION")))
+        .send_json(serde_json::json!({ "client_id": CODEX_OAUTH_CLIENT_ID }))
+        .map_err(|error| {
+            EngineError::other(format!("failed to start Codex authorization: {error}"))
+        })?;
+        let json: Value = response.body_mut().read_json().map_err(|error| {
+            EngineError::other(format!("invalid Codex authorization response: {error}"))
+        })?;
+        let pending = PendingCodexOAuth {
+            device_auth_id: json["device_auth_id"]
+                .as_str()
+                .ok_or_else(|| EngineError::other("Codex authorization omitted device_auth_id"))?
+                .to_owned(),
+            user_code: json["user_code"]
+                .as_str()
+                .ok_or_else(|| EngineError::other("Codex authorization omitted user_code"))?
+                .to_owned(),
+            interval_seconds: json["interval"]
+                .as_str()
+                .and_then(|value| value.parse().ok())
+                .or_else(|| json["interval"].as_u64())
+                .unwrap_or(5)
+                .max(1),
+        };
+        let result = serde_json::json!({
+            "url": format!("{CODEX_OAUTH_ISSUER}/codex/device"),
+            "user_code": pending.user_code,
+            "interval_seconds": pending.interval_seconds,
+        });
+        self.pending_codex_oauth = Some(pending);
+        Ok(result)
+    }
+
+    fn codex_oauth_poll(&mut self, _params: &Value) -> EngineResult<Value> {
+        let pending = self
+            .pending_codex_oauth
+            .as_ref()
+            .ok_or_else(|| EngineError::config("no Codex authorization is currently pending"))?;
+        let response = ureq::post(format!(
+            "{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token"
+        ))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", concat!("aster/", env!("CARGO_PKG_VERSION")))
+        .send_json(serde_json::json!({
+            "device_auth_id": pending.device_auth_id,
+            "user_code": pending.user_code,
+        }));
+
+        let mut response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::StatusCode(403 | 404)) => {
+                return Ok(serde_json::json!({ "status": "pending" }));
+            }
+            Err(error) => {
+                return Err(EngineError::other(format!(
+                    "Codex authorization polling failed: {error}"
+                )));
+            }
+        };
+        let authorization: Value = response.body_mut().read_json().map_err(|error| {
+            EngineError::other(format!("invalid Codex authorization result: {error}"))
+        })?;
+        let authorization_code = authorization["authorization_code"]
+            .as_str()
+            .ok_or_else(|| EngineError::other("Codex authorization omitted authorization_code"))?;
+        let code_verifier = authorization["code_verifier"]
+            .as_str()
+            .ok_or_else(|| EngineError::other("Codex authorization omitted code_verifier"))?;
+
+        let tokens = exchange_codex_token(&[
+            ("grant_type", "authorization_code"),
+            ("code", authorization_code),
+            (
+                "redirect_uri",
+                "https://auth.openai.com/deviceauth/callback",
+            ),
+            ("client_id", CODEX_OAUTH_CLIENT_ID),
+            ("code_verifier", code_verifier),
+        ])?;
+        self.codex_oauth = Some(codex_credential_from_tokens(tokens));
+        self.pending_codex_oauth = None;
+        self.persist_credentials()?;
+        Ok(serde_json::json!({ "status": "connected" }))
+    }
+
+    fn codex_oauth_logout(&mut self, _params: &Value) -> EngineResult<Value> {
+        self.codex_oauth = None;
+        self.pending_codex_oauth = None;
+        self.persist_credentials()?;
+        Ok(serde_json::json!({ "connected": false }))
+    }
+
+    fn ensure_codex_oauth(&mut self) -> EngineResult<engine_ai::providers::CodexOAuthCredentials> {
+        let needs_refresh = self
+            .codex_oauth
+            .as_ref()
+            .map(|auth| auth.expires_at_ms <= unix_time_ms().saturating_add(60_000))
+            .unwrap_or(false);
+        if needs_refresh {
+            let refresh_token = self
+                .codex_oauth
+                .as_ref()
+                .map(|auth| auth.refresh_token.clone())
+                .unwrap_or_default();
+            let tokens = exchange_codex_token(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", &refresh_token),
+                ("client_id", CODEX_OAUTH_CLIENT_ID),
+            ])?;
+            self.codex_oauth = Some(codex_credential_from_tokens(tokens));
+            self.persist_credentials()?;
+        }
+        let auth = self.codex_oauth.as_ref().ok_or_else(|| {
+            EngineError::config("Codex OAuth is not connected. Sign in with ChatGPT first.")
+        })?;
+        Ok(engine_ai::providers::CodexOAuthCredentials {
+            access_token: auth.access_token.clone(),
+            account_id: auth.account_id.clone(),
+        })
+    }
+
+    fn detect_models(&self, params: &Value) -> EngineResult<Value> {
+        let provider_str = params
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'provider'"))?;
+        let provider_kind = match provider_str {
+            "anthropic" => engine_ai::registry::ProviderKind::Anthropic,
+            "openai" | "open_a_i" => engine_ai::registry::ProviderKind::OpenAI,
+            "codex_oauth" => engine_ai::registry::ProviderKind::CodexOAuth,
+            "gemini" => engine_ai::registry::ProviderKind::Gemini,
+            "ollama" => engine_ai::registry::ProviderKind::Ollama,
+            "custom" => engine_ai::registry::ProviderKind::Custom,
+            "mimo" => engine_ai::registry::ProviderKind::Mimo,
+            "deepseek" => engine_ai::registry::ProviderKind::DeepSeek,
+            "glm" => engine_ai::registry::ProviderKind::Glm,
+            other => {
+                return Err(EngineError::config(format!(
+                    "unknown provider for detection: {other}"
+                )));
+            }
+        };
+
+        let config = model_detection_config(params, &self.copilot_settings);
+
+        let models = engine_ai::registry::detect_available_models(&provider_kind, &config)?;
+        Ok(serde_json::to_value(&models).unwrap_or_default())
+    }
+
+    fn get_model_registry(&self, params: &Value) -> EngineResult<Value> {
+        let registry = engine_ai::registry::ModelRegistry::new();
+
+        let result = if let Some(provider_str) = params.get("provider").and_then(|v| v.as_str()) {
+            let provider_kind = match provider_str {
+                "anthropic" => engine_ai::registry::ProviderKind::Anthropic,
+                "openai" | "open_a_i" => engine_ai::registry::ProviderKind::OpenAI,
+                "codex_oauth" => engine_ai::registry::ProviderKind::CodexOAuth,
+                "gemini" => engine_ai::registry::ProviderKind::Gemini,
+                "ollama" => engine_ai::registry::ProviderKind::Ollama,
+                "custom" => engine_ai::registry::ProviderKind::Custom,
+                "mimo" => engine_ai::registry::ProviderKind::Mimo,
+                "deepseek" => engine_ai::registry::ProviderKind::DeepSeek,
+                "glm" => engine_ai::registry::ProviderKind::Glm,
+                _ => {
+                    return Ok(serde_json::json!({ "models": [] }));
+                }
+            };
+            let models: Vec<_> = registry.builtin_for(&provider_kind).into_iter().collect();
+            serde_json::json!({ "models": models })
+        } else {
+            // Return all providers and their builtin models
+            let all: Vec<_> = engine_ai::registry::ProviderKind::builtin_providers()
+                .iter()
+                .map(|p| {
+                    let models: Vec<_> = registry.builtin_for(p).into_iter().collect();
+                    serde_json::json!({
+                        "provider": p,
+                        "display_name": p.display_name(),
+                        "requires_api_key": p.requires_api_key(),
+                        "requires_endpoint": p.requires_endpoint(),
+                        "default_endpoint": p.default_endpoint(),
+                        "models": models,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "providers": all })
+        };
+
+        Ok(result)
+    }
+
     fn copilot_plan(&mut self, params: &Value) -> EngineResult<Value> {
+        self.copilot_plan_streaming(params, &mut |_| {})
+    }
+
+    fn copilot_plan_streaming(
+        &mut self,
+        params: &Value,
+        on_delta: &mut dyn FnMut(engine_ai::AiStreamDelta),
+    ) -> EngineResult<Value> {
+        let prepared = self.prepare_copilot_request(params)?;
+        let model = engine_ai::providers::create_provider(
+            &prepared.provider,
+            &prepared.model,
+            prepared.api_key.as_deref(),
+            prepared.endpoint.as_deref(),
+            prepared.max_tokens,
+            prepared.codex_oauth,
+            prepared.mimo_config.as_ref(),
+            prepared.glm_config.as_ref(),
+        )?;
+        let response = model.chat_stream(prepared.request, on_delta)?;
+        self.finish_copilot_response(&prepared.enriched_prompt, &response.content)
+    }
+
+    fn prepare_copilot_request(&mut self, params: &Value) -> EngineResult<PreparedCopilotRequest> {
         let prompt = params
             .get("prompt")
             .and_then(|v| v.as_str())
             .ok_or_else(|| EngineError::config("missing 'prompt'"))?;
 
+        // Update copilot settings if provided in the request
+        if let Some(settings) = params.get("settings") {
+            if let Ok(parsed) =
+                serde_json::from_value::<engine_editor::CopilotSettings>(settings.clone())
+            {
+                self.copilot_settings = parsed;
+            }
+        }
+
+        // Parse thinking_effort from request
+        let thinking_effort = params.get("thinking_effort").and_then(|v| {
+            let s = v.as_str()?;
+            match s {
+                "off" => Some(engine_ai::ThinkingEffort::Off),
+                "low" => Some(engine_ai::ThinkingEffort::Low),
+                "medium" => Some(engine_ai::ThinkingEffort::Medium),
+                "high" => Some(engine_ai::ThinkingEffort::High),
+                _ => None,
+            }
+        });
+
+        // Build enriched prompt with selected entity context
+        let enriched_prompt = if let Some(entity) = params.get("selected_entity") {
+            format!(
+                "{}\n\n[Selected Entity Context]\n{}",
+                prompt,
+                serde_json::to_string_pretty(entity).unwrap_or_default()
+            )
+        } else {
+            prompt.to_string()
+        };
+
         let scene = self.scene_clone_for_agent()?;
         let ctx = self.build_agent_context(scene)?;
 
-        let mut session = AgentSession::new(ctx)?;
-        let model = StubAiModel;
-        let policy = PermissionPolicy::transactional_write();
+        let session = AgentSession::new(ctx)?;
 
-        match session.plan(&model, prompt, policy) {
-            Ok(plan) => {
+        // Create the AI model from settings, falling back to a helpful error message
+        let provider_str = match self.copilot_settings.provider {
+            engine_editor::CopilotProvider::Anthropic => "anthropic",
+            engine_editor::CopilotProvider::Ollama => "ollama",
+            engine_editor::CopilotProvider::OpenAI => "openai",
+            engine_editor::CopilotProvider::CodexOAuth => "codex_oauth",
+            engine_editor::CopilotProvider::Gemini => "gemini",
+            engine_editor::CopilotProvider::Custom => "custom",
+            engine_editor::CopilotProvider::Mimo => "mimo",
+            engine_editor::CopilotProvider::DeepSeek => "deepseek",
+            engine_editor::CopilotProvider::Glm => "glm",
+            engine_editor::CopilotProvider::Stub => {
+                return Err(EngineError::config(
+                    "Copilot is in stub mode. Go to Settings → Copilot to configure a real provider.",
+                ));
+            }
+        };
+
+        let codex_oauth = if provider_str == "codex_oauth" {
+            Some(self.ensure_codex_oauth()?)
+        } else {
+            None
+        };
+        Ok(PreparedCopilotRequest {
+            request: session.prepare_request(
+                &enriched_prompt,
+                &self.copilot_conversation,
+                thinking_effort,
+            ),
+            enriched_prompt,
+            provider: provider_str.to_owned(),
+            model: self.copilot_settings.model.clone(),
+            api_key: self.copilot_settings.api_key.clone(),
+            endpoint: self.copilot_settings.api_endpoint.clone(),
+            max_tokens: self.copilot_settings.max_tokens,
+            codex_oauth,
+            mimo_config: if provider_str == "mimo" {
+                Some(self.copilot_settings.mimo_config.clone())
+            } else {
+                None
+            },
+            glm_config: if provider_str == "glm" {
+                Some(self.copilot_settings.glm_config.clone())
+            } else {
+                None
+            },
+        })
+    }
+
+    fn finish_copilot_response(
+        &mut self,
+        enriched_prompt: &str,
+        response: &str,
+    ) -> EngineResult<Value> {
+        let scene = self.scene_clone_for_agent()?;
+        let ctx = self.build_agent_context(scene)?;
+        let mut session = AgentSession::new(ctx)?;
+        match session.plan_from_response(response, PermissionPolicy::transactional_write()) {
+            Ok(mut plan) => {
+                let assistant_message = plan
+                    .operations
+                    .iter()
+                    .find_map(|planned| match &planned.operation {
+                        engine_ai::AgentOperation::Complete { summary } => summary.clone(),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                plan.operations.retain(|planned| {
+                    !matches!(
+                        &planned.operation,
+                        engine_ai::AgentOperation::Complete { .. }
+                    )
+                });
+                plan.read_only = plan.operations.iter().all(|op| !op.requires_write);
+                plan.requires_write = plan.operations.iter().any(|op| op.requires_write);
+
                 let operations: Vec<serde_json::Value> = plan
                     .operations
                     .iter()
                     .enumerate()
                     .map(|(i, op)| {
+                        let command = match &op.operation {
+                            engine_ai::AgentOperation::ExecuteCommand { command, .. } => {
+                                Some(command.as_str())
+                            }
+                            _ => None,
+                        };
+                        let permission_kind = if command.is_some() {
+                            "command"
+                        } else if op.requires_write {
+                            "write"
+                        } else {
+                            "read"
+                        };
+                        let permanently_allowed = command.is_some_and(|command| {
+                            self.copilot_settings
+                                .allowed_commands
+                                .iter()
+                                .any(|allowed| allowed == command)
+                        });
                         serde_json::json!({
                             "index": i,
                             "preview": op.preview,
                             "requires_write": op.requires_write,
+                            "permission_kind": permission_kind,
+                            "command": command,
+                            "permanently_allowed": permanently_allowed,
                         })
                     })
                     .collect();
 
+                // Record user message in conversation history
+                self.copilot_conversation
+                    .push(engine_ai::ChatMessage::user(enriched_prompt));
+
+                let history_message = if assistant_message.is_empty() {
+                    let plan_summary: Vec<String> = plan
+                        .operations
+                        .iter()
+                        .map(|op| op.preview.clone())
+                        .collect();
+                    format!(
+                        "Proposed {} operation(s):\n{}",
+                        plan.operations.len(),
+                        plan_summary.join("\n")
+                    )
+                } else {
+                    assistant_message.clone()
+                };
+                self.copilot_conversation
+                    .push(engine_ai::ChatMessage::assistant(history_message));
+
                 self.last_copilot_plan = Some(plan);
 
                 Ok(serde_json::json!({
+                    "message": assistant_message,
                     "operations": operations,
                     "read_only": operations.iter().all(|o| !o["requires_write"].as_bool().unwrap_or(true)),
                     "requires_write": operations.iter().any(|o| o["requires_write"].as_bool().unwrap_or(false)),
                 }))
             }
             Err(e) => {
+                // Still record the user message even on failure, so the model
+                // has context if the user retries.
+                self.copilot_conversation
+                    .push(engine_ai::ChatMessage::user(enriched_prompt));
+                self.copilot_conversation
+                    .push(engine_ai::ChatMessage::assistant(format!("Error: {}", e)));
                 self.last_copilot_plan = None;
                 Err(e)
             }
@@ -1035,6 +2081,7 @@ fn on_update(entity, dt) {
             .filter(|(i, _)| approved_indices.contains(i))
             .map(|(_, op)| op)
             .collect();
+        let applied_read_only = filtered_ops.iter().all(|op| !op.requires_write);
 
         if filtered_ops.is_empty() {
             return Ok(serde_json::json!({
@@ -1072,6 +2119,29 @@ fn on_update(entity, dt) {
 
         self.bump_scene_version();
 
+        // Record execution results in conversation history so the model has
+        // context about what happened when the user follows up.
+        let console_results: Vec<String> = session
+            .console
+            .entries()
+            .iter()
+            .filter(|entry| entry.source.subsystem == "ai-agent")
+            .map(|entry| entry.message.clone())
+            .collect();
+        let trace_statuses: Vec<String> = outcome
+            .trace_entries
+            .iter()
+            .map(|t| format!("{}: {}", t.tool, t.result))
+            .collect();
+        let execution_summary = copilot_execution_summary(
+            outcome.operations_performed,
+            outcome.summary.as_deref(),
+            &trace_statuses,
+            &console_results,
+        );
+        self.copilot_conversation
+            .push(engine_ai::ChatMessage::assistant(execution_summary));
+
         let trace_entries: Vec<serde_json::Value> = outcome
             .trace_entries
             .iter()
@@ -1102,7 +2172,20 @@ fn on_update(entity, dt) {
             "summary": outcome.summary,
             "trace_entries": trace_entries,
             "console_entries": console_entries,
+            "needs_continuation": should_continue_copilot(applied_read_only, outcome.completed),
         }))
+    }
+
+    fn copilot_clear_conversation(&mut self, _params: &Value) -> EngineResult<Value> {
+        self.copilot_conversation.clear();
+        self.last_copilot_plan = None;
+        Ok(Value::Null)
+    }
+
+    fn copilot_get_conversation_length(&self, _params: &Value) -> EngineResult<Value> {
+        // Return the number of turns (pairs) in the conversation
+        let turns = self.copilot_conversation.len() / 2;
+        Ok(serde_json::json!({ "turns": turns, "messages": self.copilot_conversation.len() }))
     }
 
     fn shell_get_state(&mut self, _params: &Value) -> EngineResult<Value> {
@@ -1305,6 +2388,55 @@ fn on_update(entity, dt) {
         Ok(serde_json::json!({}))
     }
 
+    // ── Scene Guides ──
+
+    fn scene_get_guides(&mut self, _params: &Value) -> EngineResult<Value> {
+        let Some(project) = self.shell.project() else {
+            return Ok(serde_json::json!({ "guides": [] }));
+        };
+
+        let mut guides: Vec<Value> = Vec::new();
+
+        for (entity, obj) in project.scene.objects() {
+            let transform = project.scene.transforms().world(entity).unwrap_or_default();
+
+            for comp in &obj.components {
+                match comp {
+                    engine_ecs::ComponentData::Camera(cam) => {
+                        guides.push(serde_json::json!({
+                            "id": format!("{:032x}", obj.id.as_u128()),
+                            "position": [
+                                transform.translation.x,
+                                transform.translation.y,
+                                transform.translation.z,
+                            ],
+                            "rotation": [0.0_f32, 0.0, 0.0],
+                            "componentType": "Camera",
+                            "fov": cam.vertical_fov_degrees,
+                        }));
+                    }
+                    engine_ecs::ComponentData::Light(light) => {
+                        guides.push(serde_json::json!({
+                            "id": format!("{:032x}", obj.id.as_u128()),
+                            "position": [
+                                transform.translation.x,
+                                transform.translation.y,
+                                transform.translation.z,
+                            ],
+                            "rotation": [0.0_f32, 0.0, 0.0],
+                            "componentType": "Light",
+                            "lightKind": light.kind.as_str(),
+                            "lightColor": light.color,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(serde_json::json!({ "guides": guides }))
+    }
+
     // ── Scene CRUD ──
 
     fn shell_create_object(&mut self, params: &Value) -> EngineResult<Value> {
@@ -1468,6 +2600,52 @@ fn on_update(entity, dt) {
                 transform.translation.z,
             ],
         }))
+    }
+
+    fn shell_reparent_object(&mut self, params: &Value) -> EngineResult<Value> {
+        let id_str = params
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'id'"))?;
+        let parent_id_str = params.get("parent_id").and_then(|v| v.as_str());
+
+        let entity_id = engine_core::EntityId::from_u128(
+            u128::from_str_radix(id_str, 16)
+                .map_err(|_| EngineError::config("invalid entity id"))?,
+        );
+
+        let before = self.scene_snapshot()?;
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+        let entity = project
+            .scene
+            .find_by_id(entity_id)
+            .ok_or_else(|| EngineError::config("entity not found"))?;
+
+        let parent_entity = match parent_id_str {
+            Some(pid) => {
+                let parent_eid = engine_core::EntityId::from_u128(
+                    u128::from_str_radix(pid, 16)
+                        .map_err(|_| EngineError::config("invalid parent id"))?,
+                );
+                Some(
+                    project
+                        .scene
+                        .find_by_id(parent_eid)
+                        .ok_or_else(|| EngineError::config("parent entity not found"))?,
+                )
+            }
+            None => None,
+        };
+
+        project.scene.set_parent(entity, parent_entity)?;
+        project.scene_dirty = true;
+        let after = self.scene_snapshot()?;
+        self.shell
+            .push_undo(UndoCommand::new("Reparent Object", id_str, before, after));
+        self.bump_scene_version();
+        Ok(serde_json::json!({ "reparented": true }))
     }
 
     fn shell_update_transform(&mut self, params: &Value) -> EngineResult<Value> {
@@ -1739,7 +2917,11 @@ fn on_update(entity, dt) {
     // ── Helpers ──
 
     fn sync_durable_state(&mut self) {
+        // HubState owns the general editor preferences, while copilot settings are
+        // updated through their own RPC. Preserve them when rebuilding durable state.
+        let copilot_settings = self.durable_state.preferences.copilot.clone();
         self.durable_state = self.hub.durable_state();
+        self.durable_state.preferences.copilot = copilot_settings;
         if let Some(project) = self.shell.project() {
             self.durable_state.last_open_project = Some(project.root.clone());
         }
@@ -1819,19 +3001,76 @@ fn on_update(entity, dt) {
     }
 }
 
+fn model_detection_config(
+    params: &Value,
+    settings: &engine_editor::CopilotSettings,
+) -> engine_ai::registry::ProviderConfig {
+    engine_ai::registry::ProviderConfig {
+        api_key: params
+            .get("api_key")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| settings.api_key.clone()),
+        endpoint: params
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| settings.api_endpoint.clone()),
+    }
+}
+
+fn should_continue_copilot(applied_read_only: bool, completed: bool) -> bool {
+    applied_read_only && !completed
+}
+
+fn copilot_execution_summary(
+    operations_performed: usize,
+    summary: Option<&str>,
+    trace_statuses: &[String],
+    tool_results: &[String],
+) -> String {
+    let mut text = if let Some(summary) = summary {
+        format!("Executed {operations_performed} operation(s). Result: {summary}")
+    } else {
+        format!(
+            "Executed {operations_performed} operation(s).\n{}",
+            trace_statuses.join("\n")
+        )
+    };
+    if !tool_results.is_empty() {
+        text.push_str("\nTool results:\n");
+        text.push_str(&tool_results.join("\n"));
+    }
+    text
+}
+
 // ─── Thread-safe wrapper ─────────────────────────────────────────────────────
 
 /// Thread-safe wrapper for `EditorHost`.
 ///
-/// `EditorHost` contains non-`Send` closures (`CommandHandler`), but they are only
-/// ever accessed while holding the mutex lock, making this safe.
+/// `EditorHost` transitively contains `rhai::Engine` (`!Send`) via
+/// `RuntimeServices`, so it cannot be made `Send`. This wrapper uses
+/// `UnsafeCell` + `Mutex<()>` to provide exclusive access while
+/// recording the creating thread ID at construction.
+///
+/// # Safety
+///
+/// Tauri synchronous `#[tauri::command]` functions always execute on
+/// the main thread, ensuring thread affinity. `with_host()` verifies at
+/// runtime that the caller is the creating thread. An `unsafe impl Send`
+/// + `Sync` is required because `State<'_, T>` needs `T: Send + Sync`,
+/// but access is checked on every invocation.
 pub struct EditorHostState {
     host: UnsafeCell<EditorHost>,
     lock: Mutex<()>,
+    thread_id: ThreadId,
 }
 
-// SAFETY: The Mutex ensures exclusive access; the non-Send closures are only
-// reachable from the thread holding the lock.
+// SAFETY: `with_host()` asserts the calling thread matches `thread_id`
+// at runtime. Mutex provides exclusive access. Tauri sync commands run
+// on the main thread, upholding the thread-affinity invariant.
 unsafe impl Send for EditorHostState {}
 unsafe impl Sync for EditorHostState {}
 
@@ -1840,16 +3079,30 @@ impl EditorHostState {
         Self {
             host: UnsafeCell::new(host),
             lock: Mutex::new(()),
+            thread_id: std::thread::current().id(),
         }
     }
 
     /// Access the inner `EditorHost` under lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from a thread other than the one that created
+    /// this instance (catches cross-thread `!Send` access in debug
+    /// builds — release builds still check).
     pub fn with_host<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut EditorHost) -> R,
     {
+        let current_id = std::thread::current().id();
+        assert_eq!(
+            current_id, self.thread_id,
+            "EditorHostState accessed from thread {:?} but was created on {:?}",
+            current_id, self.thread_id
+        );
         let _guard = self.lock.lock().expect("poisoned lock");
-        // SAFETY: Mutex guarantees exclusive mutable access.
+        // SAFETY: Thread-affinity assertion + mutex guarantee exclusive
+        // mutable access from the correct thread.
         f(unsafe { &mut *self.host.get() })
     }
 }
@@ -1857,8 +3110,105 @@ impl EditorHostState {
 // ─── Tauri commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn rpc(state: State<'_, EditorHostState>, method: String, params: Value) -> Result<Value, String> {
-    state.with_host(|host| host.handle(&method, &params).map_err(|e| e.to_string()))
+fn start_copilot_plan(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+    params: Value,
+) -> Result<(), String> {
+    let prepared = state
+        .with_host(|host| host.prepare_copilot_request(&params))
+        .map_err(|error| error.to_string())?;
+    let completed = requests.completed.clone();
+    std::thread::spawn(move || {
+        let enriched_prompt = prepared.enriched_prompt.clone();
+        let result = engine_ai::providers::create_provider(
+            &prepared.provider,
+            &prepared.model,
+            prepared.api_key.as_deref(),
+            prepared.endpoint.as_deref(),
+            prepared.max_tokens,
+            prepared.codex_oauth,
+            prepared.mimo_config.as_ref(),
+            prepared.glm_config.as_ref(),
+        )
+        .and_then(|model| {
+            model.chat_stream(prepared.request, &mut |delta| {
+                let _ = app.emit(
+                    "copilot-stream",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "kind": delta.kind(),
+                        "delta": delta.text(),
+                    }),
+                );
+            })
+        })
+        .map(|response| response.content)
+        .map_err(|error| error.to_string());
+        completed.lock().expect("poisoned lock").insert(
+            request_id.clone(),
+            CompletedCopilotRequest {
+                enriched_prompt,
+                response: result,
+            },
+        );
+        let _ = app.emit(
+            "copilot-stream-complete",
+            serde_json::json!({ "request_id": request_id }),
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn finish_copilot_plan(
+    state: State<'_, EditorHostState>,
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+) -> Result<Value, String> {
+    let completed = requests
+        .completed
+        .lock()
+        .expect("poisoned lock")
+        .remove(&request_id)
+        .ok_or_else(|| "copilot request has not completed".to_owned())?;
+    let response = completed.response?;
+    state
+        .with_host(|host| host.finish_copilot_response(&completed.enriched_prompt, &response))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rpc(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    state.with_host(|host| {
+        let result = if method == "copilot/plan" {
+            let request_id = params
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            host.copilot_plan_streaming(&params, &mut |delta| {
+                let _ = app.emit(
+                    "copilot-stream",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "kind": delta.kind(),
+                        "delta": delta.text(),
+                    }),
+                );
+            })
+        } else {
+            host.handle(&method, &params)
+        };
+        result.map_err(|error| error.to_string())
+    })
 }
 
 /// Binary viewport readback — returns raw RGBA pixels as ArrayBuffer.
@@ -1876,6 +3226,8 @@ fn viewport_readback_raw(
     target_z: f64,
     last_version: Option<u64>,
     play_mode: bool,
+    view_mode: String,
+    entity_id: Option<String>,
 ) -> Result<Vec<u8>, String> {
     state.with_host(|host| {
         let params = serde_json::json!({
@@ -1889,6 +3241,8 @@ fn viewport_readback_raw(
             "target_z": target_z,
             "last_version": last_version,
             "play_mode": play_mode,
+            "view_mode": view_mode,
+            "entity_id": entity_id,
         });
         host.viewport_readback_raw(&params)
             .map_err(|e| e.to_string())
@@ -1989,53 +3343,47 @@ fn open_game_view(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn is_cancelled_portal_request(error: &ashpd::Error) -> bool {
-    matches!(
-        error,
-        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
-    )
-}
-
-#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn select_project_location() -> Result<Option<String>, String> {
-    use ashpd::desktop::file_chooser::SelectedFiles;
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Select Project Location")
+        .pick_folder()
+        .await;
 
-    let request = match SelectedFiles::open_file()
-        .title("Select Project Location")
-        .accept_label("Open")
-        .modal(true)
-        .multiple(false)
-        .directory(true)
-        .send()
-        .await
-    {
-        Ok(request) => request,
-        Err(error) if is_cancelled_portal_request(&error) => return Ok(None),
-        Err(error) => return Err(format!("failed to start portal file chooser: {error}")),
-    };
-
-    let files = match request.response() {
-        Ok(files) => files,
-        Err(error) if is_cancelled_portal_request(&error) => return Ok(None),
-        Err(error) => return Err(format!("portal file chooser failed: {error}")),
-    };
-
-    let Some(uri) = files.uris().first() else {
-        return Ok(None);
-    };
-    let path = uri
-        .to_file_path()
-        .map_err(|_| format!("portal returned a non-file URI: {uri}"))?;
-
-    Ok(Some(path.to_string_lossy().into_owned()))
+    Ok(folder.map(|f| f.path().to_string_lossy().into_owned()))
 }
 
-#[cfg(not(target_os = "linux"))]
+// ─── Scene file dialogs (cross-platform native dialogs) ─────────────────
+
 #[tauri::command]
-async fn select_project_location() -> Result<Option<String>, String> {
-    Err("XDG Desktop Portal file chooser is only available on Linux".to_owned())
+async fn open_scene_dialog() -> Result<Option<String>, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("Scene JSON", &["json", "scene"])
+        .pick_file()
+        .await;
+
+    Ok(file.map(|f| f.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn save_scene_as_dialog() -> Result<Option<String>, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("Scene JSON", &["json", "scene"])
+        .set_file_name("scene.json")
+        .save_file()
+        .await;
+
+    Ok(file.map(|f| f.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn import_asset_dialog() -> Result<Option<String>, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Import Asset")
+        .pick_file()
+        .await;
+
+    Ok(file.map(|f| f.path().to_string_lossy().into_owned()))
 }
 
 fn apply_desktop_window_adaptations(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -2079,13 +3427,18 @@ pub fn run() {
     };
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .manage(EditorHostState::new(host))
+        .manage(CopilotRequestState::default())
         .invoke_handler(tauri::generate_handler![
             rpc,
+            start_copilot_plan,
+            finish_copilot_plan,
             open_game_view,
             select_project_location,
-            viewport_readback_raw
+            viewport_readback_raw,
+            open_scene_dialog,
+            import_asset_dialog,
+            save_scene_as_dialog
         ])
         .setup(|app| {
             apply_desktop_window_adaptations(app)?;
@@ -2097,7 +3450,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::DesktopEnvironment;
+    use super::{
+        asset_meta_path_for_source, copilot_execution_summary, extract_codex_account_id,
+        model_detection_config, normalize_relative_path, resolve_existing_relative_path,
+        resolve_writable_relative_path, should_continue_copilot, DesktopEnvironment, EditorHost,
+    };
+    use base64::Engine as _;
+    use engine_editor::{CopilotProvider, FileEditorStore};
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn kde_uses_native_chrome_when_native_wayland_is_preferred() {
@@ -2107,5 +3468,173 @@ mod tests {
     #[test]
     fn kde_keeps_native_chrome_when_using_x11_backend() {
         assert!(DesktopEnvironment::Kde.prefers_native_chrome_for_backend(false));
+    }
+
+    #[test]
+    fn relative_paths_reject_parent_traversal() {
+        assert!(normalize_relative_path("../../outside.txt").is_err());
+        assert!(normalize_relative_path("/tmp/outside.txt").is_err());
+    }
+
+    #[test]
+    fn asset_meta_paths_append_meta_to_full_file_name() {
+        assert_eq!(
+            asset_meta_path_for_source(Path::new("textures/player.png")),
+            Path::new("textures/player.png.meta")
+        );
+    }
+
+    #[test]
+    fn existing_asset_paths_resolve_under_asset_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        let script_path = asset_root.join("scripts/player.rhai");
+        fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        fs::write(&script_path, "fn on_start() {}").unwrap();
+
+        let resolved = resolve_existing_relative_path(&asset_root, "scripts/player.rhai").unwrap();
+
+        assert_eq!(resolved, script_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn writable_asset_paths_reject_new_file_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        fs::create_dir_all(&asset_root).unwrap();
+
+        assert!(resolve_writable_relative_path(&asset_root, "../../outside.txt").is_err());
+    }
+
+    #[test]
+    fn writable_asset_paths_allow_new_nested_files_inside_asset_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        fs::create_dir_all(&asset_root).unwrap();
+
+        let resolved =
+            resolve_writable_relative_path(&asset_root, "scripts/new_script.rhai").unwrap();
+
+        assert_eq!(
+            resolved,
+            asset_root
+                .canonicalize()
+                .unwrap()
+                .join("scripts/new_script.rhai")
+        );
+    }
+
+    #[test]
+    fn codex_account_id_is_extracted_from_namespaced_jwt_claim() {
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-123"
+            }
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let token = format!("header.{payload}.signature");
+
+        assert_eq!(
+            extract_codex_account_id(&token).as_deref(),
+            Some("account-123")
+        );
+    }
+
+    #[test]
+    fn model_detection_uses_saved_credentials_when_request_omits_them() {
+        let settings = engine_editor::CopilotSettings {
+            api_key: Some("saved-key".to_owned()),
+            api_endpoint: Some("https://provider.example/v1".to_owned()),
+            ..Default::default()
+        };
+
+        let config = model_detection_config(&serde_json::json!({}), &settings);
+
+        assert_eq!(config.api_key.as_deref(), Some("saved-key"));
+        assert_eq!(
+            config.endpoint.as_deref(),
+            Some("https://provider.example/v1")
+        );
+    }
+
+    #[test]
+    fn copilot_settings_survive_host_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("aster-editor-state.toml");
+
+        {
+            let store = FileEditorStore::new(&state_path);
+            let mut host = EditorHost::new(store).unwrap();
+            host.update_copilot_settings(&serde_json::json!({
+                "provider": "custom",
+                "model": "aster-test-model",
+                "api_endpoint": "https://provider.example/v1",
+                "api_key": "secret-test-key",
+                "max_tokens": 8192
+            }))
+            .unwrap();
+        }
+
+        let state_text = fs::read_to_string(&state_path).unwrap();
+        assert!(state_text.contains("aster-test-model"));
+        assert!(!state_text.contains("secret-test-key"));
+
+        let store = FileEditorStore::new(&state_path);
+        let host = EditorHost::new(store).unwrap();
+        assert_eq!(host.copilot_settings.provider, CopilotProvider::Custom);
+        assert_eq!(host.copilot_settings.model, "aster-test-model");
+        assert_eq!(
+            host.copilot_settings.api_endpoint.as_deref(),
+            Some("https://provider.example/v1")
+        );
+        assert_eq!(host.copilot_settings.max_tokens, 8192);
+        assert_eq!(
+            host.copilot_settings.api_key.as_deref(),
+            Some("secret-test-key")
+        );
+    }
+
+    #[test]
+    fn permanently_allowed_command_survives_host_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("aster-editor-state.toml");
+
+        {
+            let store = FileEditorStore::new(&state_path);
+            let mut host = EditorHost::new(store).unwrap();
+            host.copilot_allow_command(&serde_json::json!({
+                "command": "gameobject.create_empty"
+            }))
+            .unwrap();
+        }
+
+        let store = FileEditorStore::new(&state_path);
+        let host = EditorHost::new(store).unwrap();
+        assert_eq!(
+            host.copilot_settings.allowed_commands,
+            vec!["gameobject.create_empty"]
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_requests_an_agent_continuation() {
+        assert!(should_continue_copilot(true, false));
+        assert!(!should_continue_copilot(false, false));
+        assert!(!should_continue_copilot(true, true));
+    }
+
+    #[test]
+    fn copilot_execution_summary_includes_tool_results() {
+        let summary = copilot_execution_summary(
+            1,
+            None,
+            &["query_scene_semantic: applied".to_owned()],
+            &["Found 3 entities:\n0:1 - Camera\n1:1 - Player".to_owned()],
+        );
+
+        assert!(summary.contains("query_scene_semantic: applied"));
+        assert!(summary.contains("Tool results:"));
+        assert!(summary.contains("1:1 - Player"));
     }
 }

@@ -2,33 +2,30 @@
 
 ## Project Structure & Module Organization
 
-Aster is a Rust workspace. Core engine code lives under `crates/`, with each subsystem in its own crate: `engine-core`, `engine-ecs`, `engine-platform`, `engine-assets`, `engine-render`, `engine-render-vulkan`, `engine-physics`, `engine-audio`, `engine-editor`, `engine-editor-ui`, `engine-i18n`, and `runtime-min`. The Tauri-based editor GUI lives in `editor/`. Repository automation is in `xtask/`. Integration tests currently live in crate-level `tests/` directories, for example `crates/runtime-min/tests/`. Example project assets and configs are in `examples/project/`, including scenes, prefabs, and `*.toml` runtime/editor configuration. Design and planning notes belong in `docs/`.
+Aster is a Rust 2021 workspace. Engine subsystems live in `crates/`, generally one responsibility per crate, such as `engine-ecs`, `engine-assets`, `engine-render-*`, `engine-physics`, and `engine-ai`. `crates/runtime-min` is the headless composition root. The desktop editor is in `editor/`: React/TypeScript UI code is under `editor/src/renderer`, while the Tauri Rust backend is under `editor/src-tauri`. Build automation lives in `xtask/` and `scripts/`. Put design notes in `docs/`, schemas in `schema/`, and sample scenes, assets, and behavior files in `examples/`.
 
 ## Build, Test, and Development Commands
 
-- `cargo test --workspace`: run all workspace tests.
-- `cargo check --workspace --all-features`: type-check every crate with all feature gates enabled.
-- `cargo test -p runtime-min --no-default-features --features runtime-min`: verify the minimal runtime path stays lean.
-- `cargo run -p xtask -- test`: run the workspace test task through repository automation.
-- `cargo run -p xtask -- check`: run the workspace check task.
-- `cargo run -p xtask -- runtime-min`: build the minimal runtime profile.
-- `cargo run -p xtask -- build-editor`: build the editor profile.
-- `cargo run -p xtask -- package --profile editor --project examples/project`: build and package the example editor project into `target/aster-packages/`.
+- `cargo fmt --check`: verify Rust formatting used by CI.
+- `cargo clippy --workspace`: lint all workspace crates.
+- `cargo test --workspace`: run the complete Rust test suite.
+- `cargo xtask check`: check the workspace with all features.
+- `cargo xtask build-editor`: build the editor-enabled runtime profile.
+- `cargo xtask agent-smoke`: test editor agent tooling with its feature gate.
+- `cd editor && bun install`: install frontend and Tauri CLI dependencies.
+- `cd editor && bun run build`: type-check and build the Vite frontend.
+- `cd editor && bun run tauri dev`: launch the desktop editor in development mode.
+
+Rust 1.78+, Bun 1.0+, and the platform-specific Tauri prerequisites are required.
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2021 and keep code formatted with `cargo fmt --workspace`. Prefer explicit subsystem boundaries and workspace dependencies from the root `Cargo.toml`. Crate names use kebab case (`engine-editor-ui`); Rust modules, files, functions, and variables use snake case; public types and traits use `PascalCase`; constants use `SCREAMING_SNAKE_CASE`. Keep feature names aligned with workspace profiles such as `runtime-min`, `editor`, `agent-tools`, and `dev-full`.
+Format Rust with `cargo fmt`; use four-space indentation and keep crates free of unsafe code. Rust modules, functions, and tests use `snake_case`; types and traits use `PascalCase`; constants use `SCREAMING_SNAKE_CASE`; crate and feature names use kebab-case. TypeScript is strict, uses two-space indentation, single quotes, semicolons, `PascalCase` React components, and `camelCase` functions. Prefer existing workspace dependencies and subsystem boundaries over new cross-crate coupling.
 
 ## Testing Guidelines
 
-Use Rust’s built-in test framework. Put crate integration tests in `crates/<crate>/tests/` and unit tests near the code they cover. Name tests after behavior, for example `loads_runtime_services` or `rejects_invalid_manifest`. When changing feature-gated code, run the targeted feature command as well as the full workspace tests.
-
-Before finishing a task that changes Rust code, Cargo manifests, examples, or test-covered project configuration, run `cargo fmt --check` to verify formatting and `cargo test --workspace` to check for regressions. For docs-only, planning, or repository-instruction changes, skip the Cargo commands unless the change also touches buildable code.
+Use Rust's built-in test framework. Keep unit tests beside implementation code and integration tests in `crates/<crate>/tests/` or `editor/src-tauri/tests/`. Name tests by observable behavior, for example `scene_with_all_components_round_trip`. Run targeted crate tests during development, then `cargo test --workspace` before submission. Rendering tests may skip when no display or GPU surface is available.
 
 ## Commit & Pull Request Guidelines
 
-Recent history uses short imperative commit subjects, such as `Add editor UI hub foundations` and `Improve project creation dialog`. Follow that style: one concise subject, capitalized, no trailing period. Pull requests should include a brief summary, the commands run, linked issues if applicable, and screenshots or recordings for editor UI changes.
-
-## Security & Configuration Tips
-
-Do not commit generated `target/` output or machine-local secrets. Keep example configuration generic under `examples/project/`. Heavy importers are feature-gated in `engine-assets`; avoid enabling them in minimal runtime changes unless the change explicitly requires it.
+Recent commits primarily use Conventional Commits: `feat(editor): ...`, `fix(i18n): ...`, and `refactor(scope): ...`. Keep subjects concise, imperative, and scoped. Pull requests should explain behavior changes, list verification commands, link relevant issues, and include screenshots or recordings for editor UI changes. Do not commit `target/`, `editor/dist/`, secrets, or machine-local configuration.

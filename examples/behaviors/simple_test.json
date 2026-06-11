@@ -1,0 +1,10 @@
+{
+  "entity": "SimplePlayer",
+  "description": "Minimal working example",
+  "behaviors": [
+    {
+      "type": "Action",
+      "do": "Idle"
+    }
+  ]
+}

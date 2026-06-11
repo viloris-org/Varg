@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { rpc } from '../api';
+import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
+import {
+  IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
+  IconChevronDown, IconChevronRight, IconInfo, IconLoader,
+} from '../icons';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -11,6 +15,7 @@ interface CopilotOperation {
 }
 
 interface CopilotPlan {
+  message: string;
   operations: CopilotOperation[];
   read_only: boolean;
   requires_write: boolean;
@@ -37,66 +42,6 @@ interface ApplyResult {
 }
 
 type CopilotStatus = 'idle' | 'planning' | 'ready' | 'executing' | 'complete' | 'error';
-
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-const IconSend = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-  </svg>
-);
-
-const IconBot = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <rect x="3" y="11" width="18" height="12" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    <circle cx="9" cy="16" r="1" /><circle cx="15" cy="16" r="1" />
-  </svg>
-);
-
-const IconCheck = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
-const IconX = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-
-const IconAlertCircle = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
-    <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-  </svg>
-);
-
-const IconChevronDown = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <polyline points="6 9 12 15 18 9" />
-  </svg>
-);
-
-const IconChevronRight = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <polyline points="9 18 15 12 9 6" />
-  </svg>
-);
-
-const IconInfo = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="12" height="12">
-    <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
-  </svg>
-);
-
-const IconLoader = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14" className="spin-icon">
-    <line x1="12" y1="2" x2="12" y2="6" /><line x1="12" y1="18" x2="12" y2="22" />
-    <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" /><line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-    <line x1="2" y1="12" x2="6" y2="12" /><line x1="18" y1="12" x2="22" y2="12" />
-    <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" /><line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-  </svg>
-);
 
 // ─── Copilot Message ─────────────────────────────────────────────────────────
 
@@ -133,7 +78,7 @@ function StatusBadge({ status }: { status: CopilotStatus }) {
 export default function CopilotPanel() {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
+  const [messages, setMessages] = useState<{ role: string; content: string; id?: string }[]>([]);
   const [status, setStatus] = useState<CopilotStatus>('idle');
   const [plan, setPlan] = useState<CopilotPlan | null>(null);
   const [approved, setApproved] = useState<Set<number>>(new Set());
@@ -142,7 +87,8 @@ export default function CopilotPanel() {
   const [autoAccept, setAutoAccept] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const nextMsgId = useRef(1);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -155,6 +101,8 @@ export default function CopilotPanel() {
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  const executeApprovedRef = useRef<((approvedSet?: Set<number>) => Promise<void>) | null>(null);
 
   // ── Submit prompt ──
 
@@ -170,10 +118,25 @@ export default function CopilotPanel() {
     setTraceExpanded(false);
     setErrorMsg(null);
 
+    const streamingId = String(nextMsgId.current++);
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: '',
+      id: streamingId,
+    }]);
+
     try {
-      const result = await rpc<CopilotPlan>('copilot/plan', { prompt });
-      setPlan(result);
-      // Auto-approve read-only operations
+      let receivedDelta = false;
+      const result = await streamCopilotPlan<CopilotPlan>({ prompt }, (delta, kind) => {
+        if (kind !== 'text') return;
+        setMessages(prev => prev.map(msg => {
+          if ((msg as any).id !== streamingId) return msg;
+          return { ...msg, content: receivedDelta ? msg.content + delta : delta };
+        }));
+        receivedDelta = true;
+      });
+
+      setPlan(result.operations.length > 0 ? result : null);
       const autoApproved = new Set<number>();
       result.operations.forEach((op) => {
         if (!op.requires_write) autoApproved.add(op.index);
@@ -181,25 +144,24 @@ export default function CopilotPanel() {
       setApproved(autoApproved);
       setStatus('ready');
 
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: result.operations.length > 0
-          ? t('copilot_planned_ops').replace('{count}', String(result.operations.length))
-          : t('copilot_no_ops'),
-      }]);
+      const finalContent = result.message || (result.operations.length > 0
+        ? t('copilot_planned_ops').replace('{count}', String(result.operations.length))
+        : t('copilot_no_ops'));
+      setMessages(prev => prev.map(msg => (msg as any).id === streamingId
+        ? { ...msg, content: finalContent }
+        : msg));
 
       // Auto-execute if all ops are read-only and auto-accept is on
       if (autoAccept && result.operations.length > 0 && !result.requires_write) {
-        await executeApproved(autoApproved);
+        await executeApprovedRef.current?.(autoApproved);
       }
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
       setStatus('error');
       setErrorMsg(msg);
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `Error: ${msg}`,
-      }]);
+      setMessages(prev => prev.map(m => (m as any).id === streamingId
+        ? { ...m, content: `Error: ${msg}` }
+        : m));
     }
   }, [status, autoAccept]);
 
@@ -240,6 +202,8 @@ export default function CopilotPanel() {
     }
   }, [approved]);
 
+  executeApprovedRef.current = executeApproved;
+
   // ── Toggle approval for an operation ──
 
   const toggleApproval = useCallback((index: number) => {
@@ -276,7 +240,7 @@ export default function CopilotPanel() {
           </div>
         )}
         {messages.map((msg, i) => (
-          <MessageBubble key={i} role={msg.role} content={msg.content} />
+          <MessageBubble key={msg.id ?? i} role={msg.role} content={msg.content} />
         ))}
 
         {/* Plan Preview */}
@@ -328,7 +292,7 @@ export default function CopilotPanel() {
         {/* Executing indicator */}
         {status === 'executing' && (
           <div className="copilot-executing">
-            <IconLoader />
+            <IconLoader className="spin-icon" />
             <span>{t('copilot_executing')}</span>
           </div>
         )}
@@ -379,15 +343,15 @@ export default function CopilotPanel() {
 
       {/* Input */}
       <div className="copilot-input-row">
-        <input
-          ref={inputRef}
+        <textarea
+          ref={inputRef as React.RefObject<HTMLTextAreaElement>}
           className="copilot-input"
-          type="text"
           placeholder={t('copilot_input_placeholder')}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={status === 'planning' || status === 'executing'}
+          rows={2}
         />
         <button
           className="copilot-send-btn"

@@ -432,6 +432,7 @@ impl Manager for DefaultManager {
                 | engine_policy::grant::CapabilityDecision::Narrowed { grant, .. } => {
                     let assignment = TaskAssignment {
                         task_id: ticket.task_id,
+                        snapshot_id: tasks.snapshot_id,
                         role: AgentRole::Worker(match ticket.worker_kind {
                             ProtoWorkerKind::Scene => WorkerKind::Scene,
                             ProtoWorkerKind::Script => WorkerKind::Script,
@@ -505,7 +506,7 @@ impl Manager for DefaultManager {
         Ok(ContextPacket {
             packet_id,
             task_id: assignment.task_id,
-            snapshot_id: engine_policy::ids::SnapshotId::from_u128(0), // placeholder
+            snapshot_id: assignment.snapshot_id,
             context_hash: engine_policy::ids::ContextHash::new("pending"),
             target_role: assignment.role,
             sections,

@@ -1,0 +1,83 @@
+{
+  "entity": "EnemyPatroller",
+  "description": "Basic enemy AI that patrols waypoints and chases player when close",
+  "behaviors": [
+    {
+      "type": "Selector",
+      "name": "root_behavior",
+      "children": [
+        {
+          "type": "Sequence",
+          "name": "combat_behavior",
+          "children": [
+            {
+              "type": "Condition",
+              "check": {
+                "PlayerDistance": {
+                  "comparison": {
+                    "LessThan": 8.0
+                  }
+                }
+              }
+            },
+            {
+              "type": "Selector",
+              "name": "combat_actions",
+              "children": [
+                {
+                  "type": "Sequence",
+                  "name": "attack",
+                  "children": [
+                    {
+                      "type": "Condition",
+                      "check": {
+                        "PlayerDistance": {
+                          "comparison": {
+                            "LessThan": 2.0
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "Action",
+                      "do": {
+                        "Attack": {
+                          "target": "player",
+                          "damage": 15
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "Action",
+                  "do": {
+                    "Chase": {
+                      "target": "player",
+                      "speed": 4.5
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Action",
+          "do": {
+            "Patrol": {
+              "points": [
+                [0, 0, 0],
+                [10, 0, 0],
+                [10, 0, 10],
+                [0, 0, 10]
+              ],
+              "speed": 2.0,
+              "loop": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

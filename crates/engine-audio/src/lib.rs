@@ -11,6 +11,7 @@ pub mod bus;
 pub mod effects;
 pub mod spatial;
 pub mod stream_player;
+pub mod synth;
 
 use std::collections::HashMap;
 
