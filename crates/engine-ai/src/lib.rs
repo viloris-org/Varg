@@ -55,12 +55,14 @@ pub trait AiModel {
 }
 
 /// A streamed fragment from a model response.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum AiStreamDelta {
     /// User-visible answer text.
     Text(String),
     /// Provider-exposed reasoning text or reasoning summary.
     Thinking(String),
+    /// A tool call is being constructed (partial arguments).
+    ToolCallDelta(ToolCallDelta),
 }
 
 impl AiStreamDelta {
@@ -69,6 +71,7 @@ impl AiStreamDelta {
         match self {
             Self::Text(_) => "text",
             Self::Thinking(_) => "thinking",
+            Self::ToolCallDelta(_) => "tool_call",
         }
     }
 
@@ -76,8 +79,42 @@ impl AiStreamDelta {
     pub fn text(&self) -> &str {
         match self {
             Self::Text(text) | Self::Thinking(text) => text,
+            Self::ToolCallDelta(d) => &d.name,
         }
     }
+}
+
+/// Partial tool call information emitted during streaming.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ToolCallDelta {
+    /// Provider-assigned tool call ID.
+    pub id: String,
+    /// Tool/function name.
+    pub name: String,
+    /// Partial JSON arguments string (append to accumulate).
+    pub arguments_delta: String,
+}
+
+/// A complete tool call from the model response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCall {
+    /// Provider-assigned tool call ID.
+    pub id: String,
+    /// Tool/function name.
+    pub name: String,
+    /// Parsed JSON arguments.
+    pub arguments: serde_json::Value,
+}
+
+/// Definition of a tool available to the model.
+#[derive(Clone, Debug)]
+pub struct ToolDefinition {
+    /// Tool name (must match an `AgentOperation` action).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for the tool's parameters.
+    pub parameters: serde_json::Value,
 }
 
 /// Role of a message in a multi-turn conversation.
@@ -148,6 +185,8 @@ pub struct AiRequest {
     pub messages: Vec<ChatMessage>,
     /// Optional thinking effort level for models that support extended reasoning.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Tool definitions for native tool calling. Empty means no tools.
+    pub tools: Vec<ToolDefinition>,
 }
 
 impl AiRequest {
@@ -158,6 +197,7 @@ impl AiRequest {
             context,
             messages: vec![ChatMessage::user(user)],
             thinking_effort: None,
+            tools: Vec::new(),
         }
     }
 }
@@ -169,6 +209,8 @@ pub struct AiResponse {
     pub content: String,
     /// Provider-exposed reasoning text or reasoning summary.
     pub thinking: String,
+    /// Tool calls requested by the model (native tool calling).
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// An operation the AI agent requests the engine to perform.
@@ -539,7 +581,11 @@ impl AgentSession {
     ) -> EngineResult<AgentPlan> {
         let request = self.prepare_request(user_prompt, history, thinking_effort);
         let response = model.chat_stream(request, on_delta)?;
-        self.plan_from_response(&response.content, policy)
+        if !response.tool_calls.is_empty() {
+            self.plan_from_tool_calls(&response.tool_calls, &response.content, policy)
+        } else {
+            self.plan_from_response(&response.content, policy)
+        }
     }
 
     /// Builds a provider request without performing network I/O.
@@ -558,6 +604,7 @@ impl AgentSession {
             context: self.context.to_ai_context(),
             messages,
             thinking_effort,
+            tools: agent_tool_definitions(),
         }
     }
 
@@ -574,6 +621,35 @@ impl AgentSession {
                 return Err(error);
             }
         };
+
+        self.build_plan(operations, policy)
+    }
+
+    /// Converts native tool calls into a validated agent plan.
+    ///
+    /// Each tool call maps to an `AgentOperation` via the tool name.
+    /// The model's text content is preserved as a `Complete` operation summary.
+    pub fn plan_from_tool_calls(
+        &mut self,
+        tool_calls: &[ToolCall],
+        text_content: &str,
+        policy: PermissionPolicy,
+    ) -> EngineResult<AgentPlan> {
+        let mut operations: Vec<AgentOperation> = Vec::new();
+
+        for tc in tool_calls {
+            let op = tool_call_to_operation(tc)?;
+            operations.push(op);
+        }
+
+        // If the model also produced text content and no Complete op was emitted,
+        // add one to preserve the conversational response.
+        let has_complete = operations.iter().any(|op| matches!(op, AgentOperation::Complete { .. }));
+        if !text_content.is_empty() && !has_complete {
+            operations.push(AgentOperation::Complete {
+                summary: Some(text_content.to_owned()),
+            });
+        }
 
         self.build_plan(operations, policy)
     }
@@ -1777,6 +1853,365 @@ fn parse_entity_id(entity_str: &str) -> EngineResult<engine_ecs::Entity> {
     )))
 }
 
+/// Converts a native `ToolCall` into an `AgentOperation`.
+///
+/// Maps the tool name to the corresponding operation variant and
+/// deserializes the arguments JSON.
+fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
+    let args = &tc.arguments;
+    match tc.name.as_str() {
+        "create_object" => {
+            let name = args["name"].as_str().unwrap_or("Untitled").to_owned();
+            let position = args["position"].as_array().and_then(|a| {
+                if a.len() == 3 {
+                    Some([a[0].as_f64().unwrap_or(0.0) as f32,
+                          a[1].as_f64().unwrap_or(0.0) as f32,
+                          a[2].as_f64().unwrap_or(0.0) as f32])
+                } else { None }
+            });
+            let components: Vec<ComponentSpec> = args["components"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(AgentOperation::CreateObject { name, components, position })
+        }
+        "write_script" => {
+            let path = args["path"].as_str().unwrap_or("").to_owned();
+            let source = args["source"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::WriteScript { path, source })
+        }
+        "set_property" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            let component = args["component"].as_str().unwrap_or("").to_owned();
+            let field = args["field"].as_str().unwrap_or("").to_owned();
+            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+            Ok(AgentOperation::SetProperty { entity, component, field, value })
+        }
+        "remove_component" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            let component = args["component"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::RemoveComponent { entity, component })
+        }
+        "destroy_object" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::DestroyObject { entity })
+        }
+        "read_file" => {
+            let path = args["path"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::ReadFile { path })
+        }
+        "execute_command" => {
+            let command = args["command"].as_str().unwrap_or("").to_owned();
+            let params = args.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            Ok(AgentOperation::ExecuteCommand { command, params })
+        }
+        "query_scene_semantic" => {
+            let query = args["query"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::QuerySceneSemantic { query })
+        }
+        "move_entity_to" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            let position = args["position"].as_array().and_then(|a| {
+                if a.len() == 3 {
+                    Some([a[0].as_f64().unwrap_or(0.0) as f32,
+                          a[1].as_f64().unwrap_or(0.0) as f32,
+                          a[2].as_f64().unwrap_or(0.0) as f32])
+                } else { None }
+            }).unwrap_or([0.0, 0.0, 0.0]);
+            let animated = args["animated"].as_bool().unwrap_or(false);
+            let duration = args["duration"].as_f64().map(|d| d as f32);
+            Ok(AgentOperation::MoveEntityTo { entity, position, animated, duration })
+        }
+        "show_in_viewport" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            let highlight = args["highlight"].as_bool().unwrap_or(false);
+            let frame = args["frame"].as_bool().unwrap_or(false);
+            Ok(AgentOperation::ShowInViewport { entity, highlight, frame })
+        }
+        "attach_behavior" => {
+            let entity = args["entity"].as_str().unwrap_or("").to_owned();
+            if let Some(path) = args["behavior_path"].as_str() {
+                Ok(AgentOperation::AttachBehavior {
+                    entity,
+                    behavior: BehaviorSource::File { behavior_path: path.to_owned() },
+                })
+            } else if let Some(tree) = args.get("behavior_tree") {
+                Ok(AgentOperation::AttachBehavior {
+                    entity,
+                    behavior: BehaviorSource::Inline { behavior_tree: tree.clone() },
+                })
+            } else {
+                Err(EngineError::config("attach_behavior requires behavior_path or behavior_tree"))
+            }
+        }
+        "run_command" => {
+            let command = args["command"].as_str().unwrap_or("").to_owned();
+            let args_vec: Vec<String> = args["args"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let working_dir = args["working_dir"].as_str().map(String::from);
+            let timeout_ms = args["timeout_ms"].as_u64();
+            Ok(AgentOperation::RunCommand {
+                command, args: args_vec, working_dir, timeout_ms,
+                capture_stdout: true, capture_stderr: true,
+            })
+        }
+        "update_project_memory" => {
+            let content = args["content"].as_str().unwrap_or("").to_owned();
+            let append = args["append"].as_bool().unwrap_or(false);
+            let heading = args["heading"].as_str().map(String::from);
+            Ok(AgentOperation::UpdateProjectMemory { content, append, heading })
+        }
+        "update_user_memory" => {
+            let key = args["key"].as_str().unwrap_or("").to_owned();
+            let value = args["value"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::UpdateUserMemory { key, value })
+        }
+        "query_dependency_graph" => {
+            let query = args["query"].as_str().unwrap_or("all").to_owned();
+            let target = args["target"].as_str().map(String::from);
+            Ok(AgentOperation::QueryDependencyGraph { query, target })
+        }
+        "complete" => {
+            let summary = args["summary"].as_str().map(String::from);
+            Ok(AgentOperation::Complete { summary })
+        }
+        other => Err(EngineError::config(format!("unknown tool call: {other}"))),
+    }
+}
+
+/// Returns tool definitions for all supported agent operations.
+///
+/// These are sent to the model so it can request operations via native
+/// tool calling instead of embedding JSON in text.
+pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "create_object".into(),
+            description: "Create a new game object with optional components and position.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Display name for the object" },
+                    "position": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 3, "maxItems": 3,
+                        "description": "Initial position [x, y, z]"
+                    },
+                    "components": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "description": "Component type: Camera, MeshRenderer, Light, Rigidbody, Collider, AudioSource, Script, Sprite2D, ParticleEmitter" },
+                                "properties": { "type": "object", "description": "Initial component properties" }
+                            },
+                            "required": ["type"]
+                        },
+                        "description": "Components to attach"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "write_script".into(),
+            description: "Create or update a Rhai script file in the project.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path relative to asset root, e.g. scripts/player.rhai" },
+                    "source": { "type": "string", "description": "Rhai source code" }
+                },
+                "required": ["path", "source"]
+            }),
+        },
+        ToolDefinition {
+            name: "set_property".into(),
+            description: "Modify a component field on an entity.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID (e.g. 'Player' or '1:1')" },
+                    "component": { "type": "string", "description": "Component type (e.g. 'Rigidbody')" },
+                    "field": { "type": "string", "description": "Field name to modify" },
+                    "value": { "description": "New value for the field" }
+                },
+                "required": ["entity", "component", "field", "value"]
+            }),
+        },
+        ToolDefinition {
+            name: "remove_component".into(),
+            description: "Remove a component from an entity.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" },
+                    "component": { "type": "string", "description": "Component type to remove" }
+                },
+                "required": ["entity", "component"]
+            }),
+        },
+        ToolDefinition {
+            name: "destroy_object".into(),
+            description: "Delete an entity from the scene.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" }
+                },
+                "required": ["entity"]
+            }),
+        },
+        ToolDefinition {
+            name: "read_file".into(),
+            description: "Read a source file from the project.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path relative to project root" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDefinition {
+            name: "execute_command".into(),
+            description: "Execute a registered editor command.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Command identifier (e.g. 'gameobject.create_empty')" },
+                    "params": { "type": "object", "description": "Optional command parameters" }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDefinition {
+            name: "query_scene_semantic".into(),
+            description: "Search for entities in the scene using natural language.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language query: 'all enemies', 'entities with Camera', 'Player near Enemy', or direct name" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "move_entity_to".into(),
+            description: "Move an entity to a target position, optionally animated.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" },
+                    "position": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 3, "maxItems": 3,
+                        "description": "Target position [x, y, z]"
+                    },
+                    "animated": { "type": "boolean", "description": "Whether to animate the movement" },
+                    "duration": { "type": "number", "description": "Animation duration in seconds" }
+                },
+                "required": ["entity", "position"]
+            }),
+        },
+        ToolDefinition {
+            name: "show_in_viewport".into(),
+            description: "Highlight or focus an entity in the editor viewport.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" },
+                    "highlight": { "type": "boolean", "description": "Add outline highlight" },
+                    "frame": { "type": "boolean", "description": "Focus camera on entity" }
+                },
+                "required": ["entity"]
+            }),
+        },
+        ToolDefinition {
+            name: "attach_behavior".into(),
+            description: "Attach a declarative behavior tree to an entity.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" },
+                    "behavior_path": { "type": "string", "description": "Path to behavior file relative to asset root" },
+                    "behavior_tree": { "type": "object", "description": "Inline behavior tree JSON" }
+                },
+                "required": ["entity"]
+            }),
+        },
+        ToolDefinition {
+            name: "run_command".into(),
+            description: "Execute a shell command or external process.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Command to execute (e.g. 'cargo', 'python')" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "Command arguments" },
+                    "working_dir": { "type": "string", "description": "Working directory relative to project root" },
+                    "timeout_ms": { "type": "number", "description": "Timeout in milliseconds (default 30000)" }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDefinition {
+            name: "update_project_memory".into(),
+            description: "Update the project memory file (.aster/project.md).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "New content or section to append" },
+                    "append": { "type": "boolean", "description": "Append as new section instead of replacing" },
+                    "heading": { "type": "string", "description": "Section heading when appending" }
+                },
+                "required": ["content"]
+            }),
+        },
+        ToolDefinition {
+            name: "update_user_memory".into(),
+            description: "Record an observed user pattern or preference.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Memory key (e.g. 'naming', 'style')" },
+                    "value": { "type": "string", "description": "Preference description" }
+                },
+                "required": ["key", "value"]
+            }),
+        },
+        ToolDefinition {
+            name: "query_dependency_graph".into(),
+            description: "Query the project dependency graph.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "enum": ["all", "entities", "scripts", "edges_for"], "description": "Query type" },
+                    "target": { "type": "string", "description": "Filter target for 'edges_for' query" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "complete".into(),
+            description: "Signal that the task is complete with an optional summary.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": { "type": "string", "description": "Summary of what was accomplished" }
+                }
+            }),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1798,6 +2233,7 @@ mod tests {
             Ok(AiResponse {
                 content: self.content.clone(),
                 thinking: String::new(),
+                tool_calls: Vec::new(),
             })
         }
     }

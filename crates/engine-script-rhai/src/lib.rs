@@ -2663,7 +2663,50 @@ impl RhaiScriptBackend {
         relative_path: &std::path::Path,
         source: &str,
     ) -> EngineResult<std::path::PathBuf> {
+        // Guard: relative_path must be non-empty and resolve to a file, not a directory.
+        // When the AI passes an empty string or a bare directory name the join produces
+        // a path that IS the asset_root itself; fs::write on a directory yields EISDIR.
+        if relative_path.as_os_str().is_empty() {
+            return Err(engine_core::EngineError::config(
+                "write_script: 'path' must not be empty — provide a file name such as \
+                 'scripts/my_script.rhai'",
+            ));
+        }
+        let file_name = relative_path
+            .file_name()
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| {
+                engine_core::EngineError::config(format!(
+                    "write_script: '{}' has no file name component — the path must end with a \
+                     file name, e.g. 'scripts/my_script.rhai'",
+                    relative_path.display()
+                ))
+            })?;
+        // Enforce .rhai extension so we don't accidentally create or overwrite arbitrary files.
+        if std::path::Path::new(file_name)
+            .extension()
+            .map(|ext| ext != "rhai")
+            .unwrap_or(true)
+        {
+            return Err(engine_core::EngineError::config(format!(
+                "write_script: '{}' must have a .rhai extension",
+                relative_path.display()
+            )));
+        }
+
         let full_path = asset_root.join(relative_path);
+
+        // Extra safety: if the resolved path is a directory, bail out clearly.
+        if full_path.is_dir() {
+            return Err(engine_core::EngineError::Filesystem {
+                path: full_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::IsADirectory,
+                    "resolved path is a directory, not a file",
+                ),
+            });
+        }
+
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| engine_core::EngineError::Filesystem {
                 path: parent.to_path_buf(),
@@ -2676,6 +2719,7 @@ impl RhaiScriptBackend {
         })?;
         self.load_script(&full_path)?;
         Ok(full_path)
+
     }
 
     /// Runs the `on_start()` lifecycle function for an entity's script.

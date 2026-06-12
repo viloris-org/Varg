@@ -98,6 +98,16 @@ impl ShadowUniform {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkyboxUniform {
+    view_rotation_only: [[f32; 4]; 4],
+    zenith_color: [f32; 4],
+    horizon_color: [f32; 4],
+    rotation_intensity: [f32; 4],
+    use_cubemap: [u32; 4],
+}
+
 struct GpuImage {
     _texture: wgpu::Texture,
     _view: wgpu::TextureView,
@@ -200,6 +210,12 @@ pub struct WgpuRenderDevice {
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_bind_group: wgpu::BindGroup,
     material_cache: HashMap<String, ([f32; 4], f32, f32, [f32; 3])>,
+    skybox_pipeline: wgpu::RenderPipeline,
+    skybox_bind_group: wgpu::BindGroup,
+    skybox_uniform: wgpu::Buffer,
+    _skybox_default_cubemap: wgpu::Texture,
+    skybox_default_cubemap_view: wgpu::TextureView,
+    skybox_sampler: wgpu::Sampler,
     /// Frame-lagged destruction queue: (frame_index, resource).
     destroy_queue: Vec<(u64, DestroyResource)>,
 }
@@ -591,6 +607,16 @@ impl WgpuRenderDevice {
         )
     }
 
+    /// Read back the game offscreen target as RGBA pixels.
+    ///
+    /// Returns `(width, height, rgba_bytes)`. Uses a staging buffer and GPU readback.
+    /// This is a synchronous blocking call — it waits for the GPU to finish.
+    pub fn readback_game_target(&mut self) -> EngineResult<(u32, u32, Vec<u8>)> {
+        let (w, h) = self.game_target.size();
+        let format = self.game_target.desc.color_format;
+        self.readback_target(w, h, format, self.game_target.handle)
+    }
+
     /// Read back the default offscreen target as RGBA pixels.
     ///
     /// Returns `(width, height, rgba_bytes)`. Uses a staging buffer and GPU readback.
@@ -598,6 +624,16 @@ impl WgpuRenderDevice {
     pub fn readback_default_target(&mut self) -> EngineResult<(u32, u32, Vec<u8>)> {
         let (w, h) = self.default_target.size();
         let format = self.default_target.desc.color_format;
+        self.readback_target(w, h, format, self.default_target.handle)
+    }
+
+    fn readback_target(
+        &mut self,
+        w: u32,
+        h: u32,
+        format: engine_render::ImageFormat,
+        handle: Handle,
+    ) -> EngineResult<(u32, u32, Vec<u8>)> {
         let bytes_per_pixel = format.bytes_per_pixel() as u64;
         // wgpu requires bytes_per_row to be a multiple of 256
         let unpadded = w as u64 * bytes_per_pixel;
@@ -607,8 +643,8 @@ impl WgpuRenderDevice {
 
         let target = self
             .targets
-            .get(&self.default_target.handle)
-            .ok_or_else(|| EngineError::invalid_handle("default target missing"))?;
+            .get(&handle)
+            .ok_or_else(|| EngineError::invalid_handle("readback target missing"))?;
 
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("aster viewport readback staging"),
@@ -691,6 +727,9 @@ impl WgpuRenderDevice {
         let shadow = shadow_uniform_from_world(world);
         self.queue
             .write_buffer(&self.shadow_uniform, 0, bytemuck::bytes_of(&shadow));
+        let skybox = skybox_uniform_from_world(world);
+        self.queue
+            .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
 
         let target = self
             .targets
@@ -711,6 +750,13 @@ impl WgpuRenderDevice {
             &self.instance_buffer,
             &batches,
             &self.mesh_cache,
+        );
+        encode_skybox_pass(
+            &mut encoder,
+            &target.color_view,
+            target.depth_view.as_ref(),
+            &self.skybox_pipeline,
+            &self.skybox_bind_group,
         );
         encode_batched_forward_pass(
             &mut encoder,
@@ -1253,6 +1299,173 @@ impl WgpuRenderDevice {
             cache: None,
         });
 
+        // Skybox pipeline
+        let skybox_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster skybox shader"),
+            source: wgpu::ShaderSource::Wgsl(SKYBOX_SHADER.into()),
+        });
+        let skybox_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster skybox uniform"),
+            contents: bytemuck::bytes_of(&SkyboxUniform {
+                view_rotation_only: IDENTITY_MAT4,
+                zenith_color: [0.15, 0.35, 0.65, 1.0],
+                horizon_color: [0.55, 0.7, 0.85, 1.0],
+                rotation_intensity: [0.0, 1.0, 0.0, 0.0],
+                use_cubemap: [0, 0, 0, 0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let skybox_default_cubemap = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aster skybox default cubemap"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for face in 0..6u32 {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &skybox_default_cubemap,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: face,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &[128, 128, 200, 255],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let skybox_default_cubemap_view =
+            skybox_default_cubemap.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("aster skybox default cubemap view"),
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
+        let skybox_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("aster skybox sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let skybox_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster skybox bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aster skybox bind group"),
+            layout: &skybox_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: skybox_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&skybox_default_cubemap_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&skybox_sampler),
+                },
+            ],
+        });
+        let skybox_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aster skybox pipeline layout"),
+                bind_group_layouts: &[Some(&skybox_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let skybox_color_format = surface_state
+            .as_ref()
+            .map(|(_, config)| config.format)
+            .unwrap_or_else(|| to_wgpu_format(format));
+        let skybox_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster skybox pipeline"),
+            layout: Some(&skybox_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &skybox_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &skybox_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: skybox_color_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aster cube vertices"),
             contents: bytemuck::cast_slice(CUBE_VERTICES),
@@ -1356,6 +1569,12 @@ impl WgpuRenderDevice {
             shadow_pipeline,
             shadow_bind_group,
             material_cache: HashMap::new(),
+            skybox_pipeline,
+            skybox_bind_group,
+            skybox_uniform,
+            _skybox_default_cubemap: skybox_default_cubemap,
+            skybox_default_cubemap_view,
+            skybox_sampler,
             destroy_queue: Vec::new(),
         };
         renderer.upload_debug_meshes();
@@ -1671,6 +1890,9 @@ impl RenderDevice for WgpuRenderDevice {
         let lighting = lighting_uniform_from_world(world);
         self.queue
             .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+        let skybox = skybox_uniform_from_world(world);
+        self.queue
+            .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
 
         if self.surface.is_some() {
             if self.surface_suspended {
@@ -1702,6 +1924,13 @@ impl RenderDevice for WgpuRenderDevice {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("aster surface render world encoder"),
                 });
+            encode_skybox_pass(
+                &mut encoder,
+                &view,
+                self.surface_depth_view.as_ref(),
+                &self.skybox_pipeline,
+                &self.skybox_bind_group,
+            );
             encode_batched_forward_pass(
                 &mut encoder,
                 &view,
@@ -1738,6 +1967,13 @@ impl RenderDevice for WgpuRenderDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("aster render world encoder"),
             });
+        encode_skybox_pass(
+            &mut encoder,
+            &target.color_view,
+            target.depth_view.as_ref(),
+            &self.skybox_pipeline,
+            &self.skybox_bind_group,
+        );
         encode_batched_forward_pass(
             &mut encoder,
             &target.color_view,
@@ -2053,19 +2289,14 @@ fn encode_batched_forward_pass<'a>(
         depth_slice: None,
         resolve_target: None,
         ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color {
-                r: 0.1,
-                g: 0.1,
-                b: 0.1,
-                a: 1.0,
-            }),
+            load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         },
     });
     let depth_attachment = depth_view.map(|view| wgpu::RenderPassDepthStencilAttachment {
         view,
         depth_ops: Some(wgpu::Operations {
-            load: wgpu::LoadOp::Clear(1.0),
+            load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         }),
         stencil_ops: None,
@@ -2213,6 +2444,105 @@ fn encode_grid_pass(
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
     pass.draw(0..vertex_count, 0..1);
+}
+
+fn skybox_uniform_from_world(world: &RenderWorld) -> SkyboxUniform {
+    let skybox = match &world.skybox {
+        Some(s) => s,
+        None => {
+            return SkyboxUniform {
+                view_rotation_only: IDENTITY_MAT4,
+                zenith_color: [0.15, 0.35, 0.65, 1.0],
+                horizon_color: [0.55, 0.7, 0.85, 1.0],
+                rotation_intensity: [0.0, 1.0, 0.0, 0.0],
+                use_cubemap: [0, 0, 0, 0],
+            };
+        }
+    };
+
+    let eye = world
+        .camera
+        .as_ref()
+        .map(|c| c.transform.translation)
+        .unwrap_or(engine_core::math::Vec3::new(0.0, 0.0, 5.0));
+    let target = world
+        .camera
+        .as_ref()
+        .and_then(|c| c.look_at_target)
+        .unwrap_or_else(|| {
+            let q = world
+                .camera
+                .as_ref()
+                .map(|c| c.transform.rotation)
+                .unwrap_or(engine_core::math::Quat::IDENTITY);
+            let fwd = engine_core::math::Vec3::new(
+                2.0 * (q.x * q.z + q.w * q.y),
+                2.0 * (q.y * q.z - q.w * q.x),
+                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+            );
+            engine_core::math::Vec3::new(eye.x - fwd.x, eye.y - fwd.y, eye.z - fwd.z)
+        });
+    let view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
+
+    SkyboxUniform {
+        view_rotation_only: view,
+        zenith_color: [
+            skybox.zenith_color[0],
+            skybox.zenith_color[1],
+            skybox.zenith_color[2],
+            1.0,
+        ],
+        horizon_color: [
+            skybox.horizon_color[0],
+            skybox.horizon_color[1],
+            skybox.horizon_color[2],
+            1.0,
+        ],
+        rotation_intensity: [skybox.rotation_degrees, skybox.intensity, 0.0, 0.0],
+        use_cubemap: [0, 0, 0, 0],
+    }
+}
+
+fn encode_skybox_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    color_view: &wgpu::TextureView,
+    depth_view: Option<&wgpu::TextureView>,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+) {
+    let color_attachment = Some(wgpu::RenderPassColorAttachment {
+        view: color_view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            store: wgpu::StoreOp::Store,
+        },
+    });
+    let depth_attachment = depth_view.map(|view| wgpu::RenderPassDepthStencilAttachment {
+        view,
+        depth_ops: Some(wgpu::Operations {
+            load: wgpu::LoadOp::Clear(1.0),
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil_ops: None,
+    });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aster skybox pass"),
+        color_attachments: &[color_attachment],
+        depth_stencil_attachment: depth_attachment,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 fn to_wgpu_texture_usage(usage: ImageUsage) -> wgpu::TextureUsages {
@@ -3068,6 +3398,59 @@ fn vs_main(input: VsIn) -> @builtin(position) vec4<f32> {
 }
 "#;
 
+const SKYBOX_SHADER: &str = r#"
+struct SkyboxUniform {
+    view_rotation_only: mat4x4<f32>,
+    zenith_color: vec4<f32>,
+    horizon_color: vec4<f32>,
+    rotation_intensity: vec4<f32>,
+    use_cubemap: vec4<u32>,
+};
+
+@group(0) @binding(0) var<uniform> skybox: SkyboxUniform;
+@group(0) @binding(1) var cubemap_texture: texture_cube<f32>;
+@group(0) @binding(2) var cubemap_sampler: sampler;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) direction: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(vertex_index) - 1);
+    let y = f32(i32(vertex_index & 1u) * 2 - 1);
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    let inv_proj = vec4<f32>(x, y, 1.0, 1.0);
+    let view_dir = (skybox.view_rotation_only * inv_proj).xyz;
+    out.direction = view_dir;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+    let dir = normalize(input.direction);
+    let rotation_rad = skybox.rotation_intensity.x * 3.14159265 / 180.0;
+    let cos_r = cos(rotation_rad);
+    let sin_r = sin(rotation_rad);
+    let rotated_dir = vec3<f32>(
+        dir.x * cos_r - dir.z * sin_r,
+        dir.y,
+        dir.x * sin_r + dir.z * cos_r
+    );
+    let intensity = skybox.rotation_intensity.y;
+    var color: vec3<f32>;
+    if (skybox.use_cubemap.x != 0u) {
+        color = textureSample(cubemap_texture, cubemap_sampler, rotated_dir).rgb * intensity;
+    } else {
+        let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+        color = mix(skybox.horizon_color.rgb, skybox.zenith_color.rgb, t) * intensity;
+    }
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3165,6 +3548,7 @@ mod tests {
             sprites: Vec::new(),
             lights: vec![light],
             particles: vec![],
+            skybox: None,
         };
 
         let uniform = lighting_uniform_from_world(&world);
@@ -3187,6 +3571,7 @@ mod tests {
             sprites: Vec::new(),
             lights: Vec::new(),
             particles: Vec::new(),
+            skybox: None,
         };
 
         let batches = test_mesh_batches(&world);
@@ -3209,6 +3594,7 @@ mod tests {
                 color: [1.0, 1.0, 1.0, 1.0],
                 age_fraction: 0.5,
             }],
+            skybox: None,
         };
 
         let batches = test_mesh_batches(&world);
@@ -3429,6 +3815,7 @@ mod tests {
             sprites: Vec::new(),
             lights,
             particles: Vec::new(),
+            skybox: None,
         };
 
         let selected = select_forward_lights(&world);

@@ -1659,7 +1659,8 @@ pub fn extract_render_world(scene: &Scene) -> RenderWorld {
                 | ComponentData::AnimationPlayer(_)
                 | ComponentData::SkinnedMeshRenderer(_)
                 | ComponentData::AudioStreamPlayer2D(_)
-                | ComponentData::AudioStreamPlayer3D(_) => {}
+                | ComponentData::AudioStreamPlayer3D(_)
+                | ComponentData::Skybox(_) => {}
             }
         }
         if object.camera_role == Some(CameraRole::Main) && world.camera.is_none() {

@@ -3,8 +3,9 @@
 //! Supports Anthropic Claude (via Messages API), OpenAI-compatible APIs,
 //! Google Gemini, and local Ollama instances.
 
-use crate::{AiModel, AiRequest, AiResponse, AiStreamDelta, ChatMessage, ChatRole};
+use crate::{AiModel, AiRequest, AiResponse, AiStreamDelta, ChatMessage, ChatRole, ToolCall, ToolCallDelta};
 use engine_core::{EngineError, EngineResult};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 
 type DeltaExtractor = for<'a> fn(&'a serde_json::Value) -> Option<&'a str>;
@@ -63,7 +64,7 @@ fn stream_json_lines(
         }
     }
 
-    Ok(AiResponse { content, thinking })
+    Ok(AiResponse { content, thinking, tool_calls: Vec::new() })
 }
 
 /// Stream handler that extracts both thinking and text content from Anthropic responses.
@@ -73,6 +74,9 @@ fn stream_anthropic_with_thinking(
 ) -> EngineResult<AiResponse> {
     let mut content = String::new();
     let mut thinking_content = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Track in-progress tool calls by index
+    let mut active_tools: HashMap<usize, (String, String, String)> = HashMap::new();
 
     for line in BufReader::new(reader).lines() {
         let line = line.map_err(|error| {
@@ -98,8 +102,22 @@ fn stream_anthropic_with_thinking(
 
         let event_type = json["type"].as_str().unwrap_or("");
         match event_type {
-            "content_block_start" => {}
+            "content_block_start" => {
+                let index = json["index"].as_u64().unwrap_or(0) as usize;
+                let block = &json["content_block"];
+                if block["type"] == "tool_use" {
+                    let id = block["id"].as_str().unwrap_or("").to_owned();
+                    let name = block["name"].as_str().unwrap_or("").to_owned();
+                    active_tools.insert(index, (id, name.clone(), String::new()));
+                    on_delta(AiStreamDelta::ToolCallDelta(ToolCallDelta {
+                        id: String::new(),
+                        name,
+                        arguments_delta: String::new(),
+                    }));
+                }
+            }
             "content_block_delta" => {
+                let index = json["index"].as_u64().unwrap_or(0) as usize;
                 let delta_type = json["delta"]["type"].as_str().unwrap_or("");
                 if delta_type == "thinking_delta" {
                     if let Some(thinking) = json["delta"]["thinking"].as_str() {
@@ -111,11 +129,25 @@ fn stream_anthropic_with_thinking(
                         content.push_str(text);
                         on_delta(AiStreamDelta::Text(text.to_owned()));
                     }
+                } else if delta_type == "input_json_delta" {
+                    if let Some(partial) = json["delta"]["partial_json"].as_str() {
+                        if let Some((_, _, args)) = active_tools.get_mut(&index) {
+                            args.push_str(partial);
+                            on_delta(AiStreamDelta::ToolCallDelta(ToolCallDelta {
+                                id: String::new(),
+                                name: String::new(),
+                                arguments_delta: partial.to_owned(),
+                            }));
+                        }
+                    }
                 }
             }
             "content_block_stop" => {
-                // We need to track if we were in a thinking block
-                // For simplicity, we'll close thinking tag on text block start
+                let index = json["index"].as_u64().unwrap_or(0) as usize;
+                if let Some((id, name, args_json)) = active_tools.remove(&index) {
+                    let arguments = serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Object(Default::default()));
+                    tool_calls.push(ToolCall { id, name, arguments });
+                }
             }
             _ => {}
         }
@@ -124,11 +156,109 @@ fn stream_anthropic_with_thinking(
     Ok(AiResponse {
         content,
         thinking: thinking_content,
+        tool_calls,
     })
 }
 
 fn anthropic_delta(json: &serde_json::Value) -> Option<&str> {
     json["delta"]["text"].as_str()
+}
+
+/// Stream handler for OpenAI Chat Completions with tool call support.
+fn stream_openai_chat_completions(
+    reader: impl Read,
+    on_delta: &mut dyn FnMut(AiStreamDelta),
+) -> EngineResult<AiResponse> {
+    let mut content = String::new();
+    let mut thinking = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Accumulate tool call fragments by index: (id, name, arguments_json)
+    let mut active_tools: HashMap<usize, (String, String, String)> = HashMap::new();
+
+    for line in BufReader::new(reader).lines() {
+        let line = line.map_err(|error| {
+            EngineError::other(format!("OpenAI streaming response read failed: {error}"))
+        })?;
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+
+        let json: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+            EngineError::other(format!(
+                "OpenAI streaming response parse failed: {error}; payload: {payload}"
+            ))
+        })?;
+        if let Some(message) = json["error"]["message"].as_str() {
+            return Err(EngineError::other(format!("OpenAI API: {message}")));
+        }
+
+        // Extract thinking/reasoning content
+        if let Some(rc) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+            thinking.push_str(rc);
+            on_delta(AiStreamDelta::Thinking(rc.to_owned()));
+        } else if let Some(rc) = json["choices"][0]["delta"]["reasoning"].as_str() {
+            thinking.push_str(rc);
+            on_delta(AiStreamDelta::Thinking(rc.to_owned()));
+        }
+
+        // Extract text content
+        if let Some(text) = json["choices"][0]["delta"]["content"].as_str() {
+            content.push_str(text);
+            on_delta(AiStreamDelta::Text(text.to_owned()));
+        }
+
+        // Extract tool call deltas
+        if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+            for tc in calls {
+                let index = tc["index"].as_u64().unwrap_or(0) as usize;
+                if let Some(id) = tc["id"].as_str() {
+                    // First chunk: new tool call with id and name
+                    let name = tc["function"]["name"].as_str().unwrap_or("").to_owned();
+                    active_tools.insert(index, (id.to_owned(), name.clone(), String::new()));
+                    on_delta(AiStreamDelta::ToolCallDelta(ToolCallDelta {
+                        id: id.to_owned(),
+                        name,
+                        arguments_delta: String::new(),
+                    }));
+                }
+                if let Some(args_delta) = tc["function"]["arguments"].as_str() {
+                    if let Some((_, _, args)) = active_tools.get_mut(&index) {
+                        args.push_str(args_delta);
+                        on_delta(AiStreamDelta::ToolCallDelta(ToolCallDelta {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments_delta: args_delta.to_owned(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Check for finish_reason to finalize tool calls
+        if let Some(reason) = json["choices"][0]["finish_reason"].as_str() {
+            if reason == "tool_calls" || reason == "stop" {
+                for (_, (id, name, args_json)) in active_tools.drain() {
+                    let arguments = serde_json::from_str(&args_json)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                    tool_calls.push(ToolCall { id, name, arguments });
+                }
+            }
+        }
+    }
+
+    // Finalize any remaining tool calls (in case finish_reason wasn't received)
+    for (_, (id, name, args_json)) in active_tools {
+        let arguments = serde_json::from_str(&args_json)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        tool_calls.push(ToolCall { id, name, arguments });
+    }
+
+    Ok(AiResponse { content, thinking, tool_calls })
 }
 
 fn openai_delta(json: &serde_json::Value) -> Option<&str> {
@@ -405,6 +535,18 @@ impl AiModel for AnthropicProvider {
             }
         }
 
+        // Add tool definitions if provided
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let mut response = ureq::post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -412,7 +554,7 @@ impl AiModel for AnthropicProvider {
             .send_json(&body)
             .map_err(|e| EngineError::other(format!("Anthropic API request failed: {e}")))?;
 
-        if request.thinking_effort.is_some() {
+        if request.thinking_effort.is_some() || !request.tools.is_empty() {
             stream_anthropic_with_thinking(response.body_mut().as_reader(), on_delta)
         } else {
             stream_json_lines(
@@ -695,20 +837,39 @@ impl AiModel for OpenAIProvider {
             }
         }
 
+        // Add tool definitions if provided
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request.tools.iter().map(|tool| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                })
+            }).collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
         let mut response = ureq::post(&url)
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .send_json(&body)
             .map_err(|e| EngineError::other(format!("OpenAI API request failed: {e}")))?;
 
-        stream_json_lines(
-            response.body_mut().as_reader(),
-            true,
-            "OpenAI",
-            openai_delta,
-            Some(openai_thinking_delta),
-            on_delta,
-        )
+        if !request.tools.is_empty() {
+            stream_openai_chat_completions(response.body_mut().as_reader(), on_delta)
+        } else {
+            stream_json_lines(
+                response.body_mut().as_reader(),
+                true,
+                "OpenAI",
+                openai_delta,
+                Some(openai_thinking_delta),
+                on_delta,
+            )
+        }
     }
 }
 

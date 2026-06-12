@@ -18,7 +18,7 @@ let nextStreamRequestId = 1;
 
 interface CopilotStreamEvent {
   request_id: string;
-  kind: 'text' | 'thinking';
+  kind: 'text' | 'thinking' | 'tool_call';
   delta: string;
 }
 
@@ -71,6 +71,7 @@ export function viewportReadback(params: {
   targetY?: number;
   targetZ?: number;
   playMode?: boolean;
+  editorCamera?: boolean;
   viewMode?: '2d' | '3d';
   entityId?: string;
 }): Promise<ArrayBuffer> {
@@ -85,6 +86,7 @@ export function viewportReadback(params: {
     target_z: params.targetZ ?? 0,
     last_version: params.lastVersion ?? null,
     play_mode: params.playMode ?? false,
+    editor_camera: params.editorCamera ?? false,
     view_mode: params.viewMode ?? '3d',
     entity_id: params.entityId ?? null,
   });

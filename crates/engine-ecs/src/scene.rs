@@ -330,6 +330,55 @@ impl Default for AudioSourceComponentData {
 
 pub use crate::particle::ParticleEmitterComponentData;
 
+/// Serializable skybox component.
+///
+/// When attached to the primary camera's game object, the renderer draws a
+/// skybox before the forward pass. If no `cubemap` asset is assigned, a
+/// procedural vertical gradient is rendered using `zenith_color` and
+/// `horizon_color`.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SkyboxComponentData {
+    /// Optional cubemap texture asset GUID (6-face cube).
+    #[serde(default)]
+    pub cubemap: Option<AssetId>,
+    /// Zenith (top) color for the procedural gradient fallback.
+    #[serde(default = "default_skybox_zenith")]
+    pub zenith_color: [f32; 3],
+    /// Horizon (bottom) color for the procedural gradient fallback.
+    #[serde(default = "default_skybox_horizon")]
+    pub horizon_color: [f32; 3],
+    /// Rotation around the Y axis in degrees.
+    #[serde(default)]
+    pub rotation_degrees: f32,
+    /// Intensity multiplier applied to the final skybox color.
+    #[serde(default = "default_skybox_intensity")]
+    pub intensity: f32,
+}
+
+fn default_skybox_zenith() -> [f32; 3] {
+    [0.15, 0.35, 0.65]
+}
+
+fn default_skybox_horizon() -> [f32; 3] {
+    [0.55, 0.7, 0.85]
+}
+
+fn default_skybox_intensity() -> f32 {
+    1.0
+}
+
+impl Default for SkyboxComponentData {
+    fn default() -> Self {
+        Self {
+            cubemap: None,
+            zenith_color: default_skybox_zenith(),
+            horizon_color: default_skybox_horizon(),
+            rotation_degrees: 0.0,
+            intensity: default_skybox_intensity(),
+        }
+    }
+}
+
 /// Serializable 2D sprite component.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Sprite2DComponentData {
@@ -659,6 +708,8 @@ pub enum ComponentData {
     AudioStreamPlayer2D(AudioStreamPlayer2DComponentData),
     /// Audio stream player 3D component.
     AudioStreamPlayer3D(AudioStreamPlayer3DComponentData),
+    /// Skybox component.
+    Skybox(SkyboxComponentData),
 }
 
 impl ComponentData {
@@ -682,6 +733,7 @@ impl ComponentData {
             Self::SkinnedMeshRenderer(_) => "SkinnedMeshRenderer",
             Self::AudioStreamPlayer2D(_) => "AudioStreamPlayer2D",
             Self::AudioStreamPlayer3D(_) => "AudioStreamPlayer3D",
+            Self::Skybox(_) => "Skybox",
         }
     }
 }

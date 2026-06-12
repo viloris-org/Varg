@@ -171,6 +171,21 @@ pub struct RenderParticle {
     pub age_fraction: f32,
 }
 
+/// Skybox configuration extracted from a scene for rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderSkybox {
+    /// Optional cubemap texture asset label.
+    pub cubemap: Option<String>,
+    /// Zenith (top) color for procedural gradient fallback.
+    pub zenith_color: [f32; 3],
+    /// Horizon (bottom) color for procedural gradient fallback.
+    pub horizon_color: [f32; 3],
+    /// Rotation around the Y axis in degrees.
+    pub rotation_degrees: f32,
+    /// Intensity multiplier.
+    pub intensity: f32,
+}
+
 /// Minimal render queue shared by runtime, editor Scene View, and Game View.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderWorld {
@@ -184,13 +199,18 @@ pub struct RenderWorld {
     pub lights: Vec<RenderLight>,
     /// Queued particle instances.
     pub particles: Vec<RenderParticle>,
+    /// Optional skybox configuration.
+    pub skybox: Option<RenderSkybox>,
 }
 
 impl RenderWorld {
     /// Returns true when there is visible geometry and a camera.
     pub fn is_visible(&self) -> bool {
         self.camera.is_some()
-            && (!self.objects.is_empty() || !self.sprites.is_empty() || !self.particles.is_empty())
+            && (!self.objects.is_empty()
+                || !self.sprites.is_empty()
+                || !self.particles.is_empty()
+                || self.skybox.is_some())
     }
 
     /// Extracts renderable data from a [`Scene`](engine_ecs::Scene).
@@ -200,6 +220,7 @@ impl RenderWorld {
     /// - `MeshRenderer` + transform → [`RenderObject`]
     /// - `Sprite2D` + transform → [`RenderSprite`]
     /// - `Light` → [`RenderLight`]
+    /// - `Skybox` → [`RenderSkybox`] (stored as `self.skybox`)
     ///
     /// Inactive objects and objects without any renderable component are skipped.
     pub fn extract(scene: &engine_ecs::Scene) -> Self {
@@ -308,6 +329,17 @@ impl RenderWorld {
                                     }
                                 }),
                         );
+                    }
+                    engine_ecs::ComponentData::Skybox(skybox) => {
+                        world.skybox = Some(RenderSkybox {
+                            cubemap: skybox
+                                .cubemap
+                                .map(|id| format!("asset:{:016x}", id.as_u128())),
+                            zenith_color: skybox.zenith_color,
+                            horizon_color: skybox.horizon_color,
+                            rotation_degrees: skybox.rotation_degrees,
+                            intensity: skybox.intensity,
+                        });
                     }
                     _ => {}
                 }

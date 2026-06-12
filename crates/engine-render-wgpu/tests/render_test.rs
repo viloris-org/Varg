@@ -59,6 +59,7 @@ fn render_one_frame_with_debug_cube_succeeds() {
         sprites: vec![],
         lights: vec![],
         particles: vec![],
+        skybox: None,
     };
 
     device
