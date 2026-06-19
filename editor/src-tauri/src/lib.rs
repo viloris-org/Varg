@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{image::Image, utils::config::Color, Emitter, Manager, State};
 
+mod game_window;
+
 const APP_WINDOW_ICON: Image<'static> = tauri::include_image!("./icons/128x128.png");
 
 const WINDOW_BACKGROUND: &str = "#181818";
@@ -263,7 +265,7 @@ struct PendingCodexOAuth {
 
 struct PreparedCopilotRequest {
     request: engine_ai::AiRequest,
-    enriched_prompt: String,
+    original_prompt: String,
     provider: String,
     model: String,
     api_key: Option<String>,
@@ -272,17 +274,25 @@ struct PreparedCopilotRequest {
     codex_oauth: Option<engine_ai::providers::CodexOAuthCredentials>,
     mimo_config: Option<engine_editor::MimoConfig>,
     glm_config: Option<engine_editor::GlmConfig>,
+    cached_context: engine_editor::ProjectContext,
 }
 
 struct CompletedCopilotRequest {
-    enriched_prompt: String,
+    original_prompt: String,
     response: Result<String, String>,
     tool_calls: Vec<engine_ai::ToolCall>,
+    cached_context: engine_editor::ProjectContext,
+}
+
+#[derive(Default)]
+struct CopilotRequests {
+    completed: HashMap<String, CompletedCopilotRequest>,
+    cancelled: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Default)]
 struct CopilotRequestState {
-    completed: std::sync::Arc<Mutex<HashMap<String, CompletedCopilotRequest>>>,
+    requests: std::sync::Arc<Mutex<CopilotRequests>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,7 +394,13 @@ pub struct EditorHost {
     pending_codex_oauth: Option<PendingCodexOAuth>,
     /// Active copilot conversation history for multi-turn dialogue.
     copilot_conversation: Vec<engine_ai::ChatMessage>,
+    /// Native game window handle (direct GPU surface rendering).
+    game_window: Option<game_window::GameWindowHandle>,
 }
+
+/// Maximum number of messages to keep in the copilot conversation.
+/// Older messages are evicted in pairs (user+assistant) to maintain context coherence.
+const MAX_COPILOT_CONVERSATION_MESSAGES: usize = 40;
 
 impl EditorHost {
     pub fn new(store: FileEditorStore) -> EngineResult<Self> {
@@ -422,6 +438,7 @@ impl EditorHost {
             codex_oauth: credentials.codex_oauth,
             pending_codex_oauth: None,
             copilot_conversation: Vec::new(),
+            game_window: None,
         };
 
         host.reopen_last_project_if_needed();
@@ -1284,6 +1301,12 @@ fn on_update(entity, dt) {
             params.get("height").and_then(|v| v.as_u64()).unwrap_or(480) as u32,
         );
 
+        tracing::debug!(
+            target: "editor",
+            width, height, play_mode,
+            "render_viewport start"
+        );
+
         // Extract render world from the scene
         let mut world = if play_mode {
             self.tick_play_runtime()?;
@@ -1297,6 +1320,14 @@ fn on_update(entity, dt) {
             };
             extract_render_world(&project.scene)
         };
+
+        tracing::debug!(
+            target: "editor",
+            objects = world.objects.len(),
+            lights = world.lights.len(),
+            has_camera = world.camera.is_some(),
+            "render world extracted"
+        );
 
         // Scene View always uses an editor-controlled camera. Game View keeps
         // the camera extracted from the scene, including Camera2D.
@@ -1433,15 +1464,16 @@ fn on_update(entity, dt) {
 
         // Lazily create the wgpu render device (with proper error handling)
         if self.render_device.is_none() {
+            tracing::info!(target: "engine", width, height, "creating wgpu offscreen device");
             let config = WgpuOffscreenConfig {
                 width: width.max(1),
                 height: height.max(1),
                 format: ImageFormat::Rgba8Srgb,
             };
-            self.render_device =
-                Some(WgpuRenderDevice::new_offscreen(config).map_err(|e| {
-                    EngineError::other(format!("failed to create wgpu device: {e}"))
-                })?);
+            self.render_device = Some(WgpuRenderDevice::new_offscreen(config).map_err(|e| {
+                tracing::error!(target: "engine", error = %e, "wgpu device creation failed");
+                EngineError::other(format!("failed to create wgpu device: {e}"))
+            })?);
         }
         let device = self.render_device.as_mut().unwrap();
 
@@ -1461,13 +1493,21 @@ fn on_update(entity, dt) {
 
         if play_mode {
             // Render to game target, readback from game target
-            device.render_world_offscreen_game(&world)?;
+            if let Err(e) = device.render_world_offscreen_game(&world) {
+                tracing::error!(target: "engine", error = %e, "game render failed");
+                return Err(e);
+            }
             let (w, h, rgba) = device.readback_game_target()?;
+            tracing::debug!(target: "editor", w, h, bytes = rgba.len(), "game readback ok");
             Ok((w, h, rgba))
         } else {
             // Render to default (scene) target
-            device.render_world_offscreen(&world)?;
+            if let Err(e) = device.render_world_offscreen(&world) {
+                tracing::error!(target: "engine", error = %e, "scene render failed");
+                return Err(e);
+            }
             let (w, h, rgba) = device.readback_default_target()?;
+            tracing::debug!(target: "editor", w, h, bytes = rgba.len(), "scene readback ok");
             Ok((w, h, rgba))
         }
     }
@@ -1890,7 +1930,12 @@ fn on_update(entity, dt) {
             prepared.glm_config.as_ref(),
         )?;
         let response = model.chat_stream(prepared.request, on_delta)?;
-        self.finish_copilot_response_with_tools(&prepared.enriched_prompt, &response.content, &response.tool_calls)
+        self.finish_copilot_response_with_tools(
+            &prepared.original_prompt,
+            &response.content,
+            &response.tool_calls,
+            prepared.cached_context,
+        )
     }
 
     fn prepare_copilot_request(&mut self, params: &Value) -> EngineResult<PreparedCopilotRequest> {
@@ -1965,7 +2010,7 @@ fn on_update(entity, dt) {
                 &self.copilot_conversation,
                 thinking_effort,
             ),
-            enriched_prompt,
+            original_prompt: prompt.to_string(),
             provider: provider_str.to_owned(),
             model: self.copilot_settings.model.clone(),
             api_key: self.copilot_settings.api_key.clone(),
@@ -1986,21 +2031,25 @@ fn on_update(entity, dt) {
             } else {
                 None
             },
+            cached_context: session.context,
         })
     }
 
     fn finish_copilot_response_with_tools(
         &mut self,
-        enriched_prompt: &str,
+        original_prompt: &str,
         response: &str,
         tool_calls: &[engine_ai::ToolCall],
+        cached_context: engine_editor::ProjectContext,
     ) -> EngineResult<Value> {
-        let scene = self.scene_clone_for_agent()?;
-        let ctx = self.build_agent_context(scene)?;
-        let mut session = AgentSession::new(ctx)?;
+        let mut session = AgentSession::new(cached_context)?;
 
         let mut plan = if !tool_calls.is_empty() {
-            session.plan_from_tool_calls(tool_calls, response, PermissionPolicy::transactional_write())?
+            session.plan_from_tool_calls(
+                tool_calls,
+                response,
+                PermissionPolicy::transactional_write(),
+            )?
         } else {
             session.plan_from_response(response, PermissionPolicy::transactional_write())?
         };
@@ -2058,7 +2107,7 @@ fn on_update(entity, dt) {
             .collect();
 
         self.copilot_conversation
-            .push(engine_ai::ChatMessage::user(enriched_prompt));
+            .push(engine_ai::ChatMessage::user(original_prompt));
 
         let history_message = if assistant_message.is_empty() {
             let plan_summary: Vec<String> = plan
@@ -2076,6 +2125,11 @@ fn on_update(entity, dt) {
         };
         self.copilot_conversation
             .push(engine_ai::ChatMessage::assistant(history_message));
+
+        // Trim conversation to prevent unbounded growth
+        while self.copilot_conversation.len() > MAX_COPILOT_CONVERSATION_MESSAGES {
+            self.copilot_conversation.remove(0);
+        }
 
         self.last_copilot_plan = Some(plan);
 
@@ -2171,6 +2225,11 @@ fn on_update(entity, dt) {
         );
         self.copilot_conversation
             .push(engine_ai::ChatMessage::assistant(execution_summary));
+
+        // Trim conversation to prevent unbounded growth
+        while self.copilot_conversation.len() > MAX_COPILOT_CONVERSATION_MESSAGES {
+            self.copilot_conversation.remove(0);
+        }
 
         let trace_entries: Vec<serde_json::Value> = outcome
             .trace_entries
@@ -2801,6 +2860,12 @@ fn on_update(entity, dt) {
             "Rigidbody" => ComponentData::Rigidbody(Default::default()),
             "Collider" => ComponentData::Collider(Default::default()),
             "AudioSource" => ComponentData::AudioSource(Default::default()),
+            "AudioListener" => ComponentData::AudioListener(Default::default()),
+            "AcousticMaterial" => ComponentData::AcousticMaterial(Default::default()),
+            "AcousticGeometry" => ComponentData::AcousticGeometry(Default::default()),
+            "AcousticRoom" => ComponentData::AcousticRoom(Default::default()),
+            "AcousticPortal" => ComponentData::AcousticPortal(Default::default()),
+            "AudioZone" => ComponentData::AudioZone(Default::default()),
             "Script" => ComponentData::Script(engine_ecs::ScriptComponentProxy {
                 backend: "rhai".to_owned(),
                 script: String::new(),
@@ -2982,7 +3047,7 @@ fn on_update(entity, dt) {
         project.scene.to_json(project.name())
     }
 
-    fn start_play_runtime(&mut self) -> EngineResult<()> {
+    fn create_play_runtime(&self) -> EngineResult<RuntimeServices> {
         let Some(project) = self.shell.project() else {
             return Err(EngineError::config("no project open"));
         };
@@ -2994,7 +3059,28 @@ fn on_update(entity, dt) {
         let mut runtime =
             headless_services_from_scene(config, project.root.clone(), &project.scene)?;
         runtime.load_project_assets(project.root.join(&project.manifest.asset_root))?;
-        self.play_runtime = Some(runtime);
+        Ok(runtime)
+    }
+
+    fn create_game_runtime_snapshot(&self) -> EngineResult<game_window::GameRuntimeSnapshot> {
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+        let config = EngineConfig::new(
+            project.name().to_owned(),
+            project.root.clone(),
+            RuntimeProfile::RuntimeGame,
+        );
+        Ok(game_window::GameRuntimeSnapshot::new(
+            config,
+            project.root.clone(),
+            project.root.join(&project.manifest.asset_root),
+            project.scene.to_json(project.name())?,
+        ))
+    }
+
+    fn start_play_runtime(&mut self) -> EngineResult<()> {
+        self.play_runtime = Some(self.create_play_runtime()?);
         self.play_last_frame = Some(Instant::now());
         self.play_version = self.play_version.wrapping_add(1);
         Ok(())
@@ -3021,6 +3107,24 @@ fn on_update(entity, dt) {
             self.play_version = self.play_version.wrapping_add(1);
         }
         Ok(())
+    }
+
+    /// Polls events from the native game window and handles close/error.
+    fn poll_game_window(&mut self) {
+        let Some(gw) = self.game_window.as_ref() else {
+            return;
+        };
+
+        for event in gw.poll_events() {
+            match event {
+                game_window::GameEvent::Closed => {
+                    tracing::debug!(target: "editor", "game window hidden");
+                }
+                game_window::GameEvent::Error(msg) => {
+                    tracing::error!(target: "editor", "game window error: {msg}");
+                }
+            }
+        }
     }
 
     /// Forward console entries from the shell's console service to our shared one.
@@ -3168,9 +3272,10 @@ fn start_copilot_plan(
     let prepared = state
         .with_host(|host| host.prepare_copilot_request(&params))
         .map_err(|error| error.to_string())?;
-    let completed = requests.completed.clone();
+    let requests = requests.requests.clone();
     std::thread::spawn(move || {
-        let enriched_prompt = prepared.enriched_prompt.clone();
+        let original_prompt = prepared.original_prompt.clone();
+        let cached_context = prepared.cached_context;
         let result = engine_ai::providers::create_provider(
             &prepared.provider,
             &prepared.model,
@@ -3183,6 +3288,14 @@ fn start_copilot_plan(
         )
         .and_then(|model| {
             model.chat_stream(prepared.request, &mut |delta| {
+                if requests
+                    .lock()
+                    .expect("poisoned lock")
+                    .cancelled
+                    .contains(&request_id)
+                {
+                    return;
+                }
                 let delta_payload = match &delta {
                     engine_ai::AiStreamDelta::ToolCallDelta(tc) => {
                         serde_json::to_string(tc).unwrap_or_default()
@@ -3199,18 +3312,29 @@ fn start_copilot_plan(
                 );
             })
         });
+        let mut request_state = requests.lock().expect("poisoned lock");
+        if request_state.cancelled.remove(&request_id) {
+            drop(request_state);
+            let _ = app.emit(
+                "copilot-stream-complete",
+                serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
         let (content_result, tool_calls) = match result {
             Ok(response) => (Ok(response.content), response.tool_calls),
             Err(e) => (Err(e.to_string()), Vec::new()),
         };
-        completed.lock().expect("poisoned lock").insert(
+        request_state.completed.insert(
             request_id.clone(),
             CompletedCopilotRequest {
-                enriched_prompt,
+                original_prompt,
                 response: content_result,
                 tool_calls,
+                cached_context,
             },
         );
+        drop(request_state);
         let _ = app.emit(
             "copilot-stream-complete",
             serde_json::json!({ "request_id": request_id }),
@@ -3226,17 +3350,37 @@ fn finish_copilot_plan(
     request_id: String,
 ) -> Result<Value, String> {
     let completed = requests
-        .completed
+        .requests
         .lock()
         .expect("poisoned lock")
+        .completed
         .remove(&request_id)
         .ok_or_else(|| "copilot request has not completed".to_owned())?;
     let response = completed.response?;
     state
         .with_host(|host| {
-            host.finish_copilot_response_with_tools(&completed.enriched_prompt, &response, &completed.tool_calls)
+            host.finish_copilot_response_with_tools(
+                &completed.original_prompt,
+                &response,
+                &completed.tool_calls,
+                completed.cached_context,
+            )
         })
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_copilot_plan(
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+) -> Result<(), String> {
+    requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .cancelled
+        .insert(request_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3291,10 +3435,12 @@ fn viewport_readback_raw(
     target_z: f64,
     last_version: Option<u64>,
     play_mode: bool,
+    editor_camera: bool,
     view_mode: String,
     entity_id: Option<String>,
 ) -> Result<Vec<u8>, String> {
     state.with_host(|host| {
+        host.poll_game_window();
         let params = serde_json::json!({
             "width": width,
             "height": height,
@@ -3306,6 +3452,7 @@ fn viewport_readback_raw(
             "target_z": target_z,
             "last_version": last_version,
             "play_mode": play_mode,
+            "editor_camera": editor_camera,
             "view_mode": view_mode,
             "entity_id": entity_id,
         });
@@ -3380,32 +3527,56 @@ fn dirs_config_dir() -> Option<PathBuf> {
     }
 }
 
+fn dirs_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/share"))
+            })
+            .map(|p| p.join("aster"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join("Library/aster"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .or_else(|| std::env::var("APPDATA").ok())
+            .map(|h| PathBuf::from(h).join("aster"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Some(PathBuf::from(".aster-data"))
+    }
+}
+
 // ─── App entry point ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn open_game_view(app: tauri::AppHandle) -> Result<(), String> {
-    // Check if Game View window already exists
-    if let Some(window) = app.get_webview_window("game-view") {
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
+fn open_game_view(_app: tauri::AppHandle, state: State<'_, EditorHostState>) -> Result<(), String> {
+    state.with_host(|host| {
+        let snapshot = host
+            .create_game_runtime_snapshot()
+            .map_err(|e| e.to_string())?;
 
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "game-view",
-        tauri::WebviewUrl::App("index.html#/game-view".into()),
-    )
-    .icon(APP_WINDOW_ICON.clone())
-    .map_err(|e| e.to_string())?
-    .title("Game View")
-    .inner_size(1280.0, 720.0)
-    .min_inner_size(640.0, 360.0)
-    .background_color(Color(24, 24, 24, 255))
-    .decorations(true)
-    .build()
-    .map_err(|e| e.to_string())?;
+        if let Some(game_window) = host.game_window.as_ref() {
+            game_window.restart(snapshot)?;
+            return game_window.show();
+        }
 
-    Ok(())
+        let handle = game_window::spawn_game_window("Game View".to_string(), 1280, 720, snapshot);
+        host.game_window = Some(handle);
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -3477,6 +3648,40 @@ fn apply_pre_gtk_desktop_environment() {
 fn apply_pre_gtk_desktop_environment() {}
 
 pub fn run() {
+    // Initialize layered logging: engine / game / editor targets
+    // Logs go to: ~/.local/share/aster-editor/logs/ (Linux)
+    //             ~/Library/Logs/aster-editor/        (macOS)
+    //             %APPDATA%/aster-editor/logs/        (Windows)
+    // RUST_LOG=engine=debug,game=info,editor=warn (default: info for all)
+    let log_dir = dirs_data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("aster-editor")
+        .join("logs");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "aster.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    // Keep _guard alive for the entire process lifetime so logs are flushed.
+    // We intentionally leak it since run() never returns.
+    std::mem::forget(_guard);
+
+    use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Registry};
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = fmt::layer()
+        .with_target(true)
+        .compact()
+        .with_writer(std::io::stderr);
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .compact()
+        .with_ansi(false)
+        .with_writer(non_blocking);
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(file_layer);
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+
+    tracing::info!(target: "editor", "logging initialized → {:?}", log_dir);
+
     apply_pre_gtk_desktop_environment();
 
     let config_dir = dirs_config_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -3498,6 +3703,7 @@ pub fn run() {
             rpc,
             start_copilot_plan,
             finish_copilot_plan,
+            cancel_copilot_plan,
             open_game_view,
             select_project_location,
             viewport_readback_raw,

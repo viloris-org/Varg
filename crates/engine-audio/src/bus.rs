@@ -126,6 +126,25 @@ impl AudioBusGraph {
             bus.solo = solo;
         }
     }
+
+    /// Returns the effective linear gain of every bus.
+    pub fn effective_gains(&self) -> Vec<(String, f32)> {
+        let mut gains = Vec::new();
+        collect_effective_gains(&self.root, 1.0, &mut gains);
+        gains
+    }
+}
+
+fn collect_effective_gains(bus: &AudioBus, parent_gain: f32, output: &mut Vec<(String, f32)>) {
+    let gain = if bus.muted {
+        0.0
+    } else {
+        parent_gain * bus.volume
+    };
+    output.push((bus.name.clone(), gain));
+    for child in &bus.children {
+        collect_effective_gains(child, gain, output);
+    }
 }
 
 fn find_bus<'a>(bus: &'a AudioBus, name: &str) -> Option<&'a AudioBus> {
@@ -181,9 +200,7 @@ fn process_bus(
     has_solo: bool,
     solo_found: bool,
 ) {
-    let effective_volume = if bus.muted {
-        0.0
-    } else if has_solo && !bus.solo && !solo_found {
+    let effective_volume = if bus.muted || (has_solo && !bus.solo && !solo_found) {
         0.0
     } else {
         bus.volume * parent_volume

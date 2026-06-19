@@ -235,10 +235,10 @@ function ContextBar({ projectName, selectedEntity, sceneObjectCount, onSettingsC
         <span className="ai-context-tag ai-context-turns">{conversationTurns} {conversationTurns !== 1 ? t('label_turns') : t('label_turn')}</span>
       )}
       <div className="ai-context-actions">
-        <button className="ai-context-settings-btn" onClick={onNewChat} title={t('ai_new_chat')}>
+        <button className="ai-context-settings-btn" onClick={onNewChat} title={t('ai_new_chat')} aria-label={t('ai_new_chat')}>
           <IconRefresh />
         </button>
-        <button className="ai-context-settings-btn" onClick={onSettingsClick} title={t('ai_settings')}>
+        <button className="ai-context-settings-btn" onClick={onSettingsClick} title={t('ai_settings')} aria-label={t('ai_settings')}>
           <IconSettings />
         </button>
       </div>
@@ -299,12 +299,13 @@ function ToolCallIndicator({ toolCalls }: { toolCalls: ActiveToolCall[] }) {
                   const args = JSON.parse(tc.argumentsPreview);
                   const keys = Object.keys(args);
                   if (keys.length === 0) return null;
+                  const fullJson = JSON.stringify(args, null, 2);
                   const preview = keys.map(k => {
                     const v = args[k];
                     const display = typeof v === 'string' ? `"${v.slice(0, 30)}${v.length > 30 ? '...' : ''}"` : JSON.stringify(v);
                     return `${k}: ${display}`;
                   }).join(', ');
-                  return <span className="ai-tool-call-args-text">({preview})</span>;
+                  return <span className="ai-tool-call-args-text" title={fullJson}>({preview})</span>;
                 } catch {
                   return <span className="ai-tool-call-args-text">({t('tool_parsing')})</span>;
                 }
@@ -354,14 +355,23 @@ function MessageBubble({ msg }: { msg: AiMessage }) {
                   const codeString = String(children).replace(/\n$/, '');
                   if (match) {
                     return (
-                      <SyntaxHighlighter
-                        style={vscDarkPlus}
-                        language={match[1]}
-                        PreTag="div"
-                        customStyle={{ margin: '0.5em 0', borderRadius: '6px', fontSize: '0.85em' }}
-                      >
-                        {codeString}
-                      </SyntaxHighlighter>
+                      <div className="ai-code-block">
+                        <button
+                          className="ai-code-copy-btn"
+                          onClick={() => navigator.clipboard.writeText(codeString)}
+                          title={t('btn_copy')}
+                        >
+                          {t('btn_copy')}
+                        </button>
+                        <SyntaxHighlighter
+                          style={vscDarkPlus}
+                          language={match[1]}
+                          PreTag="div"
+                          customStyle={{ margin: '0', borderRadius: '6px', fontSize: '0.85em' }}
+                        >
+                          {codeString}
+                        </SyntaxHighlighter>
+                      </div>
                     );
                   }
                   return <code className={className} {...props}>{children}</code>;
@@ -555,8 +565,6 @@ export interface AiWorkspaceState {
   denied: Set<number>;
 }
 
-let nextMsgId = 1;
-
 export default function AiPanel({
   projectName,
   selectedEntity,
@@ -574,7 +582,12 @@ export default function AiPanel({
 }: AiPanelProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<AiMessage[]>([]);
+  const [messages, setMessages] = useState<AiMessage[]>(() => {
+    try {
+      const saved = localStorage.getItem('aster.aiMessages');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [status, setStatus] = useState<AiStatus>('idle');
   const [plan, setPlan] = useState<CopilotPlan | null>(null);
   const [approved, setApproved] = useState<Set<number>>(new Set());
@@ -597,13 +610,43 @@ export default function AiPanel({
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const nextMsgIdRef = useRef(
+    messages.reduce((next, message) => {
+      const numericId = Number.parseInt(message.id, 10);
+      return Number.isFinite(numericId) ? Math.max(next, numericId + 1) : next;
+    }, 1),
+  );
+  const isUserScrollingRef = useRef(false);
+  const lastPromptRef = useRef<string | null>(null);
+  const cancelRef = useRef<(() => void) | null>(null);
 
-  // Auto-scroll
+  // Auto-scroll — only if user is at the bottom
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (atBottom || !isUserScrollingRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
+
+  // Persist messages to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('aster.aiMessages', JSON.stringify(messages));
+    } catch { /* quota exceeded */ }
+  }, [messages]);
+
+  // Track user scroll position
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      isUserScrollingRef.current = el.scrollHeight - el.scrollTop - el.clientHeight > 120;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -620,7 +663,7 @@ export default function AiPanel({
 
   const addMessage = useCallback((role: AiMessage['role'], content: string, cards?: AiCard[]) => {
     setMessages(prev => [...prev, {
-      id: String(nextMsgId++),
+      id: String(nextMsgIdRef.current++),
       role,
       content,
       cards,
@@ -636,10 +679,12 @@ export default function AiPanel({
   // ── New Chat (clear conversation history) ──
 
   const handleNewChat = useCallback(async () => {
+    if (messages.length > 0 && !window.confirm(t('confirm_new_chat'))) return;
     try {
       await rpc('copilot/clear_conversation');
     } catch { /* ignore */ }
     setMessages([]);
+    localStorage.removeItem('aster.aiMessages');
     setPlan(null);
     setApproved(new Set());
     setDenied(new Set());
@@ -653,7 +698,7 @@ export default function AiPanel({
     setRequestActive(false);
     setWorkspaceView('chat');
     inputRef.current?.focus();
-  }, [updateQueuedPrompts]);
+  }, [updateQueuedPrompts, messages.length, t]);
 
   // ── Submit ──
 
@@ -665,6 +710,7 @@ export default function AiPanel({
     if (!prompt.trim() || activeRequestRef.current) return;
 
     if (!continuation) continuationDepthRef.current = 0;
+    if (!continuation) lastPromptRef.current = prompt;
 
     activeRequestRef.current = true;
     setRequestActive(true);
@@ -684,7 +730,7 @@ export default function AiPanel({
     setDenied(new Set());
     setCompletedBundle(null);
     setWorkspaceView('chat');
-    const streamingMessageId = String(nextMsgId++);
+    const streamingMessageId = String(nextMsgIdRef.current++);
     setMessages(prev => [...prev, {
       id: streamingMessageId,
       role: 'assistant',
@@ -705,7 +751,7 @@ export default function AiPanel({
         planParams.thinking_effort = thinkingEffort;
       }
 
-      const result = await streamCopilotPlan<CopilotPlan>(planParams, (delta, kind) => {
+      const streamHandle = streamCopilotPlan<CopilotPlan>(planParams, (delta, kind) => {
         if (interruptRequestedRef.current) return;
         setMessages(prev => prev.map(message => {
           if (message.id !== streamingMessageId) return message;
@@ -736,8 +782,8 @@ export default function AiPanel({
               }
               return { ...message, activeToolCalls: toolCalls };
             } catch {
-              // If parsing fails, treat as text
-              return { ...message, content: message.content + delta };
+              // Partial JSON fragments are expected during streaming; skip silently
+              return message;
             }
           }
           return {
@@ -746,6 +792,9 @@ export default function AiPanel({
           };
         }));
       });
+      // Store cancel function for interrupt
+      cancelRef.current = streamHandle.cancel;
+      const result = await streamHandle.promise;
       if (interruptRequestedRef.current) {
         setMessages(prev => prev.map(message => message.id === streamingMessageId
           ? { ...message, content: message.content || t('msg_interrupted'), interrupted: true }
@@ -776,7 +825,8 @@ export default function AiPanel({
       setMessages(prev => prev.map(message => message.id === streamingMessageId
         ? {
             ...message,
-            content: finalContent,
+            content: message.content || finalContent,
+            activeToolCalls: message.activeToolCalls?.map(tc => ({ ...tc, complete: true })),
             cards: result.operations.length > 0
               ? [{ type: 'plan', data: result }]
               : undefined,
@@ -797,15 +847,25 @@ export default function AiPanel({
         return;
       }
       const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
+      const displayMsg = msg.includes('api_key') || msg.includes('API key') || msg.includes('401')
+        ? t('error_api_key')
+        : msg.includes('rate_limit') || msg.includes('429')
+          ? t('error_rate_limit')
+          : msg.includes('timeout') || msg.includes('timed out')
+            ? t('error_timeout')
+            : msg.includes('network') || msg.includes('fetch')
+              ? t('error_network')
+              : msg;
       setStatus('error');
       setMessages(prev => prev.map(message => message.id === streamingMessageId
-        ? { ...message, content: t('error_generic'), cards: [{ type: 'error', data: msg }] }
+        ? { ...message, content: displayMsg, cards: [{ type: 'error', data: msg }] }
         : message));
     } finally {
       activeRequestRef.current = false;
       setRequestActive(false);
       interruptRequestedRef.current = false;
       setInterruptRequested(false);
+      cancelRef.current = null;
     }
   }, [entityDetails, addMessage, sessionWritesAllowed, thinkingEffort]);
 
@@ -818,7 +878,7 @@ export default function AiPanel({
       return;
     }
 
-    const id = String(nextMsgId++);
+    const id = String(nextMsgIdRef.current++);
     setMessages(prev => [...prev, {
       id,
       role: 'user',
@@ -835,6 +895,8 @@ export default function AiPanel({
     interruptRequestedRef.current = true;
     setInterruptRequested(true);
     setPendingContinuation(false);
+    cancelRef.current?.();
+    cancelRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -975,6 +1037,11 @@ export default function AiPanel({
     const val = e.target.value;
     setInput(val);
 
+    // Auto-resize textarea
+    const ta = e.target;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+
     // Detect @ mention trigger
     const cursor = e.target.selectionStart ?? val.length;
     const beforeCursor = val.slice(0, cursor);
@@ -1000,6 +1067,14 @@ export default function AiPanel({
     setMentionQuery(null);
     inputRef.current?.focus();
   }, [input]);
+
+  const discardProposal = useCallback(() => {
+    setPlan(null);
+    setApproved(new Set());
+    setDenied(new Set());
+    setStatus('idle');
+    setWorkspaceView('chat');
+  }, []);
 
   // ── Keyboard ──
 
@@ -1027,11 +1102,20 @@ export default function AiPanel({
       }
     }
 
+    if (e.key === 'Escape') {
+      if (activeRequestRef.current) {
+        requestInterrupt();
+      } else if (plan && status === 'ready') {
+        discardProposal();
+      }
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       queueOrSubmitPrompt(input);
     }
-  }, [input, queueOrSubmitPrompt, mentionQuery, mentionMatches, mentionIndex, insertMention]);
+  }, [input, queueOrSubmitPrompt, mentionQuery, mentionMatches, mentionIndex, insertMention, plan, status, requestInterrupt, discardProposal]);
 
   // ── Render ──
 
@@ -1055,14 +1139,6 @@ export default function AiPanel({
     complete: t('status_task_complete'),
     error: t('status_action_required'),
   };
-
-  const discardProposal = useCallback(() => {
-    setPlan(null);
-    setApproved(new Set());
-    setDenied(new Set());
-    setStatus('idle');
-    setWorkspaceView('chat');
-  }, []);
 
   useEffect(() => {
     onWorkspaceStateChange?.({
@@ -1112,7 +1188,7 @@ export default function AiPanel({
       <div
         ref={scrollRef}
         className={`ai-messages ${!chatOnly && workspaceView !== 'chat' ? 'ai-workspace-detail' : ''}`}
-        aria-live={status === 'thinking' || status === 'executing' ? 'polite' : undefined}
+        aria-live="polite"
       >
         {!chatOnly && workspaceView === 'tasks' && (
           <div className="ai-task-workspace">
@@ -1176,7 +1252,7 @@ export default function AiPanel({
                 <span className={`ai-change-kind ${operation.permission_kind}`}>
                   {operation.permission_kind.toUpperCase()}
                 </span>
-                <span className="ai-change-description">{operation.preview}</span>
+                <span className="ai-change-description" title={operation.preview}>{operation.preview}</span>
                 <div className="ai-permission-actions">
                   {operation.permission_kind === 'read' ? (
                     <span className="ai-permission-state allowed">{t('op_allowed_auto')}</span>
@@ -1254,6 +1330,22 @@ export default function AiPanel({
             <span>{t('status_thinking')}</span>
           </div>
         )}
+        {status === 'error' && lastPromptRef.current && (
+          <div className="ai-retry-bar">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                const p = lastPromptRef.current;
+                if (p) {
+                  setStatus('idle');
+                  submitPrompt(p);
+                }
+              }}
+            >
+              {t('btn_retry')}
+            </button>
+          </div>
+        )}
         </>}
       </div>
       </PlanApprovalContext.Provider>
@@ -1264,6 +1356,8 @@ export default function AiPanel({
           op => !approved.has(op.index) && !denied.has(op.index) && op.permission_kind !== 'read'
         );
         const approveAll = () => {
+          const count = plan!.operations.filter(op => op.permission_kind !== 'read').length;
+          if (!window.confirm(t('confirm_approve_all').replace('{count}', String(count)))) return;
           setApproved(current => {
             const next = new Set(current);
             plan!.operations
@@ -1337,10 +1431,12 @@ export default function AiPanel({
 
         {/* @ Mention autocomplete dropdown */}
         {mentionQuery !== null && mentionMatches.length > 0 && (
-          <div className="ai-mention-dropdown">
+          <div className="ai-mention-dropdown" role="listbox" aria-label={t('mention_suggestions')}>
             {mentionMatches.map((obj, i) => (
               <button
                 key={obj.id}
+                role="option"
+                aria-selected={i === mentionIndex}
                 className={`ai-mention-item ${i === mentionIndex ? 'active' : ''}`}
                 onMouseDown={(e) => { e.preventDefault(); insertMention(obj); }}
               >
@@ -1369,6 +1465,7 @@ export default function AiPanel({
             className="ai-send-btn"
             onClick={() => queueOrSubmitPrompt(input)}
             disabled={!input.trim()}
+            aria-label={t('btn_send')}
           >
             <IconSend />
           </button>

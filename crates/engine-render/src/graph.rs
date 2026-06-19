@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use engine_core::{EngineError, EngineResult};
+
 use crate::resource::{BufferHandle, ImageHandle};
 
 /// Stable pass identifier.
@@ -104,56 +106,70 @@ impl RenderGraphBuilder {
     }
 
     /// Compiles the graph via topological sort.
+    ///
+    /// Panics when the graph contains a cycle. Use [`Self::try_build`] when
+    /// constructing graphs from dynamic input.
     pub fn build(self) -> RenderGraph {
-        let sorted = topological_sort(&self.passes, &self.edges);
-        RenderGraph { passes: sorted }
+        self.try_build()
+            .expect("render graph must not contain dependency cycles")
+    }
+
+    /// Compiles the graph and reports dependency cycles.
+    pub fn try_build(self) -> EngineResult<RenderGraph> {
+        let sorted = topological_sort(&self.passes, &self.edges)?;
+        Ok(RenderGraph { passes: sorted })
+    }
+}
+
+fn add_edge(
+    before: PassId,
+    after: PassId,
+    adj: &mut HashMap<PassId, Vec<PassId>>,
+    in_degree: &mut HashMap<PassId, usize>,
+) {
+    let neighbors = adj.entry(before).or_default();
+    if !neighbors.contains(&after) {
+        neighbors.push(after);
+        *in_degree.entry(after).or_insert(0) += 1;
     }
 }
 
 /// Kahn's algorithm topological sort with cycle detection.
-///
-/// Derives implicit write→read edges from resource accesses in O(n) time,
-/// then topologically sorts. Returns `Err` if the graph contains a cycle.
-fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<RenderPass> {
+fn topological_sort(
+    passes: &[RenderPass],
+    edges: &[(PassId, PassId)],
+) -> EngineResult<Vec<RenderPass>> {
     let mut in_degree: HashMap<PassId, usize> = passes.iter().map(|p| (p.id, 0)).collect();
     let mut adj: HashMap<PassId, Vec<PassId>> = passes.iter().map(|p| (p.id, vec![])).collect();
 
     for &(before, after) in edges {
-        adj.entry(before).or_default().push(after);
-        *in_degree.entry(after).or_insert(0) += 1;
+        if !in_degree.contains_key(&before) || !in_degree.contains_key(&after) {
+            return Err(EngineError::other(
+                "render graph edge references unknown pass",
+            ));
+        }
+        add_edge(before, after, &mut adj, &mut in_degree);
     }
 
-    // Build resource-to-writer-pass adjacency map, then derive implicit edges in O(n).
+    // Track the most recent writer so accesses form ordered dependencies
+    // instead of all readers depending on an arbitrary final writer.
     let mut image_writers: HashMap<ImageHandle, PassId> = HashMap::new();
     let mut buffer_writers: HashMap<BufferHandle, PassId> = HashMap::new();
     for pass in passes {
         for &(img, access) in &pass.image_accesses {
+            if let Some(&writer) = image_writers.get(&img) {
+                add_edge(writer, pass.id, &mut adj, &mut in_degree);
+            }
             if matches!(access, ResourceAccess::Write | ResourceAccess::ReadWrite) {
                 image_writers.insert(img, pass.id);
             }
         }
         for &(buf, access) in &pass.buffer_accesses {
+            if let Some(&writer) = buffer_writers.get(&buf) {
+                add_edge(writer, pass.id, &mut adj, &mut in_degree);
+            }
             if matches!(access, ResourceAccess::Write | ResourceAccess::ReadWrite) {
                 buffer_writers.insert(buf, pass.id);
-            }
-        }
-    }
-
-    for pass in passes {
-        for &(img, _) in &pass.image_accesses {
-            if let Some(&writer) = image_writers.get(&img) {
-                if writer != pass.id && !edges.contains(&(writer, pass.id)) {
-                    adj.entry(writer).or_default().push(pass.id);
-                    *in_degree.entry(pass.id).or_insert(0) += 1;
-                }
-            }
-        }
-        for &(buf, _) in &pass.buffer_accesses {
-            if let Some(&writer) = buffer_writers.get(&buf) {
-                if writer != pass.id && !edges.contains(&(writer, pass.id)) {
-                    adj.entry(writer).or_default().push(pass.id);
-                    *in_degree.entry(pass.id).or_insert(0) += 1;
-                }
             }
         }
     }
@@ -163,7 +179,7 @@ fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<Re
         .filter(|(_, &d)| d == 0)
         .map(|(&id, _)| id)
         .collect();
-    queue.sort_by_key(|id| id.0); // deterministic
+    queue.sort_by_key(|id| id.0);
 
     let pass_map: HashMap<PassId, &RenderPass> = passes.iter().map(|p| (p.id, p)).collect();
     let mut result = Vec::with_capacity(passes.len());
@@ -175,8 +191,10 @@ fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<Re
         }
         if let Some(neighbors) = adj.get(&id) {
             for &next in neighbors {
-                let deg = in_degree.entry(next).or_insert(0);
-                *deg = deg.saturating_sub(1);
+                let deg = in_degree
+                    .get_mut(&next)
+                    .expect("validated render graph pass id");
+                *deg -= 1;
                 if *deg == 0 {
                     queue.push(next);
                     queue.sort_by_key(|id| id.0);
@@ -185,15 +203,13 @@ fn topological_sort(passes: &[RenderPass], edges: &[(PassId, PassId)]) -> Vec<Re
         }
     }
 
-    // Detect cycles: if not all passes were reached, there is a cycle.
-    // Append any remaining isolated passes (no edges at all).
-    for pass in passes {
-        if !result.iter().any(|p| p.id == pass.id) {
-            result.push(pass.clone());
-        }
+    if result.len() != passes.len() {
+        return Err(EngineError::other(
+            "render graph contains a dependency cycle",
+        ));
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -227,5 +243,16 @@ mod tests {
         assert_eq!(graph.passes[0].name, "shadow");
         assert_eq!(graph.passes[1].name, "forward");
         assert_eq!(graph.passes[2].name, "post");
+    }
+
+    #[test]
+    fn dependency_cycle_is_rejected() {
+        let mut builder = RenderGraphBuilder::new();
+        let a = builder.add_pass("a");
+        let b = builder.add_pass("b");
+        builder.order_before(a, b);
+        builder.order_before(b, a);
+
+        assert!(builder.try_build().is_err());
     }
 }

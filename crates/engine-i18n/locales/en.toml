@@ -746,3 +746,21 @@ settings_max_tokens_desc = "Maximum response length"
 settings_saving = "Saving..."
 settings_saved = "Saved!"
 settings_save_ai = "Save AI Settings"
+
+# Confirmations
+confirm_new_chat = "Start a new chat? This will clear the current conversation."
+confirm_approve_all = "Approve all {count} pending operations? This may modify your project."
+
+# Error messages
+error_api_key = "API key is invalid or missing. Please check your AI provider settings."
+error_rate_limit = "Rate limit exceeded. Please wait a moment and try again."
+error_timeout = "Request timed out. The model provider may be experiencing issues."
+error_network = "Network error. Please check your internet connection."
+
+# Buttons
+btn_send = "Send"
+btn_copy = "Copy"
+btn_retry = "Retry"
+
+# Mention
+mention_suggestions = "Entity suggestions"

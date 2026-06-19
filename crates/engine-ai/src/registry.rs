@@ -114,12 +114,21 @@ pub struct MimoEndpoints;
 
 impl MimoEndpoints {
     /// Returns the base URL for MiMo based on billing mode and region.
-    pub fn base_url(billing: &engine_editor::BillingMode, region: &engine_editor::MimoRegion) -> &'static str {
+    pub fn base_url(
+        billing: &engine_editor::BillingMode,
+        region: &engine_editor::MimoRegion,
+    ) -> &'static str {
         use engine_editor::{BillingMode, MimoRegion};
         match (billing, region) {
-            (BillingMode::Subscription, MimoRegion::China) => "https://token-plan-cn.xiaomimimo.com/v1",
-            (BillingMode::Subscription, MimoRegion::Singapore) => "https://token-plan-sgp.xiaomimimo.com/v1",
-            (BillingMode::Subscription, MimoRegion::Europe) => "https://token-plan-ams.xiaomimimo.com/v1",
+            (BillingMode::Subscription, MimoRegion::China) => {
+                "https://token-plan-cn.xiaomimimo.com/v1"
+            }
+            (BillingMode::Subscription, MimoRegion::Singapore) => {
+                "https://token-plan-sgp.xiaomimimo.com/v1"
+            }
+            (BillingMode::Subscription, MimoRegion::Europe) => {
+                "https://token-plan-ams.xiaomimimo.com/v1"
+            }
             (BillingMode::Api, _) => "https://api.xiaomimimo.com/v1",
         }
     }
@@ -130,18 +139,17 @@ pub struct GlmEndpoints;
 
 impl GlmEndpoints {
     /// Returns the base URL for GLM based on billing mode and region.
-    pub fn base_url(billing: &engine_editor::BillingMode, region: &engine_editor::GlmRegion) -> &'static str {
+    pub fn base_url(
+        billing: &engine_editor::BillingMode,
+        region: &engine_editor::GlmRegion,
+    ) -> &'static str {
         use engine_editor::{BillingMode, GlmRegion};
         match (billing, region) {
             (BillingMode::Subscription, GlmRegion::Bigmodel) => {
                 "https://open.bigmodel.cn/api/coding/paas/v4"
             }
-            (BillingMode::Subscription, GlmRegion::Zai) => {
-                "https://api.z.ai/api/coding/paas/v4"
-            }
-            (BillingMode::Api, GlmRegion::Bigmodel) => {
-                "https://open.bigmodel.cn/api/paas/v4"
-            }
+            (BillingMode::Subscription, GlmRegion::Zai) => "https://api.z.ai/api/coding/paas/v4",
+            (BillingMode::Api, GlmRegion::Bigmodel) => "https://open.bigmodel.cn/api/paas/v4",
             (BillingMode::Api, GlmRegion::Zai) => "https://api.z.ai/api/paas/v4",
         }
     }
@@ -869,9 +877,7 @@ fn detect_openai_compatible_typed(
         .endpoint
         .as_deref()
         .or_else(|| provider.default_endpoint())
-        .ok_or_else(|| {
-            EngineError::config("Endpoint URL is required for model detection")
-        })?;
+        .ok_or_else(|| EngineError::config("Endpoint URL is required for model detection"))?;
 
     let url = format!("{}/models", endpoint.trim_end_matches('/'));
     let mut request = ureq::get(&url);
@@ -901,10 +907,7 @@ fn detect_openai_compatible_typed(
                     let id = entry["id"].as_str()?;
                     Some(ModelInfo {
                         id: id.to_owned(),
-                        display_name: entry["display_name"]
-                            .as_str()
-                            .unwrap_or(id)
-                            .to_owned(),
+                        display_name: entry["display_name"].as_str().unwrap_or(id).to_owned(),
                         provider: provider.clone(),
                         context_window: 128_000,
                         default_max_tokens: 4_096,
@@ -925,8 +928,8 @@ fn detect_openai_compatible_typed(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_available_models, is_openai_chat_model, GlmEndpoints, MimoEndpoints,
-        ProviderConfig, ProviderKind,
+        detect_available_models, is_openai_chat_model, GlmEndpoints, MimoEndpoints, ProviderConfig,
+        ProviderKind,
     };
     use engine_editor::{BillingMode, GlmRegion, MimoRegion};
     use std::io::Write;

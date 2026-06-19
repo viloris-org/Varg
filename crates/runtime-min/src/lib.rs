@@ -22,15 +22,15 @@ use engine_assets::{
 };
 #[cfg(feature = "audio")]
 use engine_audio::{
-    AudioContext, AudioListenerDesc, AudioSourceDesc, ClipHandle, MemoryAudioBackend, SourceHandle,
+    solve_direct_propagation, AcousticAabb, AcousticMaterial, AcousticSceneSnapshot,
+    AcousticSolverConfig, AcousticSourceSample, AttenuationModel, AudioContext, AudioListenerDesc,
+    AudioObjectTransform, AudioSourceDesc, AudioSourceShape, ClipHandle, HrtfQuality,
+    MemoryAudioBackend, OutputMode, SourceHandle, SpatialMode, VirtualizationPolicy, VoiceCategory,
 };
 use engine_core::{logging, EngineConfig, EngineError, EngineResult, FrameCounter, TimeState};
 #[cfg(feature = "script-python")]
 use engine_ecs::ScriptComponentProxy;
-use engine_ecs::{
-    CameraComponentData, CameraRole, ComponentData, MeshRendererComponentData, ProjectManifest,
-    Scene,
-};
+use engine_ecs::{AudioSourceComponentData, ComponentData, ProjectManifest, Scene};
 #[cfg(feature = "physics")]
 use engine_physics::{
     BodyHandle, BodyKind, CharacterControllerDesc, ColliderDesc, ColliderShape, ColliderShapeRef,
@@ -38,8 +38,9 @@ use engine_physics::{
 };
 use engine_platform::{ActionMap, InputState};
 use engine_render::{
-    HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage, RenderDevice,
-    RenderFrame, RenderGraph, RenderGraphBuilder, RenderWorld,
+    HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage, PresentStrategy,
+    RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder, RenderPerformanceConfig,
+    RenderWorld,
 };
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
@@ -114,6 +115,8 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     audio_bindings: Vec<AudioBinding>,
     #[cfg(feature = "audio")]
     audio_clips: HashMap<engine_core::AssetId, ClipHandle>,
+    #[cfg(feature = "audio")]
+    audio_listener_position: Option<engine_core::math::Vec3>,
     #[cfg(feature = "physics")]
     physics_bindings: Vec<PhysicsBinding>,
 }
@@ -131,6 +134,22 @@ pub struct RuntimeStats {
     pub resource_count: usize,
     /// Number of fixed physics steps run this frame.
     pub physics_steps: u32,
+    /// CPU time spent preparing and submitting the render frame.
+    pub render_cpu_ms: f32,
+    /// Native output dimensions.
+    pub output_size: (u32, u32),
+    /// Internal rendering dimensions after dynamic resolution.
+    pub internal_render_size: (u32, u32),
+    /// Active internal linear rendering scale.
+    pub render_scale: f32,
+    /// Number of logical audio sources.
+    pub audio_sources: u32,
+    /// Number of physical voices rendered in the latest audio block.
+    pub audio_physical_voices: u32,
+    /// Number of virtualized voices.
+    pub audio_virtual_voices: u32,
+    /// Number of audio backend underruns or stream errors.
+    pub audio_underruns: u64,
 }
 
 /// Structured runtime diagnostic entry.
@@ -160,6 +179,7 @@ struct PhysicsBinding {
 struct AudioBinding {
     object: engine_core::EntityId,
     source: SourceHandle,
+    last_position: engine_core::math::Vec3,
 }
 
 #[cfg(feature = "script-python")]
@@ -269,8 +289,24 @@ impl<R: RenderDevice> RuntimeServices<R> {
             audio_bindings: Vec::new(),
             #[cfg(feature = "audio")]
             audio_clips: HashMap::new(),
+            #[cfg(feature = "audio")]
+            audio_listener_position: None,
             #[cfg(feature = "physics")]
             physics_bindings: Vec::new(),
+        }
+    }
+
+    #[cfg(all(feature = "audio", feature = "runtime-game"))]
+    fn enable_default_audio_output(&mut self) {
+        match AudioContext::device_default() {
+            Ok(audio) => self.audio = audio,
+            Err(error) => self.diagnostics.push(RuntimeDiagnostic {
+                source: "audio".to_string(),
+                level: "warning".to_string(),
+                message: format!("default audio output unavailable; using memory backend: {error}"),
+                file: None,
+                line: None,
+            }),
         }
     }
 
@@ -385,6 +421,8 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.renderer
             .submit_render_world(&self.render_world, frame)?;
         self.renderer.execute_graph(&self.render_graph, frame)?;
+        self.renderer.record_frame_time(dt * 1000.0);
+        let render_metrics = self.renderer.performance_metrics();
 
         // ── deferred_destroy ───────────────────────────────────────────
         self.renderer
@@ -397,6 +435,13 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.stats.resource_count = self.render_world.objects.len()
             + self.render_world.lights.len()
             + usize::from(self.render_world.camera.is_some());
+        self.stats.render_cpu_ms = render_metrics.render_cpu_ms;
+        self.stats.output_size = (render_metrics.output_width, render_metrics.output_height);
+        self.stats.internal_render_size = (
+            render_metrics.internal_width,
+            render_metrics.internal_height,
+        );
+        self.stats.render_scale = render_metrics.render_scale;
         self.frame_counter.advance();
         Ok(())
     }
@@ -1045,11 +1090,17 @@ impl<R: RenderDevice> RuntimeServices<R> {
         name: &str,
         bytes: &[u8],
     ) -> EngineResult<ClipHandle> {
-        let (samples, channels, sample_rate) = engine_audio::decode_audio_bytes(name, bytes)?;
-        let clip = self
-            .audio
-            .backend_mut()
-            .load_clip(name, &samples, channels, sample_rate)?;
+        const STREAMING_THRESHOLD_BYTES: usize = 1024 * 1024;
+        let clip = if bytes.len() >= STREAMING_THRESHOLD_BYTES {
+            self.audio
+                .backend_mut()
+                .load_streamed_clip(name, std::sync::Arc::from(bytes))?
+        } else {
+            let (samples, channels, sample_rate) = engine_audio::decode_audio_bytes(name, bytes)?;
+            self.audio
+                .backend_mut()
+                .load_clip(name, &samples, channels, sample_rate)?
+        };
         self.audio_clips.insert(asset, clip);
         Ok(clip)
     }
@@ -1095,15 +1146,26 @@ impl<R: RenderDevice> RuntimeServices<R> {
             let source = self.audio.backend_mut().spawn_source(&AudioSourceDesc {
                 clip,
                 volume: audio_source.volume,
-                pitch: 1.0,
+                pitch: audio_source.pitch,
                 looping: audio_source.looping,
                 position: Some(transform.translation),
                 auto_play: audio_source.play_on_start,
-                bus: "Master".to_string(),
+                bus: audio_source.bus.clone(),
+                spatial_mode: parse_spatial_mode(&audio_source.spatial_mode),
+                shape: parse_audio_source_shape(audio_source),
+                attenuation: parse_attenuation_model(audio_source),
+                priority: audio_source.priority,
+                virtualization: parse_virtualization_policy(&audio_source.virtualization),
+                category: parse_voice_category(&audio_source.category),
+                critical: audio_source.critical,
+                doppler_scale: audio_source.doppler_scale,
+                spread: audio_source.spread,
+                use_hrtf: audio_source.use_hrtf,
             })?;
             self.audio_bindings.push(AudioBinding {
                 object: object.id,
                 source,
+                last_position: transform.translation,
             });
         }
         Ok(())
@@ -1111,18 +1173,82 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
     #[cfg(feature = "audio")]
     fn update_audio(&mut self, dt: f32) -> EngineResult<()> {
-        if let Some(camera) = self
+        let mut index = 0;
+        while index < self.audio_bindings.len() {
+            if self
+                .scene
+                .find_by_id(self.audio_bindings[index].object)
+                .is_none()
+            {
+                let binding = self.audio_bindings.swap_remove(index);
+                self.audio.backend_mut().destroy_source(binding.source)?;
+            } else {
+                index += 1;
+            }
+        }
+        let listener_entity = self
             .scene
-            .main_camera()
-            .or_else(|| self.scene.game_camera())
-        {
-            let transform = self.scene.transforms().world(camera).unwrap_or_default();
+            .iter_objects()
+            .find(|(_, object)| {
+                object
+                    .components
+                    .iter()
+                    .any(|component| matches!(component, ComponentData::AudioListener(_)))
+            })
+            .map(|(entity, _)| entity)
+            .or_else(|| {
+                self.scene
+                    .main_camera()
+                    .or_else(|| self.scene.game_camera())
+            });
+
+        if let Some(listener_entity) = listener_entity {
+            let transform = self
+                .scene
+                .transforms()
+                .world(listener_entity)
+                .unwrap_or_default();
+            let listener_data = self
+                .scene
+                .object(listener_entity)
+                .and_then(|object| {
+                    object
+                        .components
+                        .iter()
+                        .find_map(|component| match component {
+                            ComponentData::AudioListener(listener) => Some(listener.clone()),
+                            _ => None,
+                        })
+                })
+                .unwrap_or_default();
+            let velocity = self
+                .audio_listener_position
+                .filter(|_| dt > f32::EPSILON)
+                .map(|previous| (transform.translation - previous) / dt)
+                .unwrap_or(engine_core::math::Vec3::ZERO);
+            let output_mode = parse_output_mode(&listener_data.output_mode);
+            let hrtf_quality = parse_hrtf_quality(&listener_data.hrtf_quality);
+            let _ = self.audio.backend_mut().set_output_mode(output_mode);
+            let _ = self.audio.backend_mut().set_hrtf_quality(hrtf_quality);
             self.audio.backend_mut().set_listener(&AudioListenerDesc {
                 position: transform.translation,
-                ..AudioListenerDesc::default()
+                forward: transform
+                    .rotation
+                    .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                    .normalized(),
+                up: transform
+                    .rotation
+                    .rotate(engine_core::math::Vec3::new(0.0, 1.0, 0.0))
+                    .normalized(),
+                velocity,
+                output_mode,
+                hrtf_quality,
+                hrtf_enabled: listener_data.hrtf_enabled,
             });
+            self.audio_listener_position = Some(transform.translation);
         }
-        for binding in &self.audio_bindings {
+        let mut acoustic_sources = Vec::with_capacity(self.audio_bindings.len());
+        for binding in &mut self.audio_bindings {
             if let Some(entity) = self.scene.find_by_id(binding.object) {
                 let transform = self.scene.transforms().world(entity).unwrap_or_default();
                 let Some(object) = self.scene.object(entity) else {
@@ -1143,12 +1269,185 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     self.audio
                         .backend_mut()
                         .set_looping(binding.source, audio_source.looping)?;
-                    let _ = transform;
+                    let velocity = if dt > f32::EPSILON {
+                        (transform.translation - binding.last_position) / dt
+                    } else {
+                        engine_core::math::Vec3::ZERO
+                    };
+                    self.audio.backend_mut().set_source_transform(
+                        binding.source,
+                        AudioObjectTransform {
+                            position: transform.translation,
+                            forward: transform
+                                .rotation
+                                .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                                .normalized(),
+                            velocity,
+                        },
+                    )?;
+                    acoustic_sources.push(AcousticSourceSample {
+                        handle: binding.source,
+                        position: transform.translation,
+                    });
+                    binding.last_position = transform.translation;
                 }
             }
         }
+        if let Some(listener_position) = self.audio_listener_position {
+            let snapshot = AcousticSceneSnapshot {
+                listener_position,
+                sources: acoustic_sources,
+                blockers: extract_acoustic_blockers(&self.scene),
+            };
+            for (source, propagation) in
+                solve_direct_propagation(&snapshot, AcousticSolverConfig::default())
+            {
+                let _ = self
+                    .audio
+                    .backend_mut()
+                    .set_source_propagation(source, propagation);
+            }
+        }
         self.audio.update(dt);
+        let diagnostics = self.audio.diagnostics();
+        self.stats.audio_sources = diagnostics.logical_sources;
+        self.stats.audio_physical_voices = diagnostics.physical_voices;
+        self.stats.audio_virtual_voices = diagnostics.virtual_voices;
+        self.stats.audio_underruns = diagnostics.underruns;
         Ok(())
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_spatial_mode(value: &str) -> SpatialMode {
+    match value {
+        "object" => SpatialMode::Object,
+        "ambient_field" => SpatialMode::AmbientField,
+        _ => SpatialMode::Direct,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_audio_source_shape(source: &AudioSourceComponentData) -> AudioSourceShape {
+    match source.shape.as_str() {
+        "cone" => AudioSourceShape::Cone {
+            inner_angle_degrees: source.inner_angle_degrees,
+            outer_angle_degrees: source.outer_angle_degrees.max(source.inner_angle_degrees),
+            outer_gain: source.outer_gain.clamp(0.0, 1.0),
+        },
+        "sphere" => AudioSourceShape::Sphere {
+            radius: source.sphere_radius.max(0.0),
+        },
+        _ => AudioSourceShape::Point,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_attenuation_model(source: &AudioSourceComponentData) -> AttenuationModel {
+    match source.attenuation.as_str() {
+        "inverse_distance" => AttenuationModel::InverseDistance {
+            min_distance: source.min_distance.max(0.0),
+            max_distance: source.max_distance.max(source.min_distance),
+        },
+        "linear_distance" => AttenuationModel::LinearDistance {
+            min_distance: source.min_distance.max(0.0),
+            max_distance: source.max_distance.max(source.min_distance),
+        },
+        "logarithmic_distance" => AttenuationModel::LogarithmicDistance {
+            min_distance: source.min_distance.max(0.0),
+            max_distance: source.max_distance.max(source.min_distance),
+        },
+        _ => AttenuationModel::None,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn extract_acoustic_blockers(scene: &Scene) -> Vec<AcousticAabb> {
+    scene
+        .iter_objects()
+        .filter_map(|(entity, object)| {
+            let geometry = object
+                .components
+                .iter()
+                .find_map(|component| match component {
+                    ComponentData::AcousticGeometry(geometry) => Some(geometry),
+                    _ => None,
+                })?;
+            let transform = scene.transforms().world(entity).unwrap_or_default();
+            let material = geometry
+                .material
+                .as_ref()
+                .map(acoustic_material_from_component)
+                .or_else(|| {
+                    object
+                        .components
+                        .iter()
+                        .find_map(|component| match component {
+                            ComponentData::AcousticMaterial(material) => {
+                                Some(acoustic_material_from_component(material))
+                            }
+                            _ => None,
+                        })
+                })
+                .unwrap_or_default();
+            let half_size = geometry.size * 0.5;
+            Some(AcousticAabb {
+                min: transform.translation - half_size,
+                max: transform.translation + half_size,
+                material,
+                blocks_direct_path: geometry.blocks_direct_path,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "audio")]
+fn acoustic_material_from_component(
+    material: &engine_ecs::AcousticMaterialComponentData,
+) -> AcousticMaterial {
+    AcousticMaterial {
+        absorption: material.absorption.map(|value| value.clamp(0.0, 1.0)),
+        transmission: material.transmission.map(|value| value.clamp(0.0, 1.0)),
+        scattering: material.scattering.clamp(0.0, 1.0),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_virtualization_policy(value: &str) -> VirtualizationPolicy {
+    match value {
+        "stop" => VirtualizationPolicy::Stop,
+        "protected" => VirtualizationPolicy::Protected,
+        _ => VirtualizationPolicy::Virtualize,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_voice_category(value: &str) -> VoiceCategory {
+    match value {
+        "critical" => VoiceCategory::Critical,
+        "dialogue" => VoiceCategory::Dialogue,
+        "music" => VoiceCategory::Music,
+        "ui" => VoiceCategory::Ui,
+        "ambience" => VoiceCategory::Ambience,
+        "disposable" => VoiceCategory::Disposable,
+        _ => VoiceCategory::Sfx,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_output_mode(value: &str) -> OutputMode {
+    match value {
+        "binaural" => OutputMode::Binaural,
+        _ => OutputMode::Stereo,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn parse_hrtf_quality(value: &str) -> HrtfQuality {
+    match value {
+        "low" => HrtfQuality::Low,
+        "high" => HrtfQuality::High,
+        _ => HrtfQuality::Medium,
     }
 }
 
@@ -1600,101 +1899,39 @@ pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimePr
 
 /// Extracts the active scene into a minimal render queue.
 pub fn extract_render_world(scene: &Scene) -> RenderWorld {
-    let mut world = RenderWorld::default();
-    for (entity, object) in scene.iter_objects() {
-        let transform = scene.transforms().world(entity).unwrap_or_default();
-        for component in &object.components {
-            match component {
-                ComponentData::Camera(camera) => {
-                    if world.camera.is_none() || camera.primary {
-                        world.camera = Some(camera_to_render(object.id, transform, camera));
-                    }
-                }
-                ComponentData::MeshRenderer(renderer) => {
-                    world
-                        .objects
-                        .push(mesh_to_render(object.id, transform, renderer));
-                }
-                ComponentData::Light(light) => {
-                    world.lights.push(engine_render::RenderLight {
-                        object: object.id,
-                        transform,
-                        kind: engine_render::RenderLightKind::from_component_kind(&light.kind),
-                        color: light.color,
-                        intensity: light.intensity,
-                        range: light.range,
-                        spot_angle: light.spot_angle,
-                    });
-                }
-                ComponentData::ParticleEmitter(emitter) => {
-                    world.particles.extend(
-                        engine_ecs::ParticleSystem::sample(emitter, transform)
-                            .into_iter()
-                            .map(|particle| {
-                                let mut particle_transform = engine_core::math::Transform::IDENTITY;
-                                particle_transform.translation = particle.position;
-                                particle_transform.scale = engine_core::math::Vec3::new(
-                                    particle.size,
-                                    particle.size,
-                                    particle.size,
-                                );
-                                engine_render::RenderParticle {
-                                    object: object.id,
-                                    transform: particle_transform,
-                                    color: particle.color,
-                                    age_fraction: particle.age_fraction,
-                                }
-                            }),
-                    );
-                }
-                ComponentData::Rigidbody(_)
-                | ComponentData::Collider(_)
-                | ComponentData::AudioSource(_)
-                | ComponentData::Script(_)
-                | ComponentData::Sprite2D(_)
-                | ComponentData::TileMap(_)
-                | ComponentData::Camera2D(_)
-                | ComponentData::Light2D(_)
-                | ComponentData::Occluder2D(_)
-                | ComponentData::AnimationPlayer(_)
-                | ComponentData::SkinnedMeshRenderer(_)
-                | ComponentData::AudioStreamPlayer2D(_)
-                | ComponentData::AudioStreamPlayer3D(_)
-                | ComponentData::Skybox(_) => {}
-            }
-        }
-        if object.camera_role == Some(CameraRole::Main) && world.camera.is_none() {
-            world.camera = Some(camera_to_render(
-                object.id,
-                transform,
-                &CameraComponentData::default(),
-            ));
-        }
-        if object.name == "Player" && world.objects.is_empty() {
-            world.objects.push(mesh_to_render(
-                object.id,
-                transform,
-                &MeshRendererComponentData::default(),
-            ));
-        }
-    }
-    world
+    RenderWorld::extract(scene)
 }
 
-fn camera_to_render(
-    object: engine_core::EntityId,
-    transform: engine_core::math::Transform,
-    camera: &CameraComponentData,
-) -> engine_render::RenderCamera {
-    engine_render::RenderCamera {
-        object,
-        transform,
-        projection: engine_render::RenderProjection::Perspective,
-        vertical_fov_degrees: camera.vertical_fov_degrees,
-        near: camera.near,
-        far: camera.far,
-        look_at_target: None,
+/// Builds the native runtime performance policy from environment overrides.
+///
+/// Supported variables are `ASTER_PRESENT_MODE`, `ASTER_TARGET_FPS`,
+/// `ASTER_RENDER_SCALE`, and `ASTER_DYNAMIC_RESOLUTION`.
+pub fn runtime_performance_config_from_env() -> RenderPerformanceConfig {
+    let mut config = RenderPerformanceConfig::competitive_120hz();
+    if let Ok(value) = std::env::var("ASTER_PRESENT_MODE") {
+        config.present_strategy = match value.as_str() {
+            "vsync" => PresentStrategy::VSync,
+            "uncapped" => PresentStrategy::Uncapped,
+            _ => PresentStrategy::LowLatency,
+        };
     }
+    if let Ok(value) = std::env::var("ASTER_TARGET_FPS") {
+        if let Ok(target_fps) = value.parse::<u32>() {
+            config.dynamic_resolution.target_fps = target_fps.max(1);
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_RENDER_SCALE") {
+        if let Ok(scale) = value.parse::<f32>() {
+            config.render_scale = scale.clamp(
+                config.dynamic_resolution.min_scale,
+                config.dynamic_resolution.max_scale,
+            );
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_DYNAMIC_RESOLUTION") {
+        config.dynamic_resolution.enabled = matches!(value.as_str(), "1" | "true" | "on");
+    }
+    config
 }
 
 /// Parses an asset GUID from a mesh/material name string formatted as
@@ -1703,28 +1940,6 @@ fn parse_asset_guid(name: &str) -> Option<engine_core::AssetId> {
     let hex = name.strip_prefix("asset:")?.split(':').next()?;
     let value = u128::from_str_radix(hex, 16).ok()?;
     Some(engine_core::AssetId::from_u128(value))
-}
-
-fn mesh_to_render(
-    object: engine_core::EntityId,
-    transform: engine_core::math::Transform,
-    renderer: &MeshRendererComponentData,
-) -> engine_render::RenderObject {
-    engine_render::RenderObject {
-        object,
-        transform,
-        mesh: renderer
-            .mesh
-            .map(|asset| format!("asset:{:032x}", asset.as_u128()))
-            .or_else(|| renderer.builtin_mesh.clone())
-            .unwrap_or_else(|| "asset-mesh".to_string()),
-        material: renderer
-            .material
-            .asset
-            .map(|asset| format!("asset:{:032x}", asset.as_u128()))
-            .or_else(|| renderer.material.builtin.clone())
-            .unwrap_or_else(|| "asset-material".to_string()),
-    }
 }
 
 /// Builds the default forward render graph used by the minimal runtime.
@@ -1847,11 +2062,19 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
             if self.window.is_some() {
                 return;
             }
+            let width = std::env::var("ASTER_OUTPUT_WIDTH")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1920_u32);
+            let height = std::env::var("ASTER_OUTPUT_HEIGHT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1080_u32);
             let window = event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title(&self.project_name)
-                        .with_inner_size(winit::dpi::LogicalSize::new(960_u32, 540_u32)),
+                        .with_inner_size(winit::dpi::PhysicalSize::new(width, height)),
                 )
                 .expect("create runtime window");
             let window = Arc::new(window);
@@ -1977,8 +2200,12 @@ fn create_game_services(
     let surface = instance
         .create_surface(window)
         .map_err(|error| EngineError::other(format!("create wgpu surface failed: {error}")))?;
-    let renderer = WgpuRenderDevice::new_surface(surface, size.width.max(1), size.height.max(1))?;
+    let mut renderer =
+        WgpuRenderDevice::new_surface(surface, size.width.max(1), size.height.max(1))?;
+    renderer.configure_performance(runtime_performance_config_from_env());
     let mut services = RuntimeServices::with_renderer(config, renderer);
+    #[cfg(feature = "audio")]
+    services.enable_default_audio_output();
     services.set_project_root(project.root.clone());
     let asset_root = project.root.join(&project.manifest.asset_root);
     services.load_project_assets(asset_root)?;
@@ -1995,6 +2222,8 @@ fn create_game_services(
     project: RuntimeProject,
 ) -> EngineResult<RuntimeServices> {
     let mut services = RuntimeServices::minimal(config);
+    #[cfg(feature = "audio")]
+    services.enable_default_audio_output();
     services.set_project_root(project.root.clone());
     let asset_root = project.root.join(&project.manifest.asset_root);
     services.load_project_assets(asset_root)?;
@@ -2281,6 +2510,7 @@ mod tests {
                     looping: true,
                     play_on_start: true,
                     spatial_blend: 0.0,
+                    ..engine_ecs::AudioSourceComponentData::default()
                 }),
             )
             .unwrap();
@@ -2290,6 +2520,76 @@ mod tests {
             .unwrap();
 
         assert_eq!(services.audio_bindings.len(), 1);
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn acoustic_geometry_drives_source_propagation() {
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        let asset = engine_core::AssetId::from_u128(8);
+        services
+            .load_audio_clip(asset, "tone.wav", &test_wav_bytes())
+            .unwrap();
+
+        let listener = services.scene.create_object("Listener").unwrap();
+        services
+            .scene
+            .upsert_component(listener, ComponentData::AudioListener(Default::default()))
+            .unwrap();
+
+        let speaker = services.scene.create_object("Speaker").unwrap();
+        services.scene.transforms_mut().set_local(
+            speaker,
+            engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(0.0, 0.0, -10.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        services
+            .scene
+            .upsert_component(
+                speaker,
+                ComponentData::AudioSource(engine_ecs::AudioSourceComponentData {
+                    clip: Some(asset),
+                    volume: 1.0,
+                    looping: true,
+                    play_on_start: true,
+                    spatial_mode: "object".to_string(),
+                    attenuation: "none".to_string(),
+                    ..engine_ecs::AudioSourceComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let wall = services.scene.create_object("Wall").unwrap();
+        services.scene.transforms_mut().set_local(
+            wall,
+            engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(0.0, 0.0, -5.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        services
+            .scene
+            .upsert_component(
+                wall,
+                ComponentData::AcousticGeometry(engine_ecs::AcousticGeometryComponentData {
+                    size: engine_core::math::Vec3::new(4.0, 4.0, 0.5),
+                    material: Some(engine_ecs::AcousticMaterialComponentData {
+                        transmission: [0.3, 0.15, 0.02],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(services.audio_bindings.len(), 1);
+        assert_eq!(services.audio.diagnostics().acoustics_sources, 1);
     }
 
     #[cfg(feature = "physics")]

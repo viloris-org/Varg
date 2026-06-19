@@ -2469,6 +2469,11 @@ body {
   color: var(--text-muted);
 }
 
+.copilot-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .copilot-send-btn {
   background: var(--accent);
   border: none;
@@ -4321,7 +4326,7 @@ button {
 }
 
 .ai-message-user .ai-message-content {
-  background: var(--accent);
+  background: #2563eb;
   color: white;
   border-bottom-right-radius: 4px;
 }
@@ -4370,7 +4375,7 @@ button {
 .ai-message-assistant .ai-message-content pre {
   margin: 0.5em 0;
   border-radius: 6px;
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .ai-message-assistant .ai-message-content blockquote {
@@ -4649,6 +4654,43 @@ button {
   font-size: 13px;
 }
 
+.ai-retry-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.ai-code-block {
+  position: relative;
+  margin: 0.5em 0;
+}
+
+.ai-code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.ai-code-block:hover .ai-code-copy-btn {
+  opacity: 1;
+}
+
+.ai-code-copy-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
 .ai-message-state {
   width: fit-content;
   margin-top: 6px;
@@ -4719,7 +4761,7 @@ button {
   border-radius: 7px;
   background: rgba(59, 130, 246, 0.07);
   color: #bfdbfe;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .ai-queue-status > div {
@@ -4739,7 +4781,7 @@ button {
   background: rgba(239, 68, 68, 0.09);
   color: #fca5a5;
   cursor: pointer;
-  font: 600 9px var(--font-sans);
+  font: 600 11px var(--font-sans);
 }
 
 .ai-queue-status button:hover:not(:disabled) { border-color: #f87171; }
@@ -4854,7 +4896,8 @@ button {
   flex: 1;
   resize: none;
   border: 1px solid var(--border);
-  min-height: 54px;
+  min-height: 42px;
+  max-height: 200px;
   border-radius: 9px;
   padding: 9px 12px;
   font-size: 13px;

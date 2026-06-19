@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
 import {
@@ -51,7 +52,9 @@ function MessageBubble({ role, content }: { role: string; content: string }) {
       <div className="copilot-message-avatar">
         {role === 'assistant' ? <IconBot /> : <span>U</span>}
       </div>
-      <div className="copilot-message-content">{content}</div>
+      <div className="copilot-message-content">
+        {role === 'assistant' ? <ReactMarkdown>{content}</ReactMarkdown> : content}
+      </div>
     </div>
   );
 }
@@ -127,7 +130,7 @@ export default function CopilotPanel() {
 
     try {
       let receivedDelta = false;
-      const result = await streamCopilotPlan<CopilotPlan>({ prompt }, (delta, kind) => {
+      const streamHandle = streamCopilotPlan<CopilotPlan>({ prompt }, (delta, kind) => {
         if (kind !== 'text') return;
         setMessages(prev => prev.map(msg => {
           if ((msg as any).id !== streamingId) return msg;
@@ -135,6 +138,7 @@ export default function CopilotPanel() {
         }));
         receivedDelta = true;
       });
+      const result = await streamHandle.promise;
 
       setPlan(result.operations.length > 0 ? result : null);
       const autoApproved = new Set<number>();

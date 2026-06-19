@@ -154,6 +154,10 @@ pub struct JointState {
     pub handle: JointHandle,
     /// Joint descriptor.
     pub desc: JointDesc,
+    /// Per-axis motor positions (radians or meters). DOF order: LinX, LinY, LinZ, AngX, AngY, AngZ.
+    pub positions: [f32; 6],
+    /// Per-axis motor velocities (radians/s or m/s).
+    pub velocities: [f32; 6],
 }
 
 impl JointDesc {

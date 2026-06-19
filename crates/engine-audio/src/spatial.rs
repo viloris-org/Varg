@@ -3,6 +3,8 @@
 use engine_core::math::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::AudioSourceShape;
+
 /// Attenuation model for spatial audio.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AttenuationModel {
@@ -98,4 +100,94 @@ pub fn compute_pan(
 
     let pan = (dot + 1.0) / 2.0;
     (1.0 - pan, pan)
+}
+
+/// Smooth Hermite interpolation between `edge0` and `edge1`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Computes the directivity gain for a source shape and listener direction.
+///
+/// Returns a value in `[0.0, 1.0]` where `1.0` means the listener is fully inside
+/// the main lobe and `0.0` (or `outer_gain`) means they are outside the cone.
+pub fn compute_directivity(
+    shape: AudioSourceShape,
+    source_forward: Vec3,
+    source_to_listener: Vec3,
+) -> f32 {
+    match shape {
+        AudioSourceShape::Cone {
+            inner_angle_degrees,
+            outer_angle_degrees,
+            outer_gain,
+        } => {
+            let distance = source_to_listener.length();
+            if distance <= f32::EPSILON {
+                return 1.0;
+            }
+            let direction = source_to_listener / distance;
+            let source_forward = source_forward.normalized();
+            let cos_angle = source_forward.dot(direction);
+            let angle = cos_angle.acos().to_degrees();
+            if angle <= inner_angle_degrees {
+                1.0
+            } else if angle >= outer_angle_degrees {
+                outer_gain.clamp(0.0, 1.0)
+            } else {
+                let t = smoothstep(inner_angle_degrees, outer_angle_degrees, angle);
+                1.0 - t * (1.0 - outer_gain.clamp(0.0, 1.0))
+            }
+        }
+        AudioSourceShape::Sphere { .. } | AudioSourceShape::Point => 1.0,
+    }
+}
+
+/// Computes the effective source-listener distance for attenuation.
+///
+/// Spherical sources start attenuating from their surface; point sources use
+/// the raw distance.
+pub fn compute_effective_distance(shape: AudioSourceShape, distance: f32) -> f32 {
+    match shape {
+        AudioSourceShape::Sphere { radius } => (distance - radius.max(0.0)).max(0.0),
+        _ => distance.max(0.0),
+    }
+}
+
+/// Computes the Doppler pitch rate for a moving source and listener.
+///
+/// The returned value is clamped to `[0.5, 2.0]` to avoid excessive pitch shift.
+pub fn compute_doppler_rate(
+    source_velocity: Vec3,
+    listener_velocity: Vec3,
+    source_to_listener: Vec3,
+    speed_of_sound: f32,
+    doppler_scale: f32,
+) -> f32 {
+    let distance = source_to_listener.length();
+    if distance <= f32::EPSILON || speed_of_sound <= f32::EPSILON {
+        return 1.0;
+    }
+    let direction = source_to_listener / distance;
+    let relative_speed = (source_velocity - listener_velocity).dot(direction);
+    let rate = 1.0 + relative_speed * doppler_scale.max(0.0) / speed_of_sound;
+    rate.clamp(0.5, 2.0)
+}
+
+/// Computes a spread-aware equal-power stereo pan.
+///
+/// `spread` in `[0.0, 1.0]` controls how wide the source is rendered:
+/// `0.0` collapses to mono and `1.0` gives full directional panning.
+pub fn compute_spread_pan(
+    source_pos: Vec3,
+    listener_pos: Vec3,
+    listener_forward: Vec3,
+    listener_up: Vec3,
+    spread: f32,
+) -> (f32, f32) {
+    let (_, base_pan) = compute_pan(source_pos, listener_pos, listener_forward, listener_up);
+    let spread = spread.clamp(0.0, 1.0).max(0.01);
+    let p = base_pan.powf(spread);
+    ((1.0 - p).sqrt(), p.sqrt())
 }

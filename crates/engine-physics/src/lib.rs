@@ -7,7 +7,9 @@
 //! linking any physics library. The `rapier` feature enables [`RapierPhysicsBackend`],
 //! the production backend used by runtime-game builds.
 
+pub mod fracture;
 pub mod joints;
+pub mod vehicle;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,6 +20,9 @@ use engine_core::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
 pub use crate::joints::{JointDesc, JointHandle, JointLimits, JointMotor, JointState, JointType};
+pub use crate::vehicle::{
+    VehicleDesc, VehicleHandle, VehicleInput, VehicleState, VehicleTuning, WheelDesc,
+};
 pub use engine_core::math::{Quat, Transform, Vec3};
 
 // ── Primitive types ──────────────────────────────────────────────────────────
@@ -110,6 +115,17 @@ pub enum ColliderShape {
         vertices: Vec<f32>,
         /// Triangle indices (three per triangle, u32).
         indices: Vec<u32>,
+    },
+    /// Heightfield terrain collider (static only).
+    Heightfield {
+        /// Number of samples along the X axis (width).
+        num_x: u32,
+        /// Number of samples along the Z axis (depth).
+        num_z: u32,
+        /// Height samples in row-major order (num_x * num_z values).
+        heights: Vec<f32>,
+        /// World-space scale of the heightfield.
+        scale: Vec3,
     },
 }
 
@@ -257,6 +273,333 @@ pub struct OverlapResult {
 pub struct QueryFilter {
     /// Layer mask; zero means test all layers.
     pub mask: u32,
+}
+
+// ── Multi-hit query results ──────────────────────────────────────────────────
+
+/// Result of a raycast that returns all hits along the ray.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RayHitAll {
+    /// All hits sorted by distance (nearest first).
+    pub hits: Vec<RayHit>,
+}
+
+/// Result of a box sweep query.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepHit {
+    /// Hit body.
+    pub body: BodyHandle,
+    /// Hit collider.
+    pub collider: ColliderHandle,
+    /// Hit point in world space.
+    pub point: Vec3,
+    /// Surface normal at the hit point.
+    pub normal: Vec3,
+    /// Distance traveled before the hit.
+    pub distance: f32,
+}
+
+// ── Collision profile system ─────────────────────────────────────────────────
+
+/// Collision response type for a channel pair.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollisionResponse {
+    /// Bodies block each other (physical contact).
+    #[default]
+    Block,
+    /// Bodies fire overlap events but do not physically interact.
+    Overlap,
+    /// Bodies ignore each other completely.
+    Ignore,
+}
+
+/// A named collision channel with a default response.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct CollisionChannel {
+    /// Name of the channel (e.g. "WorldStatic", "WorldDynamic", "Pawn", "Projectile").
+    pub name: String,
+    /// Default response when this channel interacts with itself.
+    pub self_response: CollisionResponse,
+}
+
+/// Collision profile: a named preset that maps channel pairs to responses.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct CollisionProfile {
+    /// Name of this profile (e.g. "Pawn", "PhysicsBody", "NoCollision").
+    pub name: String,
+    /// The collision channel this object belongs to.
+    pub channel: String,
+    /// Per-channel response overrides. If a channel is not listed, the default
+    /// response is [`CollisionResponse::Block`].
+    pub responses: HashMap<String, CollisionResponse>,
+    /// Whether this collider can generate overlap events.
+    pub generate_overlap_events: bool,
+}
+
+impl Default for CollisionProfile {
+    fn default() -> Self {
+        Self {
+            name: "Default".into(),
+            channel: "WorldStatic".into(),
+            responses: HashMap::new(),
+            generate_overlap_events: false,
+        }
+    }
+}
+
+/// Manages collision channels and profile presets.
+#[derive(Clone, Debug)]
+pub struct CollisionProfileRegistry {
+    channels: Vec<CollisionChannel>,
+    matrix: HashMap<(String, String), CollisionResponse>,
+}
+
+impl Default for CollisionProfileRegistry {
+    fn default() -> Self {
+        let mut reg = Self {
+            channels: Vec::new(),
+            matrix: HashMap::new(),
+        };
+        reg.register_channel(CollisionChannel {
+            name: "WorldStatic".into(),
+            self_response: CollisionResponse::Block,
+        });
+        reg.register_channel(CollisionChannel {
+            name: "WorldDynamic".into(),
+            self_response: CollisionResponse::Block,
+        });
+        reg.register_channel(CollisionChannel {
+            name: "Pawn".into(),
+            self_response: CollisionResponse::Block,
+        });
+        reg.register_channel(CollisionChannel {
+            name: "Projectile".into(),
+            self_response: CollisionResponse::Overlap,
+        });
+        reg.register_channel(CollisionChannel {
+            name: "Trigger".into(),
+            self_response: CollisionResponse::Overlap,
+        });
+        // Default matrix: everything blocks everything except triggers/overlap channels.
+        reg.set_response("Pawn", "Pawn", CollisionResponse::Block);
+        reg.set_response("Pawn", "Projectile", CollisionResponse::Overlap);
+        reg.set_response("Projectile", "Trigger", CollisionResponse::Overlap);
+        reg.set_response("WorldStatic", "Projectile", CollisionResponse::Overlap);
+        reg
+    }
+}
+
+impl CollisionProfileRegistry {
+    /// Registers a new collision channel.
+    pub fn register_channel(&mut self, channel: CollisionChannel) {
+        self.channels.push(channel);
+    }
+
+    /// Sets the response between two channels (symmetric).
+    pub fn set_response(&mut self, a: &str, b: &str, response: CollisionResponse) {
+        self.matrix.insert((a.into(), b.into()), response);
+        self.matrix.insert((b.into(), a.into()), response);
+    }
+
+    /// Returns the response between two channels.
+    pub fn response(&self, a: &str, b: &str) -> CollisionResponse {
+        self.matrix
+            .get(&(a.into(), b.into()))
+            .copied()
+            .unwrap_or_else(|| {
+                if a == b {
+                    self.channels
+                        .iter()
+                        .find(|channel| channel.name == a)
+                        .map_or(CollisionResponse::Block, |channel| channel.self_response)
+                } else {
+                    CollisionResponse::Block
+                }
+            })
+    }
+
+    fn profile_response(
+        &self,
+        source: &CollisionProfile,
+        target: &CollisionProfile,
+    ) -> CollisionResponse {
+        source
+            .responses
+            .get(&target.channel)
+            .copied()
+            .unwrap_or_else(|| self.response(&source.channel, &target.channel))
+    }
+
+    fn combined_response(&self, a: &CollisionProfile, b: &CollisionProfile) -> CollisionResponse {
+        use CollisionResponse::{Block, Ignore, Overlap};
+
+        match (self.profile_response(a, b), self.profile_response(b, a)) {
+            (Ignore, _) | (_, Ignore) => Ignore,
+            (Overlap, _) | (_, Overlap) => Overlap,
+            (Block, Block) => Block,
+        }
+    }
+
+    /// Resolves whether two profiles should generate a blocking contact.
+    pub fn should_collide(&self, a: &CollisionProfile, b: &CollisionProfile) -> bool {
+        self.combined_response(a, b) == CollisionResponse::Block
+    }
+
+    /// Resolves whether two profiles should generate an overlap event.
+    pub fn should_overlap(&self, a: &CollisionProfile, b: &CollisionProfile) -> bool {
+        if !a.generate_overlap_events && !b.generate_overlap_events {
+            return false;
+        }
+        self.combined_response(a, b) == CollisionResponse::Overlap
+    }
+}
+
+fn validate_collider_shape(shape: &ColliderShape) -> EngineResult<()> {
+    match shape {
+        ColliderShape::Heightfield {
+            num_x,
+            num_z,
+            heights,
+            scale,
+        } => {
+            if *num_x < 2 || *num_z < 2 {
+                return Err(EngineError::config(
+                    "heightfield dimensions must both be at least 2",
+                ));
+            }
+            let expected = (*num_x as usize)
+                .checked_mul(*num_z as usize)
+                .ok_or_else(|| EngineError::config("heightfield dimensions overflow"))?;
+            if heights.len() != expected {
+                return Err(EngineError::config(format!(
+                    "heightfield expected {expected} samples, got {}",
+                    heights.len()
+                )));
+            }
+            if !scale.x.is_finite()
+                || !scale.y.is_finite()
+                || !scale.z.is_finite()
+                || scale.x <= 0.0
+                || scale.y <= 0.0
+                || scale.z <= 0.0
+                || heights.iter().any(|height| !height.is_finite())
+            {
+                return Err(EngineError::config(
+                    "heightfield scale and samples must be finite and scale must be positive",
+                ));
+            }
+        }
+        ColliderShape::Mesh { vertices } | ColliderShape::TriMesh { vertices, .. } => {
+            if vertices.len() % 3 != 0 || vertices.iter().any(|value| !value.is_finite()) {
+                return Err(EngineError::config(
+                    "mesh collider vertices must contain finite xyz triplets",
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Physical material ────────────────────────────────────────────────────────
+
+/// A physical material asset defining surface properties.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct PhysicalMaterial {
+    /// Asset name.
+    pub name: String,
+    /// Friction coefficient.
+    pub friction: f32,
+    /// Restitution (bounciness) coefficient.
+    pub restitution: f32,
+    /// Density in kg/m³ (used for mass computation).
+    pub density: f32,
+    /// Friction combine mode override.
+    pub friction_combine: CombineMode,
+    /// Restitution combine mode override.
+    pub restitution_combine: CombineMode,
+}
+
+impl Default for PhysicalMaterial {
+    fn default() -> Self {
+        Self {
+            name: "Default".into(),
+            friction: 0.5,
+            restitution: 0.0,
+            density: 1000.0,
+            friction_combine: CombineMode::Average,
+            restitution_combine: CombineMode::Average,
+        }
+    }
+}
+
+/// Registry of named physical materials.
+#[derive(Clone, Debug, Default)]
+pub struct PhysicalMaterialRegistry {
+    materials: HashMap<String, PhysicalMaterial>,
+}
+
+impl PhysicalMaterialRegistry {
+    /// Creates a registry with built-in materials.
+    pub fn with_defaults() -> Self {
+        let mut reg = Self::default();
+        reg.register(PhysicalMaterial::default());
+        reg.register(PhysicalMaterial {
+            name: "Wood".into(),
+            friction: 0.4,
+            restitution: 0.2,
+            density: 700.0,
+            ..PhysicalMaterial::default()
+        });
+        reg.register(PhysicalMaterial {
+            name: "Metal".into(),
+            friction: 0.6,
+            restitution: 0.1,
+            density: 7800.0,
+            ..PhysicalMaterial::default()
+        });
+        reg.register(PhysicalMaterial {
+            name: "Rubber".into(),
+            friction: 0.9,
+            restitution: 0.8,
+            density: 1100.0,
+            ..PhysicalMaterial::default()
+        });
+        reg.register(PhysicalMaterial {
+            name: "Ice".into(),
+            friction: 0.05,
+            restitution: 0.05,
+            density: 917.0,
+            ..PhysicalMaterial::default()
+        });
+        reg
+    }
+
+    /// Registers a physical material.
+    pub fn register(&mut self, material: PhysicalMaterial) {
+        self.materials.insert(material.name.clone(), material);
+    }
+
+    /// Looks up a material by name.
+    pub fn get(&self, name: &str) -> Option<&PhysicalMaterial> {
+        self.materials.get(name)
+    }
+
+    /// Returns the friction for a named material, or the default.
+    pub fn friction(&self, name: &str) -> f32 {
+        self.get(name).map_or(0.5, |m| m.friction)
+    }
+
+    /// Returns the restitution for a named material, or the default.
+    pub fn restitution(&self, name: &str) -> f32 {
+        self.get(name).map_or(0.0, |m| m.restitution)
+    }
+
+    /// Returns the density for a named material, or the default.
+    pub fn density(&self, name: &str) -> f32 {
+        self.get(name).map_or(1000.0, |m| m.density)
+    }
 }
 
 /// Kinematic character movement request.
@@ -421,6 +764,67 @@ pub trait PhysicsBackend: Send + Sync {
         filter: QueryFilter,
     ) -> Option<RayHit>;
 
+    /// Casts a ray and returns all hits along the ray, sorted by distance.
+    fn raycast_all(
+        &self,
+        _origin: Vec3,
+        _direction: Vec3,
+        _max_distance: f32,
+        _filter: QueryFilter,
+    ) -> RayHitAll {
+        RayHitAll { hits: Vec::new() }
+    }
+
+    /// Sweeps a box along a direction and returns the first hit, if any.
+    fn sweep_box(
+        &self,
+        _center: Vec3,
+        _half_extents: Vec3,
+        _rotation: Quat,
+        _direction: Vec3,
+        _max_distance: f32,
+        _filter: QueryFilter,
+    ) -> Option<SweepHit> {
+        None
+    }
+
+    /// Sweeps a capsule along a direction and returns the first hit, if any.
+    fn sweep_capsule(
+        &self,
+        _center: Vec3,
+        _half_height: f32,
+        _radius: f32,
+        _rotation: Quat,
+        _direction: Vec3,
+        _max_distance: f32,
+        _filter: QueryFilter,
+    ) -> Option<SweepHit> {
+        None
+    }
+
+    /// Returns all colliders overlapping a box.
+    fn overlap_box(
+        &self,
+        _center: Vec3,
+        _half_extents: Vec3,
+        _rotation: Quat,
+        _filter: QueryFilter,
+    ) -> Vec<OverlapResult> {
+        Vec::new()
+    }
+
+    /// Returns all colliders overlapping a capsule.
+    fn overlap_capsule(
+        &self,
+        _center: Vec3,
+        _half_height: f32,
+        _radius: f32,
+        _rotation: Quat,
+        _filter: QueryFilter,
+    ) -> Vec<OverlapResult> {
+        Vec::new()
+    }
+
     /// Drains pending contact events since the last call.
     fn drain_contacts(&mut self) -> Vec<ContactEvent>;
 
@@ -492,6 +896,36 @@ pub trait PhysicsBackend: Send + Sync {
     /// Returns the reaction force and torque magnitude on a joint.
     fn joint_forces(&self, _joint: JointHandle) -> EngineResult<(f32, f32)> {
         Ok((0.0, 0.0))
+    }
+
+    /// Creates a wheeled vehicle attached to a chassis body.
+    fn create_vehicle(&mut self, _desc: &VehicleDesc) -> EngineResult<VehicleHandle> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "vehicles",
+        })
+    }
+
+    /// Destroys a vehicle.
+    fn destroy_vehicle(&mut self, _vehicle: VehicleHandle) -> EngineResult<()> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "vehicles",
+        })
+    }
+
+    /// Updates vehicle inputs and returns current state.
+    fn update_vehicle(
+        &mut self,
+        _vehicle: VehicleHandle,
+        _input: VehicleInput,
+    ) -> EngineResult<VehicleState> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "vehicles",
+        })
+    }
+
+    /// Returns profiling statistics from the last `fixed_update`.
+    fn stats(&self) -> PhysicsStats {
+        PhysicsStats::default()
     }
 }
 
@@ -579,13 +1013,119 @@ impl PhysicsBackend for NullPhysicsBackend {
     }
 }
 
+// ── Contact filter chain ─────────────────────────────────────────────────────
+
+/// A runtime contact filter evaluated before a collision pair is reported.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ContactFilter {
+    /// Ignore all contacts involving this body.
+    IgnoreBody {
+        /// Body to ignore.
+        body: BodyHandle,
+    },
+    /// Ignore contacts between this specific pair.
+    IgnorePair {
+        /// First body.
+        body_a: BodyHandle,
+        /// Second body.
+        body_b: BodyHandle,
+    },
+    /// Always allow contacts between this pair, overriding earlier filters.
+    ForcePair {
+        /// First body.
+        body_a: BodyHandle,
+        /// Second body.
+        body_b: BodyHandle,
+    },
+}
+
+/// Ordered chain of contact filters evaluated each step.
+#[derive(Clone, Debug, Default)]
+pub struct ContactFilterChain {
+    filters: Vec<ContactFilter>,
+}
+
+impl ContactFilterChain {
+    /// Adds a filter to the end of the chain.
+    pub fn push(&mut self, filter: ContactFilter) {
+        self.filters.push(filter);
+    }
+
+    /// Removes all filters matching a predicate.
+    pub fn retain(&mut self, predicate: impl Fn(&ContactFilter) -> bool) {
+        self.filters.retain(predicate);
+    }
+
+    /// Clears all filters.
+    pub fn clear(&mut self) {
+        self.filters.clear();
+    }
+
+    /// Evaluates the filter chain for a pair of bodies.
+    /// Returns `true` if the contact should be processed (reported).
+    pub fn should_process(&self, body_a: BodyHandle, body_b: BodyHandle) -> bool {
+        for filter in &self.filters {
+            match filter {
+                ContactFilter::ForcePair {
+                    body_a: fa,
+                    body_b: fb,
+                } => {
+                    if (*fa == body_a && *fb == body_b) || (*fa == body_b && *fb == body_a) {
+                        return true;
+                    }
+                }
+                ContactFilter::IgnoreBody { body } => {
+                    if *body == body_a || *body == body_b {
+                        return false;
+                    }
+                }
+                ContactFilter::IgnorePair {
+                    body_a: ia,
+                    body_b: ib,
+                } => {
+                    if (*ia == body_a && *ib == body_b) || (*ia == body_b && *ib == body_a) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+// ── Physics profiler ──────────────────────────────────────────────────────────
+
+/// Per-step physics profiling statistics.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PhysicsStats {
+    /// Wall-clock step duration in microseconds.
+    pub step_us: u64,
+    /// Number of live rigid bodies.
+    pub body_count: usize,
+    /// Number of live colliders.
+    pub collider_count: usize,
+    /// Number of active contact pairs this step.
+    pub contact_count: usize,
+    /// Number of active simulation islands.
+    pub island_count: usize,
+    /// Number of sleeping bodies.
+    pub sleeping_count: usize,
+    /// Number of active joints.
+    pub joint_count: usize,
+    /// Number of active vehicles.
+    pub vehicle_count: usize,
+}
+
 // ── World-level physics context ───────────────────────────────────────────────
 
-/// Physics world that owns a backend and the layer matrix.
+/// Physics world that owns a backend, layer matrix, and contact filter chain.
 pub struct PhysicsWorld {
     backend: Box<dyn PhysicsBackend>,
     /// Layer collision matrix.
     pub layer_matrix: LayerMatrix,
+    /// Runtime contact filter chain.
+    pub contact_filter_chain: ContactFilterChain,
 }
 
 impl fmt::Debug for PhysicsWorld {
@@ -603,6 +1143,7 @@ impl PhysicsWorld {
         Self {
             backend: Box::new(backend),
             layer_matrix: LayerMatrix::default(),
+            contact_filter_chain: ContactFilterChain::default(),
         }
     }
 
@@ -653,6 +1194,21 @@ impl PhysicsWorld {
     /// Returns joint reaction forces.
     pub fn joint_forces(&self, joint: JointHandle) -> EngineResult<(f32, f32)> {
         self.backend.joint_forces(joint)
+    }
+
+    /// Drains contact events from the backend, filtering through the contact filter chain.
+    pub fn drain_contacts(&mut self) -> Vec<ContactEvent> {
+        let chain = &self.contact_filter_chain;
+        self.backend
+            .drain_contacts()
+            .into_iter()
+            .filter(|event| chain.should_process(event.body_a, event.body_b))
+            .collect()
+    }
+
+    /// Returns profiling statistics from the most recent `fixed_update`.
+    pub fn stats(&self) -> PhysicsStats {
+        self.backend.stats()
     }
 }
 
@@ -940,9 +1496,10 @@ impl PhysicsBackend for SimplePhysicsBackend {
             }
         }
 
-        let has_ccd = self.bodies.values().any(|b| {
-            b.desc.ccd == CcdMode::Enabled && b.desc.kind == BodyKind::Dynamic
-        });
+        let has_ccd = self
+            .bodies
+            .values()
+            .any(|b| b.desc.ccd == CcdMode::Enabled && b.desc.kind == BodyKind::Dynamic);
         let sub_steps: u32 = if has_ccd { 8 } else { 1 };
         let sub_dt = dt / sub_steps as f32;
 
@@ -994,6 +1551,7 @@ impl PhysicsBackend for SimplePhysicsBackend {
         desc: &ColliderDesc,
     ) -> EngineResult<ColliderHandle> {
         self.body(body)?;
+        validate_collider_shape(&desc.shape)?;
         let handle = ColliderHandle(self.next_collider);
         self.next_collider = self.next_collider.saturating_add(1).max(1);
         self.colliders.insert(
@@ -1114,6 +1672,156 @@ impl PhysicsBackend for SimplePhysicsBackend {
             .min_by(|left, right| left.distance.total_cmp(&right.distance))
     }
 
+    fn raycast_all(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> RayHitAll {
+        let direction = direction.normalized();
+        if direction == Vec3::ZERO {
+            return RayHitAll { hits: Vec::new() };
+        }
+        let mut hits: Vec<RayHit> = self
+            .colliders
+            .iter()
+            .filter(|(_, collider)| filter_matches(collider.desc.layer, filter))
+            .filter_map(|(handle, collider)| {
+                let (center, radius) = self.collider_world_sphere(*handle)?;
+                ray_sphere(origin, direction, max_distance, center, radius).map(|distance| RayHit {
+                    body: collider.body,
+                    collider: *handle,
+                    point: origin + direction * distance,
+                    normal: (origin + direction * distance - center).normalized(),
+                    distance,
+                })
+            })
+            .collect();
+        hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        RayHitAll { hits }
+    }
+
+    fn sweep_box(
+        &self,
+        center: Vec3,
+        half_extents: Vec3,
+        _rotation: Quat,
+        direction: Vec3,
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> Option<SweepHit> {
+        let direction = direction.normalized();
+        if direction == Vec3::ZERO {
+            return None;
+        }
+        let radius = half_extents.length();
+        self.colliders
+            .iter()
+            .filter(|(_, collider)| filter_matches(collider.desc.layer, filter))
+            .filter_map(|(handle, collider)| {
+                let (other_center, other_radius) = self.collider_world_sphere(*handle)?;
+                ray_sphere(
+                    center,
+                    direction,
+                    max_distance,
+                    other_center,
+                    radius + other_radius,
+                )
+                .map(|distance| SweepHit {
+                    body: collider.body,
+                    collider: *handle,
+                    point: center + direction * distance,
+                    normal: (center + direction * distance - other_center).normalized(),
+                    distance,
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    fn sweep_capsule(
+        &self,
+        center: Vec3,
+        half_height: f32,
+        radius: f32,
+        _rotation: Quat,
+        direction: Vec3,
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> Option<SweepHit> {
+        let direction = direction.normalized();
+        if direction == Vec3::ZERO {
+            return None;
+        }
+        let sweep_radius = half_height + radius;
+        self.colliders
+            .iter()
+            .filter(|(_, collider)| filter_matches(collider.desc.layer, filter))
+            .filter_map(|(handle, collider)| {
+                let (other_center, other_radius) = self.collider_world_sphere(*handle)?;
+                ray_sphere(
+                    center,
+                    direction,
+                    max_distance,
+                    other_center,
+                    sweep_radius + other_radius,
+                )
+                .map(|distance| SweepHit {
+                    body: collider.body,
+                    collider: *handle,
+                    point: center + direction * distance,
+                    normal: (center + direction * distance - other_center).normalized(),
+                    distance,
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+
+    fn overlap_box(
+        &self,
+        center: Vec3,
+        half_extents: Vec3,
+        _rotation: Quat,
+        filter: QueryFilter,
+    ) -> Vec<OverlapResult> {
+        let radius = half_extents.length();
+        self.colliders
+            .iter()
+            .filter(|(_, collider)| filter_matches(collider.desc.layer, filter))
+            .filter_map(|(handle, collider)| {
+                let (other_center, other_radius) = self.collider_world_sphere(*handle)?;
+                ((center - other_center).length_squared() <= (radius + other_radius).powi(2))
+                    .then_some(OverlapResult {
+                        body: collider.body,
+                        collider: *handle,
+                    })
+            })
+            .collect()
+    }
+
+    fn overlap_capsule(
+        &self,
+        center: Vec3,
+        half_height: f32,
+        radius: f32,
+        _rotation: Quat,
+        filter: QueryFilter,
+    ) -> Vec<OverlapResult> {
+        let sweep_radius = half_height + radius;
+        self.colliders
+            .iter()
+            .filter(|(_, collider)| filter_matches(collider.desc.layer, filter))
+            .filter_map(|(handle, collider)| {
+                let (other_center, other_radius) = self.collider_world_sphere(*handle)?;
+                ((center - other_center).length_squared() <= (sweep_radius + other_radius).powi(2))
+                    .then_some(OverlapResult {
+                        body: collider.body,
+                        collider: *handle,
+                    })
+            })
+            .collect()
+    }
+
     fn drain_contacts(&mut self) -> Vec<ContactEvent> {
         std::mem::take(&mut self.contacts)
     }
@@ -1221,6 +1929,8 @@ impl PhysicsBackend for SimplePhysicsBackend {
         Ok(JointState {
             handle: joint,
             desc: desc.clone(),
+            positions: [0.0; 6],
+            velocities: [0.0; 6],
         })
     }
 
@@ -1260,6 +1970,17 @@ impl PhysicsBackend for SimplePhysicsBackend {
 
     fn joint_forces(&self, _joint: JointHandle) -> EngineResult<(f32, f32)> {
         Ok((0.0, 0.0))
+    }
+
+    fn stats(&self) -> PhysicsStats {
+        PhysicsStats {
+            body_count: self.bodies.len(),
+            collider_count: self.colliders.len(),
+            contact_count: self.active_pairs.len(),
+            sleeping_count: self.sleeping.len(),
+            joint_count: self.joints.len(),
+            ..PhysicsStats::default()
+        }
     }
 }
 
@@ -1351,6 +2072,17 @@ fn shape_world_sphere(center: Vec3, shape: &ColliderShape) -> (Vec3, f32) {
             .chunks_exact(3)
             .map(|chunk| Vec3::new(chunk[0], chunk[1], chunk[2]).length())
             .fold(0.0, f32::max),
+        ColliderShape::Heightfield {
+            num_x,
+            num_z,
+            heights,
+            scale,
+        } => {
+            let max_height = heights.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
+            let half_x = (*num_x as f32 - 1.0) * scale.x * 0.5;
+            let half_z = (*num_z as f32 - 1.0) * scale.z * 0.5;
+            Vec3::new(half_x, max_height * scale.y, half_z).length()
+        }
     };
     (center, radius)
 }
@@ -1421,6 +2153,12 @@ mod rapier_backend {
         next_joint: u64,
         joint_handles: HashMap<JointHandle, rp::ImpulseJointHandle>,
         rapier_joints: HashMap<rp::ImpulseJointHandle, JointHandle>,
+        joint_types: HashMap<JointHandle, crate::joints::JointType>,
+        next_vehicle: u64,
+        vehicles: HashMap<VehicleHandle, rpc::DynamicRayCastVehicleController>,
+        vehicle_handles: HashMap<VehicleHandle, rp::RigidBodyHandle>,
+        rapier_vehicles: HashMap<rp::RigidBodyHandle, VehicleHandle>,
+        stats: PhysicsStats,
     }
 
     impl Default for RapierPhysicsBackend {
@@ -1453,6 +2191,12 @@ mod rapier_backend {
                 next_joint: 1,
                 joint_handles: HashMap::new(),
                 rapier_joints: HashMap::new(),
+                joint_types: HashMap::new(),
+                next_vehicle: 1,
+                vehicles: HashMap::new(),
+                vehicle_handles: HashMap::new(),
+                rapier_vehicles: HashMap::new(),
+                stats: PhysicsStats::default(),
             }
         }
     }
@@ -1563,6 +2307,7 @@ mod rapier_backend {
 
     impl PhysicsBackend for RapierPhysicsBackend {
         fn fixed_update(&mut self, dt: f32) {
+            let start = std::time::Instant::now();
             self.integration.dt = dt.max(0.0);
             self.pipeline.step(
                 &self.gravity,
@@ -1580,6 +2325,21 @@ mod rapier_backend {
                 &self.event_handler,
             );
             self.drain_rapier_events();
+
+            self.stats = PhysicsStats {
+                step_us: start.elapsed().as_micros() as u64,
+                body_count: self.body_handles.len(),
+                collider_count: self.collider_handles.len(),
+                contact_count: self.narrow_phase.contact_pairs().count(),
+                island_count: 0,
+                sleeping_count: self
+                    .bodies
+                    .iter()
+                    .filter(|(_, body)| body.is_sleeping())
+                    .count(),
+                joint_count: self.joint_handles.len(),
+                vehicle_count: self.vehicles.len(),
+            };
         }
 
         fn create_body(&mut self, desc: &RigidbodyDesc) -> EngineResult<BodyHandle> {
@@ -1627,6 +2387,7 @@ mod rapier_backend {
             desc: &ColliderDesc,
         ) -> EngineResult<ColliderHandle> {
             let rapier_body = self.rapier_body(body)?;
+            validate_collider_shape(&desc.shape)?;
             let mut active_events = rp::ActiveEvents::COLLISION_EVENTS;
             if desc.active_contact_events {
                 active_events |= rp::ActiveEvents::CONTACT_FORCE_EVENTS;
@@ -1808,6 +2569,204 @@ mod rapier_backend {
                 })
         }
 
+        fn raycast_all(
+            &self,
+            origin: Vec3,
+            direction: Vec3,
+            max_distance: f32,
+            filter: QueryFilter,
+        ) -> RayHitAll {
+            let direction = direction.normalized();
+            if direction == Vec3::ZERO {
+                return RayHitAll { hits: Vec::new() };
+            }
+            let ray = rp::Ray::new(point3(origin), vector3(direction));
+            let mut hits = Vec::new();
+            self.query_pipeline.intersections_with_ray(
+                &self.bodies,
+                &self.colliders,
+                &ray,
+                max_distance,
+                true,
+                query_filter(filter),
+                |rapier_collider, hit| {
+                    if let (Some(collider), Some(body)) = (
+                        self.rapier_colliders.get(&rapier_collider).copied(),
+                        self.collider_owner(rapier_collider),
+                    ) {
+                        hits.push(RayHit {
+                            body,
+                            collider,
+                            point: origin + direction * hit.time_of_impact,
+                            normal: vec3(hit.normal),
+                            distance: hit.time_of_impact,
+                        });
+                    }
+                    true
+                },
+            );
+            hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            RayHitAll { hits }
+        }
+
+        fn sweep_box(
+            &self,
+            center: Vec3,
+            half_extents: Vec3,
+            rotation: Quat,
+            direction: Vec3,
+            max_distance: f32,
+            filter: QueryFilter,
+        ) -> Option<SweepHit> {
+            let direction = direction.normalized();
+            if direction == Vec3::ZERO {
+                return None;
+            }
+            let shape = rp::SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z);
+            let pos = isometry(Transform {
+                translation: center,
+                rotation,
+                scale: Vec3::ONE,
+            });
+            self.query_pipeline
+                .cast_shape(
+                    &self.bodies,
+                    &self.colliders,
+                    &pos,
+                    &vector3(direction),
+                    shape.as_ref(),
+                    ShapeCastOptions {
+                        max_time_of_impact: max_distance,
+                        ..ShapeCastOptions::default()
+                    },
+                    query_filter(filter),
+                )
+                .and_then(|(rapier_collider, hit)| {
+                    let collider = self.rapier_colliders.get(&rapier_collider).copied()?;
+                    let body = self.collider_owner(rapier_collider)?;
+                    Some(SweepHit {
+                        body,
+                        collider,
+                        point: center + direction * hit.time_of_impact,
+                        normal: vec3(*hit.normal1),
+                        distance: hit.time_of_impact,
+                    })
+                })
+        }
+
+        fn sweep_capsule(
+            &self,
+            center: Vec3,
+            half_height: f32,
+            radius: f32,
+            rotation: Quat,
+            direction: Vec3,
+            max_distance: f32,
+            filter: QueryFilter,
+        ) -> Option<SweepHit> {
+            let direction = direction.normalized();
+            if direction == Vec3::ZERO {
+                return None;
+            }
+            let shape = rp::SharedShape::capsule_y(half_height, radius);
+            let pos = isometry(Transform {
+                translation: center,
+                rotation,
+                scale: Vec3::ONE,
+            });
+            self.query_pipeline
+                .cast_shape(
+                    &self.bodies,
+                    &self.colliders,
+                    &pos,
+                    &vector3(direction),
+                    shape.as_ref(),
+                    ShapeCastOptions {
+                        max_time_of_impact: max_distance,
+                        ..ShapeCastOptions::default()
+                    },
+                    query_filter(filter),
+                )
+                .and_then(|(rapier_collider, hit)| {
+                    let collider = self.rapier_colliders.get(&rapier_collider).copied()?;
+                    let body = self.collider_owner(rapier_collider)?;
+                    Some(SweepHit {
+                        body,
+                        collider,
+                        point: center + direction * hit.time_of_impact,
+                        normal: vec3(*hit.normal1),
+                        distance: hit.time_of_impact,
+                    })
+                })
+        }
+
+        fn overlap_box(
+            &self,
+            center: Vec3,
+            half_extents: Vec3,
+            rotation: Quat,
+            filter: QueryFilter,
+        ) -> Vec<OverlapResult> {
+            let shape = rp::SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z);
+            let pos = isometry(Transform {
+                translation: center,
+                rotation,
+                scale: Vec3::ONE,
+            });
+            let mut results = Vec::new();
+            self.query_pipeline.intersections_with_shape(
+                &self.bodies,
+                &self.colliders,
+                &pos,
+                shape.as_ref(),
+                query_filter(filter),
+                |rapier_collider| {
+                    if let (Some(collider), Some(body)) = (
+                        self.rapier_colliders.get(&rapier_collider).copied(),
+                        self.collider_owner(rapier_collider),
+                    ) {
+                        results.push(OverlapResult { body, collider });
+                    }
+                    true
+                },
+            );
+            results
+        }
+
+        fn overlap_capsule(
+            &self,
+            center: Vec3,
+            half_height: f32,
+            radius: f32,
+            rotation: Quat,
+            filter: QueryFilter,
+        ) -> Vec<OverlapResult> {
+            let shape = rp::SharedShape::capsule_y(half_height, radius);
+            let pos = isometry(Transform {
+                translation: center,
+                rotation,
+                scale: Vec3::ONE,
+            });
+            let mut results = Vec::new();
+            self.query_pipeline.intersections_with_shape(
+                &self.bodies,
+                &self.colliders,
+                &pos,
+                shape.as_ref(),
+                query_filter(filter),
+                |rapier_collider| {
+                    if let (Some(collider), Some(body)) = (
+                        self.rapier_colliders.get(&rapier_collider).copied(),
+                        self.collider_owner(rapier_collider),
+                    ) {
+                        results.push(OverlapResult { body, collider });
+                    }
+                    true
+                },
+            );
+            results
+        }
+
         fn drain_contacts(&mut self) -> Vec<ContactEvent> {
             self.drain_rapier_events();
             std::mem::take(&mut self.pending_contacts)
@@ -1942,7 +2901,10 @@ mod rapier_backend {
                     rp::GenericJoint::from(j)
                 }
                 JointType::Hinge {
-                    axis_a, limits, motor, ..
+                    axis_a,
+                    limits,
+                    motor,
+                    ..
                 } => {
                     let axis = na::Unit::new_normalize(vector3(*axis_a));
                     let mut j = rp::RevoluteJoint::new(axis);
@@ -1955,7 +2917,10 @@ mod rapier_backend {
                     rp::GenericJoint::from(j)
                 }
                 JointType::Slider {
-                    axis_a, limits, motor, ..
+                    axis_a,
+                    limits,
+                    motor,
+                    ..
                 } => {
                     let axis = na::Unit::new_normalize(vector3(*axis_a));
                     let mut j = rp::PrismaticJoint::new(axis);
@@ -1967,13 +2932,33 @@ mod rapier_backend {
                     }
                     rp::GenericJoint::from(j)
                 }
-                JointType::SpringArm { .. } => {
-                    let j = rp::FixedJoint::new();
-                    rp::GenericJoint::from(j)
+                JointType::SpringArm {
+                    rest_length,
+                    stiffness,
+                    damping,
+                    ..
+                } => {
+                    let mut j = rp::GenericJoint::default();
+                    j.set_motor(rp::JointAxis::LinX, 0.0, *rest_length, *stiffness, *damping);
+                    j
                 }
-                JointType::ConeTwist { .. } => {
-                    let j = rp::SphericalJoint::new();
-                    rp::GenericJoint::from(j)
+                JointType::ConeTwist {
+                    swing_limits,
+                    twist_limits,
+                    ..
+                } => {
+                    let mut j = rp::GenericJoint::default();
+                    for axis in [
+                        rp::JointAxis::LinX,
+                        rp::JointAxis::LinY,
+                        rp::JointAxis::LinZ,
+                    ] {
+                        j.set_limits(axis, [0.0, 0.0]);
+                    }
+                    j.set_limits(rp::JointAxis::AngX, [twist_limits.min, twist_limits.max]);
+                    j.set_limits(rp::JointAxis::AngY, [-swing_limits.max, swing_limits.max]);
+                    j.set_limits(rp::JointAxis::AngZ, [-swing_limits.max, swing_limits.max]);
+                    j
                 }
                 JointType::Generic6DOF {
                     linear_limits,
@@ -2008,13 +2993,12 @@ mod rapier_backend {
             };
             joint.local_frame1 = local_a;
             joint.local_frame2 = local_b;
-            let rapier =
-                self.impulse_joints
-                    .insert(rapier_a, rapier_b, joint, true);
+            let rapier = self.impulse_joints.insert(rapier_a, rapier_b, joint, true);
             let handle = JointHandle(self.next_joint);
             self.next_joint = self.next_joint.saturating_add(1).max(1);
             self.joint_handles.insert(handle, rapier);
             self.rapier_joints.insert(rapier, handle);
+            self.joint_types.insert(handle, desc.joint_type.clone());
             Ok(handle)
         }
 
@@ -2025,6 +3009,7 @@ mod rapier_backend {
                 .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
             self.impulse_joints.remove(rapier, true);
             self.rapier_joints.remove(&rapier);
+            self.joint_types.remove(&joint);
             Ok(())
         }
 
@@ -2033,12 +3018,39 @@ mod rapier_backend {
                 .joint_handles
                 .get(&joint)
                 .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
-            let _ = self
+            let j = self
                 .impulse_joints
                 .get(*rapier)
                 .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
-            Err(EngineError::UnsupportedCapability {
-                capability: "joint_state query",
+            let joint_type = self
+                .joint_types
+                .get(&joint)
+                .cloned()
+                .ok_or_else(|| EngineError::invalid_handle("joint type not found"))?;
+            let body_a = self
+                .rapier_bodies
+                .get(&j.body1)
+                .copied()
+                .unwrap_or(BodyHandle(0));
+            let body_b = self
+                .rapier_bodies
+                .get(&j.body2)
+                .copied()
+                .unwrap_or(BodyHandle(0));
+
+            let positions = compute_joint_positions(&self.bodies, j.body1, j.body2, &joint_type);
+            let velocities = [0.0_f32; 6];
+            Ok(JointState {
+                handle: joint,
+                desc: JointDesc {
+                    joint_type,
+                    body_a,
+                    body_b,
+                    break_force: 0.0,
+                    break_torque: 0.0,
+                },
+                positions,
+                velocities,
             })
         }
 
@@ -2051,14 +3063,14 @@ mod rapier_backend {
                 .impulse_joints
                 .get_mut(*rapier)
                 .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+            let joint_type = self
+                .joint_types
+                .get(&joint)
+                .ok_or_else(|| EngineError::invalid_handle("joint type not found"))?;
             if motor.enabled {
-                j.data.set_motor(
-                    rp::JointAxis::AngX,
-                    motor.target_velocity,
-                    0.0,
-                    motor.max_force,
-                    0.0,
-                );
+                let axis = motor_axis_for_joint(joint_type);
+                j.data
+                    .set_motor(axis, motor.target_velocity, 0.0, motor.max_force, 0.0);
             }
             Ok(())
         }
@@ -2076,13 +3088,139 @@ mod rapier_backend {
                 .impulse_joints
                 .get_mut(*rapier)
                 .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
-            j.data
-                .set_limits(rp::JointAxis::AngX, [limits.min, limits.max]);
+            let joint_type = self
+                .joint_types
+                .get(&joint)
+                .ok_or_else(|| EngineError::invalid_handle("joint type not found"))?;
+            let axis = motor_axis_for_joint(joint_type);
+            j.data.set_limits(axis, [limits.min, limits.max]);
             Ok(())
         }
 
-        fn joint_forces(&self, _joint: JointHandle) -> EngineResult<(f32, f32)> {
-            Ok((0.0, 0.0))
+        fn joint_forces(&self, joint: JointHandle) -> EngineResult<(f32, f32)> {
+            let rapier = self
+                .joint_handles
+                .get(&joint)
+                .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+            let j = self
+                .impulse_joints
+                .get(*rapier)
+                .ok_or_else(|| EngineError::invalid_handle("joint does not exist"))?;
+            let linear = j.impulses.fixed_rows::<3>(0).norm();
+            let angular = j.impulses.fixed_rows::<3>(3).norm();
+            Ok((linear, angular))
+        }
+
+        fn create_vehicle(&mut self, desc: &VehicleDesc) -> EngineResult<VehicleHandle> {
+            let rapier_chassis = self.rapier_body(desc.chassis)?;
+            let mut controller = rpc::DynamicRayCastVehicleController::new(rapier_chassis);
+            for wheel in &desc.wheels {
+                let connection = point3(wheel.chassis_connection);
+                let direction = vector3(Vec3::new(0.0, -1.0, 0.0));
+                let axle = vector3(Vec3::new(-1.0, 0.0, 0.0));
+                let tuning = rpc::WheelTuning {
+                    suspension_stiffness: wheel.suspension_stiffness,
+                    suspension_compression: wheel.suspension_damping,
+                    suspension_damping: wheel.suspension_damping * 0.5,
+                    max_suspension_travel: wheel.suspension_travel,
+                    side_friction_stiffness: wheel.lateral_friction_stiffness,
+                    friction_slip: wheel.longitudinal_friction_stiffness,
+                    max_suspension_force: wheel.max_suspension_force,
+                };
+                controller.add_wheel(
+                    connection,
+                    direction,
+                    axle,
+                    wheel.suspension_rest,
+                    wheel.radius,
+                    &tuning,
+                );
+            }
+            let handle = VehicleHandle(self.next_vehicle);
+            self.next_vehicle = self.next_vehicle.saturating_add(1).max(1);
+            self.vehicle_handles.insert(handle, rapier_chassis);
+            self.rapier_vehicles.insert(rapier_chassis, handle);
+            self.vehicles.insert(handle, controller);
+            Ok(handle)
+        }
+
+        fn destroy_vehicle(&mut self, vehicle: VehicleHandle) -> EngineResult<()> {
+            let rapier_chassis = self
+                .vehicle_handles
+                .remove(&vehicle)
+                .ok_or_else(|| EngineError::invalid_handle("vehicle does not exist"))?;
+            self.rapier_vehicles.remove(&rapier_chassis);
+            self.vehicles
+                .remove(&vehicle)
+                .ok_or_else(|| EngineError::invalid_handle("vehicle does not exist"))?;
+            Ok(())
+        }
+
+        fn update_vehicle(
+            &mut self,
+            vehicle: VehicleHandle,
+            input: VehicleInput,
+        ) -> EngineResult<VehicleState> {
+            let controller = self
+                .vehicles
+                .get_mut(&vehicle)
+                .ok_or_else(|| EngineError::invalid_handle("vehicle does not exist"))?;
+
+            let wheel_count = controller.wheels().len();
+            for i in 0..wheel_count {
+                let wheel = &mut controller.wheels_mut()[i];
+                wheel.engine_force = input.throttle * 500.0;
+                wheel.brake = input.brake * 100.0;
+                wheel.steering = input.steering * 0.6;
+            }
+            if input.handbrake {
+                for i in 0..wheel_count {
+                    controller.wheels_mut()[i].brake = 200.0;
+                }
+            }
+
+            controller.update_vehicle(
+                self.integration.dt.max(1.0 / 240.0),
+                &mut self.bodies,
+                &self.colliders,
+                &self.query_pipeline,
+                rp::QueryFilter::default(),
+            );
+
+            let speed = controller.current_vehicle_speed;
+            let gear = if speed.abs() < 0.01 {
+                0
+            } else if speed > 0.0 {
+                1
+            } else {
+                -1
+            };
+            let mut wheel_transforms = Vec::new();
+            let mut suspension_displacements = Vec::new();
+            let mut grounded = false;
+            for wheel in controller.wheels() {
+                let center = vec3(wheel.center().coords);
+                wheel_transforms.push(Transform {
+                    translation: center,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ONE,
+                });
+                suspension_displacements.push(wheel.raycast_info().suspension_length);
+                if wheel.raycast_info().is_in_contact {
+                    grounded = true;
+                }
+            }
+            Ok(VehicleState {
+                speed,
+                gear,
+                wheel_transforms,
+                suspension_displacements,
+                grounded,
+            })
+        }
+
+        fn stats(&self) -> PhysicsStats {
+            self.stats
         }
     }
 
@@ -2114,6 +3252,19 @@ mod rapier_backend {
                     .map(|chunk| [chunk[0], chunk[1], chunk[2]])
                     .collect();
                 rp::ColliderBuilder::trimesh(points, triangles)
+            }
+            ColliderShape::Heightfield {
+                num_x,
+                num_z,
+                heights,
+                scale,
+            } => {
+                let nrows = *num_x as usize;
+                let ncols = *num_z as usize;
+                let heights_matrix =
+                    na::DMatrix::from_fn(nrows, ncols, |r, c| heights[r * ncols + c] * scale.y);
+                let scale_vec = rp::Vector::new(scale.x, 1.0, scale.z);
+                rp::ColliderBuilder::heightfield(heights_matrix, scale_vec)
             }
         }
     }
@@ -2201,6 +3352,64 @@ mod rapier_backend {
             CombineMode::Max => rp::CoefficientCombineRule::Max,
         }
     }
+
+    fn compute_joint_positions(
+        bodies: &rp::RigidBodySet,
+        body1: rp::RigidBodyHandle,
+        body2: rp::RigidBodyHandle,
+        joint_type: &crate::joints::JointType,
+    ) -> [f32; 6] {
+        use crate::joints::JointType;
+        let zero = [0.0_f32; 6];
+        let (Some(b1), Some(b2)) = (bodies.get(body1), bodies.get(body2)) else {
+            return zero;
+        };
+        let iso1 = b1.position();
+        let iso2 = b2.position();
+        match joint_type {
+            JointType::Hinge {
+                anchor_a,
+                anchor_b,
+                axis_a,
+                ..
+            } => {
+                let world_a = iso1 * point3(*anchor_a);
+                let world_b = iso2 * point3(*anchor_b);
+                let world_axis = (iso1 * vector3(*axis_a)).normalize();
+                let da = (iso1.translation.vector - world_a.coords).cross(&world_axis);
+                let db = (iso2.translation.vector - world_b.coords).cross(&world_axis);
+                let angle = db.norm().atan2(da.norm()).copysign(da.dot(&world_axis));
+                let mut pos = zero;
+                pos[3] = angle;
+                pos
+            }
+            JointType::Slider {
+                anchor_a,
+                anchor_b,
+                axis_a,
+                ..
+            } => {
+                let world_a = iso1 * point3(*anchor_a);
+                let world_b = iso2 * point3(*anchor_b);
+                let delta = world_b - world_a;
+                let world_axis = (iso1 * vector3(*axis_a)).normalize();
+                let mut pos = zero;
+                pos[0] = delta.dot(&world_axis);
+                pos
+            }
+            _ => zero,
+        }
+    }
+
+    fn motor_axis_for_joint(joint_type: &crate::joints::JointType) -> rp::JointAxis {
+        use crate::joints::JointType;
+        match joint_type {
+            JointType::Hinge { .. } => rp::JointAxis::AngX,
+            JointType::Slider { .. } => rp::JointAxis::LinX,
+            JointType::Generic6DOF { .. } => rp::JointAxis::AngX,
+            _ => rp::JointAxis::AngX,
+        }
+    }
 }
 
 #[cfg(feature = "rapier")]
@@ -2209,6 +3418,49 @@ pub use rapier_backend::RapierPhysicsBackend;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collision_profiles_honor_overrides_and_overlap_semantics() {
+        let registry = CollisionProfileRegistry::default();
+        let mut pawn = CollisionProfile {
+            channel: "Pawn".into(),
+            generate_overlap_events: true,
+            ..CollisionProfile::default()
+        };
+        let projectile = CollisionProfile {
+            channel: "Projectile".into(),
+            generate_overlap_events: true,
+            ..CollisionProfile::default()
+        };
+
+        assert!(!registry.should_collide(&pawn, &projectile));
+        assert!(registry.should_overlap(&pawn, &projectile));
+
+        pawn.responses
+            .insert("Projectile".into(), CollisionResponse::Ignore);
+        assert!(!registry.should_collide(&pawn, &projectile));
+        assert!(!registry.should_overlap(&pawn, &projectile));
+    }
+
+    #[test]
+    fn invalid_heightfield_is_rejected_without_panicking() {
+        let mut backend = SimplePhysicsBackend::default();
+        let body = backend.create_body(&RigidbodyDesc::default()).unwrap();
+        let result = backend.add_collider(
+            body,
+            &ColliderDesc {
+                shape: ColliderShape::Heightfield {
+                    num_x: 3,
+                    num_z: 3,
+                    heights: vec![0.0; 8],
+                    scale: Vec3::ONE,
+                },
+                ..ColliderDesc::default()
+            },
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn null_backend_raycast_returns_none() {

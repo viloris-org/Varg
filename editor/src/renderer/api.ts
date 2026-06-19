@@ -22,31 +22,52 @@ interface CopilotStreamEvent {
   delta: string;
 }
 
+interface CopilotStreamHandle<T> {
+  promise: Promise<T>;
+  cancel: () => void;
+}
+
 /** Run a Copilot planning request while receiving model response deltas. */
-export async function streamCopilotPlan<T>(
+export function streamCopilotPlan<T>(
   params: Record<string, unknown>,
   onDelta: (delta: string, kind: CopilotStreamEvent['kind']) => void,
-): Promise<T> {
+): CopilotStreamHandle<T> {
   const requestId = `${Date.now()}-${nextStreamRequestId++}`;
-  const unlistenDelta = await listen<CopilotStreamEvent>('copilot-stream', (event) => {
-    if (event.payload.request_id === requestId) {
-      onDelta(event.payload.delta, event.payload.kind ?? 'text');
-    }
+  let rejectCancelled: ((reason?: unknown) => void) | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    rejectCancelled = reject;
   });
   let resolveComplete: (() => void) | undefined;
   const completed = new Promise<void>((resolve) => { resolveComplete = resolve; });
-  const unlistenComplete = await listen<{ request_id: string }>('copilot-stream-complete', (event) => {
-    if (event.payload.request_id === requestId) resolveComplete?.();
-  });
 
-  try {
-    await invoke('start_copilot_plan', { requestId, params });
-    await completed;
-    return await invoke<T>('finish_copilot_plan', { requestId });
-  } finally {
-    unlistenDelta();
-    unlistenComplete();
-  }
+  const setupPromise = (async () => {
+    const unlistenDelta = await listen<CopilotStreamEvent>('copilot-stream', (event) => {
+      if (event.payload.request_id === requestId) {
+        onDelta(event.payload.delta, event.payload.kind ?? 'text');
+      }
+    });
+    const unlistenComplete = await listen<{ request_id: string }>('copilot-stream-complete', (event) => {
+      if (event.payload.request_id === requestId) resolveComplete?.();
+    });
+
+    try {
+      await invoke('start_copilot_plan', { requestId, params });
+      await completed;
+      return await invoke<T>('finish_copilot_plan', { requestId });
+    } finally {
+      unlistenDelta();
+      unlistenComplete();
+    }
+  })();
+
+  return {
+    promise: Promise.race([setupPromise, cancelled]),
+    cancel: () => {
+      rejectCancelled?.(new Error('cancelled'));
+      rejectCancelled = undefined;
+      invoke('cancel_copilot_plan', { requestId }).catch(() => {});
+    },
+  };
 }
 
 /**

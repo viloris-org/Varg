@@ -10,10 +10,13 @@ rust-version.workspace = true
 [features]
 default = []
 runtime-min = []
-runtime-game = ["runtime-min"]
+runtime-game = ["runtime-min", "device-output"]
 editor = []
 dev-full = ["runtime-game", "editor"]
+device-output = ["dep:cpal"]
 
 [dependencies]
+cpal = { workspace = true, optional = true }
 engine-core.workspace = true
 serde.workspace = true
+symphonia.workspace = true

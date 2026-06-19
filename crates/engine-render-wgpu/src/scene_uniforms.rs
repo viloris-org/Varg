@@ -1,0 +1,380 @@
+use crate::{device::*, math::*, uniforms::*};
+use engine_render::{RenderLight, RenderLightKind, RenderWorld};
+
+pub(crate) fn csm_uniform_from_world(world: &RenderWorld, aspect: f32) -> CsmUniform {
+    let light_dir = primary_directional_light(world)
+        .map(|l| {
+            l.transform
+                .rotation
+                .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                .normalized()
+        })
+        .unwrap_or_else(|| engine_core::math::Vec3::new(-0.5, -1.0, -0.25).normalized());
+
+    let cam = match &world.camera {
+        Some(c) => c,
+        None => {
+            return CsmUniform {
+                cascade_vps: [IDENTITY_MAT4; CSM_CASCADE_COUNT],
+                cascade_splits: [0.0; 4],
+            };
+        }
+    };
+
+    let cam_pos = cam.transform.translation;
+    let cam_forward = cam
+        .look_at_target
+        .map(|target| (target - cam_pos).normalized())
+        .unwrap_or_else(|| {
+            cam.transform
+                .rotation
+                .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                .normalized()
+        });
+
+    let fov_rad = cam.vertical_fov_degrees.to_radians();
+    let tan_half_fov = (fov_rad * 0.5).tan();
+
+    let mut cascade_vps = [IDENTITY_MAT4; CSM_CASCADE_COUNT];
+    let mut cascade_splits = [0.0f32; 4];
+
+    for i in 0..CSM_CASCADE_COUNT {
+        let near = if i == 0 {
+            cam.near
+        } else {
+            CSM_CASCADE_SPLITS[i - 1]
+        };
+        let far = CSM_CASCADE_SPLITS[i];
+        if i < 4 {
+            cascade_splits[i] = far;
+        }
+
+        let half_height_near = tan_half_fov * near;
+        let half_width_near = half_height_near * aspect;
+        let half_height_far = tan_half_fov * far;
+        let half_width_far = half_height_far * aspect;
+
+        let near_center = cam_pos + cam_forward * near;
+        let far_center = cam_pos + cam_forward * far;
+
+        let right = engine_core::math::Vec3::new(0.0, 1.0, 0.0)
+            .cross(cam_forward)
+            .normalized();
+        let up = cam_forward.cross(right);
+
+        let corners = [
+            near_center + right * half_width_near + up * half_height_near,
+            near_center - right * half_width_near + up * half_height_near,
+            near_center - right * half_width_near - up * half_height_near,
+            near_center + right * half_width_near - up * half_height_near,
+            far_center + right * half_width_far + up * half_height_far,
+            far_center - right * half_width_far + up * half_height_far,
+            far_center - right * half_width_far - up * half_height_far,
+            far_center + right * half_width_far - up * half_height_far,
+        ];
+
+        let mut center = engine_core::math::Vec3::ZERO;
+        for corner in &corners {
+            center = center + *corner;
+        }
+        center = center * (1.0 / 8.0);
+
+        let up = if light_dir.x.abs() < 0.99 {
+            engine_core::math::Vec3::new(0.0, 1.0, 0.0)
+        } else {
+            engine_core::math::Vec3::new(0.0, 0.0, 1.0)
+        };
+        let light_view = look_at_rh(center - light_dir * 50.0, center, up);
+
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut min_z = f32::MAX;
+        let mut max_z = f32::MIN;
+        for corner in &corners {
+            let p = mul_mat4_vec3(&light_view, *corner);
+            min_x = min_x.min(p.x);
+            max_x = max_x.max(p.x);
+            min_y = min_y.min(p.y);
+            max_y = max_y.max(p.y);
+            min_z = min_z.min(p.z);
+            max_z = max_z.max(p.z);
+        }
+
+        let z_padding = 10.0;
+        let light_proj = orthographic_rh_custom(
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z - z_padding,
+            max_z + z_padding,
+        );
+        cascade_vps[i] = mul_mat4(&light_proj, &light_view);
+    }
+
+    CsmUniform {
+        cascade_vps,
+        cascade_splits,
+    }
+}
+pub(crate) fn skybox_uniform_from_world(world: &RenderWorld) -> SkyboxUniform {
+    let skybox = match &world.skybox {
+        Some(s) => s,
+        None => {
+            return SkyboxUniform {
+                view_rotation_only: IDENTITY_MAT4,
+                zenith_color: [0.15, 0.35, 0.65, 1.0],
+                horizon_color: [0.55, 0.7, 0.85, 1.0],
+                rotation_intensity: [0.0, 1.0, 0.0, 0.0],
+                use_cubemap: [0, 0, 0, 0],
+            };
+        }
+    };
+
+    let eye = world
+        .camera
+        .as_ref()
+        .map(|c| c.transform.translation)
+        .unwrap_or(engine_core::math::Vec3::new(0.0, 0.0, 5.0));
+    let target = world
+        .camera
+        .as_ref()
+        .and_then(|c| c.look_at_target)
+        .unwrap_or_else(|| {
+            let q = world
+                .camera
+                .as_ref()
+                .map(|c| c.transform.rotation)
+                .unwrap_or(engine_core::math::Quat::IDENTITY);
+            let fwd = engine_core::math::Vec3::new(
+                2.0 * (q.x * q.z + q.w * q.y),
+                2.0 * (q.y * q.z - q.w * q.x),
+                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+            );
+            engine_core::math::Vec3::new(eye.x - fwd.x, eye.y - fwd.y, eye.z - fwd.z)
+        });
+    let view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
+
+    SkyboxUniform {
+        view_rotation_only: view,
+        zenith_color: [
+            skybox.zenith_color[0],
+            skybox.zenith_color[1],
+            skybox.zenith_color[2],
+            1.0,
+        ],
+        horizon_color: [
+            skybox.horizon_color[0],
+            skybox.horizon_color[1],
+            skybox.horizon_color[2],
+            1.0,
+        ],
+        rotation_intensity: [skybox.rotation_degrees, skybox.intensity, 0.0, 0.0],
+        use_cubemap: [0, 0, 0, 0],
+    }
+}
+
+pub(crate) fn fog_uniform_from_world(world: &RenderWorld) -> FogUniform {
+    match &world.fog {
+        Some(fog) => FogUniform {
+            density: fog.density,
+            _pad: [0.0; 3],
+            color: fog.color,
+            enabled: if fog.enabled { 1.0 } else { 0.0 },
+        },
+        None => FogUniform {
+            density: 0.0,
+            _pad: [0.0; 3],
+            color: [0.6, 0.7, 0.85],
+            enabled: 0.0,
+        },
+    }
+}
+pub(crate) fn camera_uniform_from_world(world: &RenderWorld, aspect: f32) -> CameraUniform {
+    let eye = world
+        .camera
+        .as_ref()
+        .map(|camera| camera.transform.translation)
+        .unwrap_or_else(|| engine_core::math::Vec3::new(0.0, 0.0, 5.0));
+
+    // Use the explicit look-at pivot if provided (editor orbit camera sets this),
+    // otherwise fall back to deriving the target from the camera's transform rotation.
+    let target = world
+        .camera
+        .as_ref()
+        .and_then(|camera| camera.look_at_target)
+        .unwrap_or_else(|| {
+            // Extract the local +Z axis from the rotation quaternion in world space.
+            // q * (0,0,1) gives the camera's local +Z in world space.
+            // Since the camera looks along local -Z, the view direction is
+            // -(+Z) which is achieved by target = eye - fwd below.
+            let q = world
+                .camera
+                .as_ref()
+                .map(|c| c.transform.rotation)
+                .unwrap_or(engine_core::math::Quat::IDENTITY);
+            let fwd = engine_core::math::Vec3::new(
+                2.0 * (q.x * q.z + q.w * q.y),
+                2.0 * (q.y * q.z - q.w * q.x),
+                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+            );
+            // Negate because camera looks along -Z in its local space.
+            engine_core::math::Vec3::new(eye.x - fwd.x, eye.y - fwd.y, eye.z - fwd.z)
+        });
+
+    let view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
+    let fov = world
+        .camera
+        .as_ref()
+        .map(|camera| camera.vertical_fov_degrees)
+        .unwrap_or(60.0);
+    let near = world
+        .camera
+        .as_ref()
+        .map(|camera| camera.near)
+        .unwrap_or(0.1);
+    let far = world
+        .camera
+        .as_ref()
+        .map(|camera| camera.far)
+        .unwrap_or(100.0);
+    let proj = match world.camera.as_ref().map(|camera| camera.projection) {
+        Some(engine_render::RenderProjection::Orthographic { vertical_size }) => {
+            orthographic_rh(vertical_size.max(0.001), aspect, near, far)
+        }
+        _ => perspective_rh(fov.to_radians(), aspect, near, far),
+    };
+    let vp = mul_mat4(&proj, &view);
+    CameraUniform {
+        view_projection: vp,
+        camera_position: [eye.x, eye.y, eye.z, 1.0],
+        camera_forward: {
+            let forward = (target - eye).normalized();
+            [forward.x, forward.y, forward.z, 0.0]
+        },
+    }
+}
+
+pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUniform {
+    let mut uniform = LightingUniform::default();
+    let mut count = 0usize;
+
+    for light in select_forward_lights(world) {
+        let mut packed = forward_light_uniform(light);
+        if count == 0 && light.kind == RenderLightKind::Directional {
+            packed.spot_angles[2] = 1.0;
+        }
+        uniform.lights[count] = packed;
+        count += 1;
+    }
+
+    if count == 0 {
+        uniform.lights[0] = ForwardLightUniform {
+            position_type: [0.0, 0.0, 0.0, 0.0],
+            direction_range: [-0.5, -1.0, -0.25, 0.0],
+            color_intensity: [1.0, 1.0, 1.0, 1.0],
+            spot_angles: [1.0, 1.0, 1.0, 0.0],
+        };
+        count = 1;
+    }
+
+    uniform.params = [count as u32, 0, 0, 0];
+    uniform
+}
+
+pub(crate) fn primary_directional_light(world: &RenderWorld) -> Option<&RenderLight> {
+    world
+        .lights
+        .iter()
+        .filter(|light| light.kind == RenderLightKind::Directional && light.intensity > 0.0)
+        .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+}
+
+pub(crate) fn select_forward_lights(world: &RenderWorld) -> Vec<&RenderLight> {
+    let mut selected = Vec::with_capacity(MAX_FORWARD_LIGHTS);
+    let mut directional: Vec<&RenderLight> = world
+        .lights
+        .iter()
+        .filter(|light| light.kind == RenderLightKind::Directional && light.intensity > 0.0)
+        .collect();
+    directional.sort_by(|a, b| b.intensity.total_cmp(&a.intensity));
+
+    selected.extend(directional.into_iter().take(MAX_DIRECTIONAL_LIGHTS));
+
+    let remaining = MAX_FORWARD_LIGHTS.saturating_sub(selected.len());
+    if remaining == 0 {
+        return selected;
+    }
+
+    let mut local: Vec<(&RenderLight, f32)> = world
+        .lights
+        .iter()
+        .filter(|light| light.kind != RenderLightKind::Directional)
+        .filter_map(|light| local_light_score(world, light).map(|score| (light, score)))
+        .collect();
+    local.sort_by(|(_, a), (_, b)| b.total_cmp(a));
+
+    selected.extend(local.into_iter().take(remaining).map(|(light, _)| light));
+    selected
+}
+
+pub(crate) fn local_light_score(world: &RenderWorld, light: &RenderLight) -> Option<f32> {
+    if light.intensity <= 0.0 || light.range <= 0.0 {
+        return None;
+    }
+
+    let range = light.range.max(0.001);
+    let camera = world.camera.as_ref();
+    let Some(camera) = camera else {
+        return Some(light.intensity * range);
+    };
+
+    let to_light = light.transform.translation - camera.transform.translation;
+    let distance = to_light.length();
+    if distance - range > camera.far {
+        return None;
+    }
+
+    let distance_sq = to_light.length_squared().max(1.0);
+    Some(light.intensity * range * range / distance_sq)
+}
+
+pub(crate) fn forward_light_uniform(light: &RenderLight) -> ForwardLightUniform {
+    let light_type = match light.kind {
+        RenderLightKind::Point => 1.0,
+        RenderLightKind::Spot => 2.0,
+        RenderLightKind::Directional => 0.0,
+    };
+    let direction = rotate_vec3(
+        light.transform.rotation,
+        engine_core::math::Vec3::new(0.0, 0.0, -1.0),
+    )
+    .normalized();
+    let direction = if direction.length_squared() <= f32::EPSILON {
+        engine_core::math::Vec3::new(0.0, -1.0, 0.0)
+    } else {
+        direction
+    };
+    let range = light.range.max(0.001);
+    let outer_half_angle = (light.spot_angle.clamp(1.0, 179.0) * 0.5).to_radians();
+    let inner_half_angle = outer_half_angle * 0.75;
+
+    ForwardLightUniform {
+        position_type: [
+            light.transform.translation.x,
+            light.transform.translation.y,
+            light.transform.translation.z,
+            light_type,
+        ],
+        direction_range: [direction.x, direction.y, direction.z, range],
+        color_intensity: [
+            light.color.x.clamp(0.0, 1.0),
+            light.color.y.clamp(0.0, 1.0),
+            light.color.z.clamp(0.0, 1.0),
+            light.intensity.max(0.0),
+        ],
+        spot_angles: [inner_half_angle.cos(), outer_half_angle.cos(), 0.0, 0.0],
+    }
+}

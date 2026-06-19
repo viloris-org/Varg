@@ -3,7 +3,9 @@
 //! Supports Anthropic Claude (via Messages API), OpenAI-compatible APIs,
 //! Google Gemini, and local Ollama instances.
 
-use crate::{AiModel, AiRequest, AiResponse, AiStreamDelta, ChatMessage, ChatRole, ToolCall, ToolCallDelta};
+use crate::{
+    AiModel, AiRequest, AiResponse, AiStreamDelta, ChatMessage, ChatRole, ToolCall, ToolCallDelta,
+};
 use engine_core::{EngineError, EngineResult};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
@@ -64,7 +66,11 @@ fn stream_json_lines(
         }
     }
 
-    Ok(AiResponse { content, thinking, tool_calls: Vec::new() })
+    Ok(AiResponse {
+        content,
+        thinking,
+        tool_calls: Vec::new(),
+    })
 }
 
 /// Stream handler that extracts both thinking and text content from Anthropic responses.
@@ -145,8 +151,13 @@ fn stream_anthropic_with_thinking(
             "content_block_stop" => {
                 let index = json["index"].as_u64().unwrap_or(0) as usize;
                 if let Some((id, name, args_json)) = active_tools.remove(&index) {
-                    let arguments = serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Object(Default::default()));
-                    tool_calls.push(ToolCall { id, name, arguments });
+                    let arguments = serde_json::from_str(&args_json)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    });
                 }
             }
             _ => {}
@@ -245,7 +256,11 @@ fn stream_openai_chat_completions(
                 for (_, (id, name, args_json)) in active_tools.drain() {
                     let arguments = serde_json::from_str(&args_json)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
-                    tool_calls.push(ToolCall { id, name, arguments });
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    });
                 }
             }
         }
@@ -255,10 +270,18 @@ fn stream_openai_chat_completions(
     for (_, (id, name, args_json)) in active_tools {
         let arguments = serde_json::from_str(&args_json)
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        tool_calls.push(ToolCall { id, name, arguments });
+        tool_calls.push(ToolCall {
+            id,
+            name,
+            arguments,
+        });
     }
 
-    Ok(AiResponse { content, thinking, tool_calls })
+    Ok(AiResponse {
+        content,
+        thinking,
+        tool_calls,
+    })
 }
 
 fn openai_delta(json: &serde_json::Value) -> Option<&str> {
@@ -537,13 +560,17 @@ impl AiModel for AnthropicProvider {
 
         // Add tool definitions if provided
         if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request.tools.iter().map(|tool| {
-                serde_json::json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.parameters,
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.parameters,
+                    })
                 })
-            }).collect();
+                .collect();
             body["tools"] = serde_json::json!(tools);
         }
 
@@ -842,16 +869,20 @@ impl AiModel for OpenAIProvider {
 
         // Add tool definitions if provided
         if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request.tools.iter().map(|tool| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|tool| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                    })
                 })
-            }).collect();
+                .collect();
             body["tools"] = serde_json::json!(tools);
         }
 

@@ -6,11 +6,16 @@
 use engine_core::{math::Transform, EngineError, EngineResult, EntityId, Handle};
 
 pub mod graph;
+pub mod performance;
 pub mod pipeline;
 pub mod resource;
 pub mod target;
 
 pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass};
+pub use performance::{
+    DynamicResolutionConfig, DynamicResolutionController, PresentStrategy, RenderPerformanceConfig,
+    RenderPerformanceMetrics,
+};
 pub use pipeline::{
     GuiDrawList, GuiTextureId, MaterialHandle, PipelineDesc, ShaderHandle, ShaderStage,
 };
@@ -199,6 +204,27 @@ pub struct RenderSkybox {
     pub intensity: f32,
 }
 
+/// Fog configuration forwarded to the render backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderFog {
+    /// Exponential fog density (higher = thicker).
+    pub density: f32,
+    /// RGB fog color.
+    pub color: [f32; 3],
+    /// Whether fog is active.
+    pub enabled: bool,
+}
+
+impl Default for RenderFog {
+    fn default() -> Self {
+        Self {
+            density: 0.0003,
+            color: [0.6, 0.7, 0.85],
+            enabled: false,
+        }
+    }
+}
+
 /// Minimal render queue shared by runtime, editor Scene View, and Game View.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderWorld {
@@ -214,6 +240,8 @@ pub struct RenderWorld {
     pub particles: Vec<RenderParticle>,
     /// Optional skybox configuration.
     pub skybox: Option<RenderSkybox>,
+    /// Optional fog configuration.
+    pub fog: Option<RenderFog>,
 }
 
 impl RenderWorld {
@@ -238,32 +266,36 @@ impl RenderWorld {
     /// Inactive objects and objects without any renderable component are skipped.
     pub fn extract(scene: &engine_ecs::Scene) -> Self {
         let mut world = RenderWorld::default();
+        let mut camera_is_primary = false;
 
         for (entity, obj) in scene.iter_objects() {
             if !obj.active {
                 continue;
             }
 
-            let transform = scene.transforms().local(entity).unwrap_or_default();
+            let transform = scene.transforms().world(entity).unwrap_or_default();
 
             for component in &obj.components {
                 match component {
                     engine_ecs::ComponentData::Camera(cam) => {
-                        world.camera = Some(RenderCamera {
-                            object: obj.id,
-                            transform,
-                            projection: RenderProjection::Perspective,
-                            vertical_fov_degrees: cam.vertical_fov_degrees,
-                            near: cam.near,
-                            far: cam.far,
-                            look_at_target: None,
-                        });
+                        if world.camera.is_none() || (cam.primary && !camera_is_primary) {
+                            world.camera = Some(RenderCamera {
+                                object: obj.id,
+                                transform,
+                                projection: RenderProjection::Perspective,
+                                vertical_fov_degrees: cam.vertical_fov_degrees,
+                                near: cam.near,
+                                far: cam.far,
+                                look_at_target: None,
+                            });
+                            camera_is_primary = cam.primary;
+                        }
                     }
                     engine_ecs::ComponentData::MeshRenderer(mesh) => {
                         let mesh_name = mesh
                             .builtin_mesh
                             .clone()
-                            .or_else(|| mesh.mesh.map(|id| format!("asset:{:016x}", id.as_u128())))
+                            .or_else(|| mesh.mesh.map(|id| format!("asset:{:032x}", id.as_u128())))
                             .unwrap_or_default();
                         let material_name = mesh
                             .material
@@ -272,7 +304,7 @@ impl RenderWorld {
                             .or_else(|| {
                                 mesh.material
                                     .asset
-                                    .map(|id| format!("asset:{:016x}", id.as_u128()))
+                                    .map(|id| format!("asset:{:032x}", id.as_u128()))
                             })
                             .unwrap_or_default();
                         world.objects.push(RenderObject {
@@ -283,19 +315,21 @@ impl RenderWorld {
                         });
                     }
                     engine_ecs::ComponentData::Camera2D(camera) => {
-                        let mut camera_transform = transform;
-                        camera_transform.translation.z += 10.0;
-                        world.camera = Some(RenderCamera {
-                            object: obj.id,
-                            transform: camera_transform,
-                            projection: RenderProjection::Orthographic {
-                                vertical_size: 10.0 / camera.zoom.max(0.01),
-                            },
-                            vertical_fov_degrees: 60.0,
-                            near: 0.01,
-                            far: 1000.0,
-                            look_at_target: Some(transform.translation),
-                        });
+                        if world.camera.is_none() {
+                            let mut camera_transform = transform;
+                            camera_transform.translation.z += 10.0;
+                            world.camera = Some(RenderCamera {
+                                object: obj.id,
+                                transform: camera_transform,
+                                projection: RenderProjection::Orthographic {
+                                    vertical_size: 10.0 / camera.zoom.max(0.01),
+                                },
+                                vertical_fov_degrees: 60.0,
+                                near: 0.01,
+                                far: 1000.0,
+                                look_at_target: Some(transform.translation),
+                            });
+                        }
                     }
                     engine_ecs::ComponentData::Sprite2D(sprite) => {
                         world.sprites.push(RenderSprite {
@@ -303,7 +337,7 @@ impl RenderWorld {
                             transform,
                             texture: sprite
                                 .texture
-                                .map(|id| format!("asset:{:016x}", id.as_u128())),
+                                .map(|id| format!("asset:{:032x}", id.as_u128())),
                             color: sprite.color,
                             order_in_layer: sprite.order_in_layer,
                             layer: sprite.layer.clone(),
@@ -347,7 +381,7 @@ impl RenderWorld {
                         world.skybox = Some(RenderSkybox {
                             cubemap: skybox
                                 .cubemap
-                                .map(|id| format!("asset:{:016x}", id.as_u128())),
+                                .map(|id| format!("asset:{:032x}", id.as_u128())),
                             zenith_color: skybox.zenith_color,
                             horizon_color: skybox.horizon_color,
                             rotation_degrees: skybox.rotation_degrees,
@@ -356,6 +390,18 @@ impl RenderWorld {
                     }
                     _ => {}
                 }
+            }
+
+            if obj.camera_role == Some(engine_ecs::CameraRole::Main) && world.camera.is_none() {
+                world.camera = Some(RenderCamera {
+                    object: obj.id,
+                    transform,
+                    projection: RenderProjection::Perspective,
+                    vertical_fov_degrees: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                    look_at_target: None,
+                });
             }
         }
 
@@ -376,6 +422,30 @@ pub trait RenderDevice {
         let _ = world;
         self.render(frame)
     }
+
+    /// Submits a scene extraction to a specific render target.
+    ///
+    /// Backends without explicit target support fall back to their default target.
+    fn submit_render_world_to_target(
+        &mut self,
+        world: &RenderWorld,
+        target: &RenderTarget,
+        frame: RenderFrame,
+    ) -> EngineResult<()> {
+        let _ = target;
+        self.submit_render_world(world, frame)
+    }
+
+    /// Updates the internal linear render scale.
+    fn set_render_scale(&mut self, _scale: f32) {}
+
+    /// Returns the latest backend performance measurements.
+    fn performance_metrics(&self) -> RenderPerformanceMetrics {
+        RenderPerformanceMetrics::default()
+    }
+
+    /// Records the complete runtime frame duration for adaptive policies.
+    fn record_frame_time(&mut self, _frame_ms: f32) {}
 
     /// Executes a compiled render graph.
     fn execute_graph(&mut self, graph: &RenderGraph, frame: RenderFrame) -> EngineResult<()>;
@@ -471,12 +541,7 @@ pub trait RenderDevice {
     ///
     /// Backends that support texture sampling override this to create
     /// per-material bind groups. Unset slots fall back to default textures.
-    fn register_material_textures(
-        &mut self,
-        _name: &str,
-        _textures: &RenderMaterialTextures,
-    ) {
-    }
+    fn register_material_textures(&mut self, _name: &str, _textures: &RenderMaterialTextures) {}
 }
 
 /// Null renderer used by minimal runtime builds.
@@ -798,5 +863,64 @@ mod tests {
             world.camera.unwrap().projection,
             RenderProjection::Orthographic { vertical_size: 5.0 }
         );
+    }
+
+    #[test]
+    fn extraction_uses_world_transforms_primary_camera_and_active_state() {
+        let mut scene = Scene::new();
+        let parent = scene.create_object("Parent").unwrap();
+        let child = scene.create_object("Child").unwrap();
+        scene.set_parent(child, Some(parent)).unwrap();
+        let mut parent_transform = Transform::IDENTITY;
+        parent_transform.translation.x = 5.0;
+        scene.transforms_mut().set_local(parent, parent_transform);
+        let mut child_transform = Transform::IDENTITY;
+        child_transform.translation.x = 2.0;
+        scene.transforms_mut().set_local(child, child_transform);
+        scene
+            .upsert_component(
+                child,
+                ComponentData::MeshRenderer(engine_ecs::MeshRendererComponentData::default()),
+            )
+            .unwrap();
+
+        let secondary = scene.create_object("Secondary Camera").unwrap();
+        scene
+            .upsert_component(
+                secondary,
+                ComponentData::Camera(engine_ecs::CameraComponentData {
+                    primary: false,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let primary = scene.create_object("Primary Camera").unwrap();
+        scene
+            .upsert_component(
+                primary,
+                ComponentData::Camera(engine_ecs::CameraComponentData {
+                    primary: true,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+
+        let hidden = scene.create_object("Hidden").unwrap();
+        scene
+            .upsert_component(
+                hidden,
+                ComponentData::Sprite2D(engine_ecs::Sprite2DComponentData::default()),
+            )
+            .unwrap();
+        scene.object_mut(hidden).unwrap().active = false;
+
+        let world = RenderWorld::extract(&scene);
+
+        assert_eq!(world.objects[0].transform.translation.x, 7.0);
+        assert_eq!(
+            world.camera.unwrap().object,
+            scene.object(primary).unwrap().id
+        );
+        assert!(world.sprites.is_empty());
     }
 }

@@ -60,6 +60,7 @@ fn render_one_frame_with_debug_cube_succeeds() {
         lights: vec![],
         particles: vec![],
         skybox: None,
+        fog: None,
     };
 
     device

@@ -21,5 +21,6 @@ bytemuck.workspace = true
 engine-core.workspace = true
 engine-render.workspace = true
 pollster.workspace = true
+tracing.workspace = true
 wgpu.workspace = true
 winit.workspace = true

@@ -312,8 +312,117 @@ pub struct AudioSourceComponentData {
     /// Whether playback starts on scene start.
     pub play_on_start: bool,
     /// Blend between 2D (0.0) and 3D (1.0) spatial audio.
+    ///
+    /// Legacy field; migrated to `spatial_mode` on load.
     #[serde(default)]
     pub spatial_blend: f32,
+    /// Playback pitch multiplier.
+    #[serde(default = "default_audio_pitch")]
+    pub pitch: f32,
+    /// Output bus name.
+    #[serde(default = "default_audio_bus")]
+    pub bus: String,
+    /// Voice allocation priority. Higher values win.
+    #[serde(default = "default_audio_priority")]
+    pub priority: u8,
+    /// Virtualization policy: `virtualize`, `stop`, or `protected`.
+    #[serde(default = "default_audio_virtualization")]
+    pub virtualization: String,
+    /// Schema version used for migration.
+    #[serde(default = "default_audio_source_version")]
+    pub schema_version: u32,
+    /// Spatial rendering mode: `direct`, `object`, or `ambient_field`.
+    #[serde(default)]
+    pub spatial_mode: String,
+    /// Source shape: `point`, `cone`, or `sphere`.
+    #[serde(default)]
+    pub shape: String,
+    /// Inner cone angle in degrees.
+    #[serde(default = "default_audio_inner_angle")]
+    pub inner_angle_degrees: f32,
+    /// Outer cone angle in degrees.
+    #[serde(default = "default_audio_outer_angle")]
+    pub outer_angle_degrees: f32,
+    /// Gain outside the outer cone.
+    #[serde(default)]
+    pub outer_gain: f32,
+    /// Radius for spherical sources.
+    #[serde(default)]
+    pub sphere_radius: f32,
+    /// Distance attenuation model: `none`, `inverse_distance`, `linear_distance`,
+    /// or `logarithmic_distance`.
+    #[serde(default)]
+    pub attenuation: String,
+    /// Minimum distance for full volume.
+    #[serde(default = "default_audio_min_distance")]
+    pub min_distance: f32,
+    /// Maximum distance beyond which volume is zero.
+    #[serde(default = "default_audio_max_distance")]
+    pub max_distance: f32,
+    /// Doppler scale multiplier.
+    #[serde(default = "default_audio_doppler_scale")]
+    pub doppler_scale: f32,
+    /// Spatial spread in `[0.0, 1.0]`.
+    #[serde(default = "default_audio_spread")]
+    pub spread: f32,
+    /// Voice category: `critical`, `dialogue`, `music`, `ui`, `sfx`, `ambience`,
+    /// or `disposable`.
+    #[serde(default)]
+    pub category: String,
+    /// Whether the source is gameplay-critical.
+    #[serde(default)]
+    pub critical: bool,
+    /// Whether this source may use HRTF in binaural mode.
+    #[serde(default = "default_audio_use_hrtf")]
+    pub use_hrtf: bool,
+}
+
+fn default_audio_pitch() -> f32 {
+    1.0
+}
+
+fn default_audio_bus() -> String {
+    "SFX".to_string()
+}
+
+fn default_audio_priority() -> u8 {
+    128
+}
+
+fn default_audio_virtualization() -> String {
+    "virtualize".to_string()
+}
+
+fn default_audio_source_version() -> u32 {
+    3
+}
+
+fn default_audio_inner_angle() -> f32 {
+    30.0
+}
+
+fn default_audio_outer_angle() -> f32 {
+    60.0
+}
+
+fn default_audio_min_distance() -> f32 {
+    1.0
+}
+
+fn default_audio_max_distance() -> f32 {
+    100.0
+}
+
+fn default_audio_doppler_scale() -> f32 {
+    1.0
+}
+
+fn default_audio_spread() -> f32 {
+    1.0
+}
+
+fn default_audio_use_hrtf() -> bool {
+    true
 }
 
 impl Default for AudioSourceComponentData {
@@ -324,6 +433,229 @@ impl Default for AudioSourceComponentData {
             looping: false,
             play_on_start: false,
             spatial_blend: 0.0,
+            pitch: default_audio_pitch(),
+            bus: default_audio_bus(),
+            priority: default_audio_priority(),
+            virtualization: default_audio_virtualization(),
+            schema_version: default_audio_source_version(),
+            spatial_mode: "direct".to_string(),
+            shape: "point".to_string(),
+            inner_angle_degrees: default_audio_inner_angle(),
+            outer_angle_degrees: default_audio_outer_angle(),
+            outer_gain: 0.0,
+            sphere_radius: 0.0,
+            attenuation: "none".to_string(),
+            min_distance: default_audio_min_distance(),
+            max_distance: default_audio_max_distance(),
+            doppler_scale: default_audio_doppler_scale(),
+            spread: default_audio_spread(),
+            category: "sfx".to_string(),
+            critical: false,
+            use_hrtf: default_audio_use_hrtf(),
+        }
+    }
+}
+
+impl AudioSourceComponentData {
+    /// Migrates legacy audio source data to the current schema.
+    ///
+    /// `spatial_blend` is mapped to `spatial_mode` and `attenuation`.
+    pub fn migrate_legacy(&mut self) {
+        if self.schema_version >= default_audio_source_version() {
+            return;
+        }
+        if self.spatial_mode.is_empty() {
+            if self.spatial_blend > 0.0 {
+                self.spatial_mode = "object".to_string();
+                if self.attenuation.is_empty() || self.attenuation == "none" {
+                    self.attenuation = "inverse_distance".to_string();
+                }
+            } else {
+                self.spatial_mode = "direct".to_string();
+                self.attenuation = "none".to_string();
+            }
+        }
+        if self.shape.is_empty() {
+            self.shape = "point".to_string();
+        }
+        if self.category.is_empty() {
+            self.category = "sfx".to_string();
+        }
+        self.schema_version = default_audio_source_version();
+    }
+}
+
+fn default_listener_output_mode() -> String {
+    "stereo".to_string()
+}
+
+fn default_listener_hrtf_quality() -> String {
+    "medium".to_string()
+}
+
+fn default_listener_hrtf_enabled() -> bool {
+    true
+}
+
+/// Serializable audio listener component.
+///
+/// Marks the owning object as the active listener and carries output
+/// preferences. When absent, the runtime falls back to the primary camera.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AudioListenerComponentData {
+    /// Output rendering mode: `stereo` or `binaural`.
+    #[serde(default = "default_listener_output_mode")]
+    pub output_mode: String,
+    /// HRTF quality: `low`, `medium`, or `high`.
+    #[serde(default = "default_listener_hrtf_quality")]
+    pub hrtf_quality: String,
+    /// Whether HRTF is enabled when the output mode is binaural.
+    #[serde(default = "default_listener_hrtf_enabled")]
+    pub hrtf_enabled: bool,
+}
+
+impl Default for AudioListenerComponentData {
+    fn default() -> Self {
+        Self {
+            output_mode: default_listener_output_mode(),
+            hrtf_quality: default_listener_hrtf_quality(),
+            hrtf_enabled: default_listener_hrtf_enabled(),
+        }
+    }
+}
+
+fn default_acoustic_absorption() -> [f32; 3] {
+    [0.2, 0.3, 0.45]
+}
+
+fn default_acoustic_transmission() -> [f32; 3] {
+    [0.35, 0.2, 0.08]
+}
+
+fn default_acoustic_scattering() -> f32 {
+    0.25
+}
+
+/// Serializable acoustic material component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AcousticMaterialComponentData {
+    /// Low/mid/high absorption coefficients.
+    #[serde(default = "default_acoustic_absorption")]
+    pub absorption: [f32; 3],
+    /// Low/mid/high transmission coefficients.
+    #[serde(default = "default_acoustic_transmission")]
+    pub transmission: [f32; 3],
+    /// Diffuse scattering coefficient.
+    #[serde(default = "default_acoustic_scattering")]
+    pub scattering: f32,
+}
+
+impl Default for AcousticMaterialComponentData {
+    fn default() -> Self {
+        Self {
+            absorption: default_acoustic_absorption(),
+            transmission: default_acoustic_transmission(),
+            scattering: default_acoustic_scattering(),
+        }
+    }
+}
+
+/// Serializable simplified acoustic geometry component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AcousticGeometryComponentData {
+    /// AABB size in local units.
+    #[serde(default = "default_vec3_one")]
+    pub size: Vec3,
+    /// Whether this geometry blocks direct sound paths.
+    #[serde(default = "default_true")]
+    pub blocks_direct_path: bool,
+    /// Optional material override. If absent, the object's AcousticMaterial or defaults are used.
+    #[serde(default)]
+    pub material: Option<AcousticMaterialComponentData>,
+}
+
+fn default_vec3_one() -> Vec3 {
+    Vec3::ONE
+}
+
+impl Default for AcousticGeometryComponentData {
+    fn default() -> Self {
+        Self {
+            size: Vec3::ONE,
+            blocks_direct_path: true,
+            material: None,
+        }
+    }
+}
+
+/// Serializable acoustic room component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AcousticRoomComponentData {
+    /// Room size in local units.
+    #[serde(default = "default_vec3_one")]
+    pub size: Vec3,
+    /// Late reverb send gain.
+    #[serde(default)]
+    pub reverb_send: f32,
+}
+
+impl Default for AcousticRoomComponentData {
+    fn default() -> Self {
+        Self {
+            size: Vec3::ONE,
+            reverb_send: 0.25,
+        }
+    }
+}
+
+/// Serializable acoustic portal component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AcousticPortalComponentData {
+    /// Portal size in local units.
+    #[serde(default = "default_vec3_one")]
+    pub size: Vec3,
+    /// Portal openness in `[0.0, 1.0]`.
+    #[serde(default = "default_portal_openness")]
+    pub openness: f32,
+}
+
+fn default_portal_openness() -> f32 {
+    1.0
+}
+
+impl Default for AcousticPortalComponentData {
+    fn default() -> Self {
+        Self {
+            size: Vec3::ONE,
+            openness: default_portal_openness(),
+        }
+    }
+}
+
+/// Serializable artist-authored audio zone component.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AudioZoneComponentData {
+    /// Zone size in local units.
+    #[serde(default = "default_vec3_one")]
+    pub size: Vec3,
+    /// Reverb send override.
+    #[serde(default)]
+    pub reverb_send: f32,
+    /// Direct path gain multiplier.
+    #[serde(default = "default_zone_direct_gain")]
+    pub direct_gain: f32,
+}
+
+fn default_zone_direct_gain() -> f32 {
+    1.0
+}
+
+impl Default for AudioZoneComponentData {
+    fn default() -> Self {
+        Self {
+            size: Vec3::ONE,
+            reverb_send: 0.0,
+            direct_gain: default_zone_direct_gain(),
         }
     }
 }
@@ -686,6 +1018,18 @@ pub enum ComponentData {
     Collider(ColliderComponentData),
     /// Audio source component.
     AudioSource(AudioSourceComponentData),
+    /// Audio listener component.
+    AudioListener(AudioListenerComponentData),
+    /// Acoustic material component.
+    AcousticMaterial(AcousticMaterialComponentData),
+    /// Acoustic geometry component.
+    AcousticGeometry(AcousticGeometryComponentData),
+    /// Acoustic room component.
+    AcousticRoom(AcousticRoomComponentData),
+    /// Acoustic portal component.
+    AcousticPortal(AcousticPortalComponentData),
+    /// Audio zone component.
+    AudioZone(AudioZoneComponentData),
     /// Particle emitter component.
     ParticleEmitter(ParticleEmitterComponentData),
     /// Script proxy component.
@@ -722,6 +1066,12 @@ impl ComponentData {
             Self::Rigidbody(_) => "Rigidbody",
             Self::Collider(_) => "Collider",
             Self::AudioSource(_) => "AudioSource",
+            Self::AudioListener(_) => "AudioListener",
+            Self::AcousticMaterial(_) => "AcousticMaterial",
+            Self::AcousticGeometry(_) => "AcousticGeometry",
+            Self::AcousticRoom(_) => "AcousticRoom",
+            Self::AcousticPortal(_) => "AcousticPortal",
+            Self::AudioZone(_) => "AudioZone",
             Self::ParticleEmitter(_) => "ParticleEmitter",
             Self::Script(_) => "Script",
             Self::Sprite2D(_) => "Sprite2D",
@@ -1253,7 +1603,13 @@ impl Scene {
             let entity = state.world.spawn()?;
             state.id_allocator.observe(record.object.id);
             state.by_id.insert(record.object.id, entity);
-            state.objects.insert(entity, record.object.clone());
+            let mut object = record.object.clone();
+            for component in &mut object.components {
+                if let ComponentData::AudioSource(source) = component {
+                    source.migrate_legacy();
+                }
+            }
+            state.objects.insert(entity, object);
             state.transforms.set_local(entity, record.local_transform);
             source_to_entity.insert(record.object.id, entity);
         }
@@ -1395,6 +1751,32 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+    }
+
+    #[test]
+    fn audio_source_legacy_migration_maps_spatial_blend() {
+        let mut fully_3d = AudioSourceComponentData {
+            schema_version: 1,
+            spatial_blend: 1.0,
+            spatial_mode: String::new(),
+            attenuation: String::new(),
+            ..AudioSourceComponentData::default()
+        };
+        fully_3d.migrate_legacy();
+        assert_eq!(fully_3d.schema_version, default_audio_source_version());
+        assert_eq!(fully_3d.spatial_mode, "object");
+        assert_eq!(fully_3d.attenuation, "inverse_distance");
+
+        let mut fully_2d = AudioSourceComponentData {
+            schema_version: 1,
+            spatial_blend: 0.0,
+            spatial_mode: String::new(),
+            attenuation: "none".to_string(),
+            ..AudioSourceComponentData::default()
+        };
+        fully_2d.migrate_legacy();
+        assert_eq!(fully_2d.spatial_mode, "direct");
+        assert_eq!(fully_2d.attenuation, "none");
     }
 
     #[test]

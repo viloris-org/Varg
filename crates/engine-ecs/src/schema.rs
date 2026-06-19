@@ -182,13 +182,91 @@ impl ComponentSchemaRegistry {
         registry.register(ComponentSchema {
             type_id: "AudioSource".to_string(),
             display_name: "Audio Source".to_string(),
-            version: 2,
+            version: 3,
             fields: vec![
                 field("clip", ComponentFieldKind::AssetRef, ""),
                 field("volume", ComponentFieldKind::F32, "1"),
                 field("looping", ComponentFieldKind::Bool, "false"),
                 field("play_on_start", ComponentFieldKind::Bool, "false"),
                 field("spatial_blend", ComponentFieldKind::F32, "0"),
+                field("spatial_mode", ComponentFieldKind::String, "direct"),
+                field("shape", ComponentFieldKind::String, "point"),
+                field("inner_angle_degrees", ComponentFieldKind::F32, "30"),
+                field("outer_angle_degrees", ComponentFieldKind::F32, "60"),
+                field("outer_gain", ComponentFieldKind::F32, "0"),
+                field("sphere_radius", ComponentFieldKind::F32, "0"),
+                field("attenuation", ComponentFieldKind::String, "none"),
+                field("min_distance", ComponentFieldKind::F32, "1"),
+                field("max_distance", ComponentFieldKind::F32, "100"),
+                field("doppler_scale", ComponentFieldKind::F32, "1"),
+                field("spread", ComponentFieldKind::F32, "1"),
+                field("category", ComponentFieldKind::String, "sfx"),
+                field("critical", ComponentFieldKind::Bool, "false"),
+                field("use_hrtf", ComponentFieldKind::Bool, "true"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AudioListener".to_string(),
+            display_name: "Audio Listener".to_string(),
+            version: 1,
+            fields: vec![
+                field("output_mode", ComponentFieldKind::String, "stereo"),
+                field("hrtf_quality", ComponentFieldKind::String, "medium"),
+                field("hrtf_enabled", ComponentFieldKind::Bool, "true"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AcousticMaterial".to_string(),
+            display_name: "Acoustic Material".to_string(),
+            version: 1,
+            fields: vec![
+                field("absorption", ComponentFieldKind::Vec3, "0.2,0.3,0.45"),
+                field("transmission", ComponentFieldKind::Vec3, "0.35,0.2,0.08"),
+                field("scattering", ComponentFieldKind::F32, "0.25"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AcousticGeometry".to_string(),
+            display_name: "Acoustic Geometry".to_string(),
+            version: 1,
+            fields: vec![
+                field("size", ComponentFieldKind::Vec3, "1,1,1"),
+                field("blocks_direct_path", ComponentFieldKind::Bool, "true"),
+                field("material", ComponentFieldKind::Object, ""),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AcousticRoom".to_string(),
+            display_name: "Acoustic Room".to_string(),
+            version: 1,
+            fields: vec![
+                field("size", ComponentFieldKind::Vec3, "1,1,1"),
+                field("reverb_send", ComponentFieldKind::F32, "0.25"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AcousticPortal".to_string(),
+            display_name: "Acoustic Portal".to_string(),
+            version: 1,
+            fields: vec![
+                field("size", ComponentFieldKind::Vec3, "1,1,1"),
+                field("openness", ComponentFieldKind::F32, "1"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
+            type_id: "AudioZone".to_string(),
+            display_name: "Audio Zone".to_string(),
+            version: 1,
+            fields: vec![
+                field("size", ComponentFieldKind::Vec3, "1,1,1"),
+                field("reverb_send", ComponentFieldKind::F32, "0"),
+                field("direct_gain", ComponentFieldKind::F32, "1"),
             ],
             evolution: SchemaEvolution::default(),
         });

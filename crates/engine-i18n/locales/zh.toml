@@ -751,3 +751,21 @@ settings_max_tokens_desc = "最大响应长度"
 settings_saving = "保存中..."
 settings_saved = "已保存！"
 settings_save_ai = "保存 AI 设置"
+
+# Confirmations
+confirm_new_chat = "开始新对话？这将清除当前对话记录。"
+confirm_approve_all = "确认批准所有 {count} 个待处理操作？这可能会修改您的项目。"
+
+# Error messages
+error_api_key = "API 密钥无效或缺失，请检查 AI 提供商设置。"
+error_rate_limit = "已超出速率限制，请稍后重试。"
+error_timeout = "请求超时，模型提供商可能存在问题。"
+error_network = "网络错误，请检查网络连接。"
+
+# Buttons
+btn_send = "发送"
+btn_copy = "复制"
+btn_retry = "重试"
+
+# Mention
+mention_suggestions = "实体建议"

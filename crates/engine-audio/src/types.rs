@@ -1,0 +1,312 @@
+//! Device-independent object-audio types and runtime diagnostics.
+
+use engine_core::math::Vec3;
+use serde::{Deserialize, Serialize};
+
+/// Semantic rendering mode for an audio source.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialMode {
+    /// Content is mixed directly to the output and does not rotate with the listener.
+    #[default]
+    Direct,
+    /// Content is rendered as a world-space audio object.
+    Object,
+    /// Content represents a diffuse or partially-localized environmental field.
+    AmbientField,
+}
+
+/// Output rendering mode selected by the listener or project profile.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// Universal stereo panning fallback.
+    #[default]
+    Stereo,
+    /// Binaural HRTF rendering.
+    Binaural,
+}
+
+/// HRTF quality / compute-cost tier.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HrtfQuality {
+    /// Lightweight HRTF: fewer directions and shorter filters.
+    Low,
+    /// Balanced quality for desktop targets.
+    #[default]
+    Medium,
+    /// Higher density and longer filters.
+    High,
+}
+
+impl HrtfQuality {
+    /// Returns the number of directions in the synthesized HRTF set.
+    pub fn direction_count(self) -> usize {
+        match self {
+            Self::Low => 12,
+            Self::Medium => 24,
+            Self::High => 48,
+        }
+    }
+
+    /// Returns the FIR length in samples for this quality tier.
+    pub fn filter_taps(self) -> usize {
+        match self {
+            Self::Low => 32,
+            Self::Medium => 64,
+            Self::High => 128,
+        }
+    }
+}
+
+/// Voice category used for reservation and deterministic fallback policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCategory {
+    /// Gameplay-critical cues that should remain audible if at all possible.
+    Critical,
+    /// Dialogue or voice-over.
+    Dialogue,
+    /// Music.
+    Music,
+    /// User-interface sounds.
+    Ui,
+    /// General sound effects.
+    #[default]
+    Sfx,
+    /// Ambient background beds.
+    Ambience,
+    /// Lowest-priority disposable sounds.
+    Disposable,
+}
+
+impl VoiceCategory {
+    /// Returns the category rank used for deterministic scoring.
+    /// Higher values win during voice selection.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Critical => 7,
+            Self::Dialogue => 6,
+            Self::Music => 5,
+            Self::Ui => 4,
+            Self::Sfx => 3,
+            Self::Ambience => 2,
+            Self::Disposable => 1,
+        }
+    }
+}
+
+/// Geometric approximation used when rendering a spatial source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioSourceShape {
+    /// Infinitesimal point emitter.
+    #[default]
+    Point,
+    /// Directional cone emitter.
+    Cone {
+        /// Inner cone angle in degrees.
+        inner_angle_degrees: f32,
+        /// Outer cone angle in degrees.
+        outer_angle_degrees: f32,
+        /// Gain outside the outer cone.
+        outer_gain: f32,
+    },
+    /// Spherical emitter with the given radius in world units.
+    Sphere {
+        /// Radius in world units.
+        radius: f32,
+    },
+}
+
+/// Policy used when the physical voice budget is exhausted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualizationPolicy {
+    /// Continue advancing the logical playback cursor without rendering samples.
+    #[default]
+    Virtualize,
+    /// Stop and rewind the source.
+    Stop,
+    /// Keep this source physical by evicting a lower-priority source if possible.
+    Protected,
+}
+
+/// Transform and motion data for a world-space audio object.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AudioObjectTransform {
+    /// World-space position.
+    pub position: Vec3,
+    /// Unit forward vector.
+    pub forward: Vec3,
+    /// World-space velocity in units per second.
+    pub velocity: Vec3,
+}
+
+impl Default for AudioObjectTransform {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            velocity: Vec3::ZERO,
+        }
+    }
+}
+
+/// Per-source acoustic propagation parameters consumed by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct PropagationFrame {
+    /// Direct-path gain after occlusion/transmission in `[0.0, 1.0]`.
+    pub direct_gain: f32,
+    /// Low-pass cutoff applied to the direct path in Hz.
+    pub low_pass_hz: f32,
+    /// Reverb send gain generated by the environment in `[0.0, 1.0]`.
+    pub reverb_send: f32,
+    /// Relative delay for future early-reflection support, in seconds.
+    pub delay_seconds: f32,
+}
+
+impl Default for PropagationFrame {
+    fn default() -> Self {
+        Self {
+            direct_gain: 1.0,
+            low_pass_hz: 20_000.0,
+            reverb_send: 0.0,
+            delay_seconds: 0.0,
+        }
+    }
+}
+
+impl PropagationFrame {
+    /// Returns a clamped, finite propagation frame.
+    pub fn sanitized(self) -> Self {
+        Self {
+            direct_gain: finite_or(self.direct_gain, 1.0).clamp(0.0, 1.0),
+            low_pass_hz: finite_or(self.low_pass_hz, 20_000.0).clamp(20.0, 20_000.0),
+            reverb_send: finite_or(self.reverb_send, 0.0).clamp(0.0, 1.0),
+            delay_seconds: finite_or(self.delay_seconds, 0.0).max(0.0),
+        }
+    }
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+/// Lightweight renderer debug state for editor overlays and tests.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct AudioDebugSnapshot {
+    /// Physical source handles selected for the latest block.
+    pub physical_sources: Vec<u64>,
+    /// Virtualized source handles selected for the latest block.
+    pub virtual_sources: Vec<u64>,
+    /// Source handles rendered through HRTF in the latest block.
+    pub hrtf_sources: Vec<u64>,
+    /// Source handles folded to stereo because HRTF budget was exhausted.
+    pub stereo_fallback_sources: Vec<u64>,
+}
+
+/// Output device and renderer capabilities.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AudioOutputCapabilities {
+    /// Human-readable output device name.
+    pub device_name: String,
+    /// Active device sample rate.
+    pub sample_rate: u32,
+    /// Active output channel count.
+    pub channels: u16,
+    /// Preferred callback block size when known.
+    pub preferred_block_frames: Option<u32>,
+    /// Whether the backend accepts platform spatial objects.
+    pub platform_spatial_audio: bool,
+    /// Maximum dynamic spatial objects currently available.
+    pub max_dynamic_objects: u32,
+    /// Active output mode reported by the renderer.
+    pub output_mode: OutputMode,
+    /// Active HRTF quality reported by the renderer.
+    pub hrtf_quality: HrtfQuality,
+}
+
+impl Default for AudioOutputCapabilities {
+    fn default() -> Self {
+        Self {
+            device_name: "memory".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            preferred_block_frames: None,
+            platform_spatial_audio: false,
+            max_dynamic_objects: 0,
+            output_mode: OutputMode::default(),
+            hrtf_quality: HrtfQuality::default(),
+        }
+    }
+}
+
+/// Snapshot of real-time audio health and workload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct AudioDiagnostics {
+    /// Number of registered clips.
+    pub loaded_clips: u32,
+    /// Number of logical live sources.
+    pub logical_sources: u32,
+    /// Number of sources rendered in the most recent block.
+    pub physical_voices: u32,
+    /// Number of sources advanced without rendering.
+    pub virtual_voices: u32,
+    /// Number of sources rendered with HRTF in the most recent block.
+    pub hrtf_objects: u32,
+    /// Number of object sources folded to stereo because HRTF budget was exhausted.
+    pub hrtf_fallback_objects: u32,
+    /// Number of sources with acoustic propagation applied in the most recent block.
+    pub acoustics_sources: u32,
+    /// Number of output callback underruns or backend errors observed.
+    pub underruns: u64,
+    /// Peak absolute sample value in the most recent block.
+    pub output_peak: f32,
+    /// Total rendered sample frames.
+    pub rendered_frames: u64,
+}
+
+/// Runtime mixer configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AudioRendererConfig {
+    /// Internal mixer sample rate.
+    pub sample_rate: u32,
+    /// Internal output channel count.
+    pub channels: u16,
+    /// Maximum simultaneously rendered voices.
+    pub max_physical_voices: u32,
+    /// Final hard-limiter ceiling.
+    pub limiter_ceiling: f32,
+    /// Active spatial output mode.
+    pub output_mode: OutputMode,
+    /// Maximum sources rendered with HRTF in binaural mode.
+    pub max_hrtf_objects: u32,
+    /// HRTF filter quality.
+    pub hrtf_quality: HrtfQuality,
+    /// Speed of sound used for Doppler (units per second).
+    pub speed_of_sound: f32,
+    /// Head radius used for HRTF synthesis (units).
+    pub head_radius: f32,
+}
+
+impl Default for AudioRendererConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48_000,
+            channels: 2,
+            max_physical_voices: 128,
+            limiter_ceiling: 0.98,
+            output_mode: OutputMode::default(),
+            max_hrtf_objects: 32,
+            hrtf_quality: HrtfQuality::default(),
+            speed_of_sound: 343.0,
+            head_radius: 0.0875,
+        }
+    }
+}

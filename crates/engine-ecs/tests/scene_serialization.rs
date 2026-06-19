@@ -92,6 +92,7 @@ fn scene_with_all_components_round_trip() {
                 looping: true,
                 play_on_start: true,
                 spatial_blend: 0.5,
+                ..AudioSourceComponentData::default()
             }),
         )
         .unwrap();

@@ -644,7 +644,9 @@ impl AgentSession {
 
         // If the model also produced text content and no Complete op was emitted,
         // add one to preserve the conversational response.
-        let has_complete = operations.iter().any(|op| matches!(op, AgentOperation::Complete { .. }));
+        let has_complete = operations
+            .iter()
+            .any(|op| matches!(op, AgentOperation::Complete { .. }));
         if !text_content.is_empty() && !has_complete {
             operations.push(AgentOperation::Complete {
                 summary: Some(text_content.to_owned()),
@@ -1022,7 +1024,14 @@ impl AgentSession {
                 timeout_ms,
                 capture_stdout,
                 capture_stderr,
-            } => self.execute_run_command(command, args, working_dir.as_deref(), *timeout_ms, *capture_stdout, *capture_stderr),
+            } => self.execute_run_command(
+                command,
+                args,
+                working_dir.as_deref(),
+                *timeout_ms,
+                *capture_stdout,
+                *capture_stderr,
+            ),
         }
     }
 
@@ -1145,7 +1154,7 @@ impl AgentSession {
     fn execute_batch_operation_inner(
         &mut self,
         operations: &[AgentOperation],
-        _rollback_on_failure: bool,
+        rollback_on_failure: bool,
         depth: u32,
     ) -> EngineResult<()> {
         const MAX_BATCH_DEPTH: u32 = 4;
@@ -1155,24 +1164,76 @@ impl AgentSession {
                  Nested BatchOperations are too deep."
             )));
         }
+
+        if rollback_on_failure
+            && operations
+                .iter()
+                .any(|operation| !operation_is_transactional(operation))
+        {
+            return Err(EngineError::config(
+                "rollback batches may only contain in-memory transactional operations",
+            ));
+        }
+
+        let scene_snapshot = if rollback_on_failure {
+            Some(self.context.scene.to_json("batch_snapshot")?)
+        } else {
+            None
+        };
+        let scene_dirty_snapshot = self.context.scene_dirty;
+        let undo_snapshot = rollback_on_failure.then(|| self.undo_stack.clone());
+
         let mut executed = 0;
         for (i, op) in operations.iter().enumerate() {
             match self.execute_operation_inner(op, depth + 1) {
                 Ok(()) => executed += 1,
                 Err(e) => {
-                    // Drain undo entries for operations that did execute, but note:
-                    // full state rollback is not yet implemented. The undo stack
-                    // entries are popped so they don't leak into later undo history.
-                    for _ in 0..executed {
-                        self.undo_stack.undo();
+                    if rollback_on_failure {
+                        self.context.scene = engine_ecs::Scene::from_json(
+                            scene_snapshot
+                                .as_deref()
+                                .expect("transactional batch always captures scene"),
+                        )
+                        .map_err(|rollback_error| {
+                            EngineError::config(format!(
+                                "batch operation failed and scene rollback failed: {rollback_error}"
+                            ))
+                        })?;
+                        self.context.scene_dirty = scene_dirty_snapshot;
+                        self.undo_stack =
+                            undo_snapshot.expect("transactional batch always captures undo state");
+                        self.console.push(ConsoleEntry {
+                            timestamp: "now".into(),
+                            level: ConsoleLevel::Warn,
+                            source: ConsoleSource {
+                                subsystem: "ai-agent".into(),
+                                file: None,
+                                line: None,
+                            },
+                            message: format!(
+                                "Batch rolled back after operation {} failed at step {}/{}",
+                                executed,
+                                i + 1,
+                                operations.len()
+                            ),
+                        });
+                    } else {
+                        for _ in 0..executed {
+                            self.undo_stack.undo();
+                        }
                     }
                     return Err(EngineError::config(format!(
                         "Batch operation failed at step {}/{}: {}. \
-                         {} operations completed before failure (rollback not yet implemented).",
+                         {} operations completed before failure{}.",
                         i + 1,
                         operations.len(),
                         e,
-                        executed
+                        executed,
+                        if rollback_on_failure {
+                            " (rolled back)"
+                        } else {
+                            ""
+                        }
                     )));
                 }
             }
@@ -1377,13 +1438,13 @@ impl AgentSession {
         capture_stdout: bool,
         capture_stderr: bool,
     ) -> EngineResult<()> {
+        use std::io::Read;
         use std::process::Command;
         use std::time::Duration;
 
         let mut cmd = Command::new(command);
         cmd.args(args);
 
-        // Set working directory
         if let Some(dir) = working_dir {
             let work_dir = self.context.root.join(dir);
             cmd.current_dir(&work_dir);
@@ -1391,7 +1452,6 @@ impl AgentSession {
             cmd.current_dir(&self.context.root);
         }
 
-        // Configure stdout/stderr capture
         if capture_stdout {
             cmd.stdout(std::process::Stdio::piped());
         }
@@ -1399,7 +1459,6 @@ impl AgentSession {
             cmd.stderr(std::process::Stdio::piped());
         }
 
-        // Set timeout (default 30 seconds)
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(30000));
 
         self.console.push(ConsoleEntry {
@@ -1413,17 +1472,52 @@ impl AgentSession {
             message: format!("Executing: {} {}", command, args.join(" ")),
         });
 
-        // Execute with timeout
-        let output = cmd.output().map_err(|e| {
-            EngineError::config(format!("Failed to execute command '{}': {}", command, e))
+        let start = std::time::Instant::now();
+        let mut child = cmd.spawn().map_err(|e| {
+            EngineError::config(format!("Failed to spawn command '{}': {}", command, e))
         })?;
+        let stdout_reader = child.stdout.take().map(|mut stdout| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).map(|_| bytes)
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).map(|_| bytes)
+            })
+        });
 
-        // Check for timeout (simplified - in real implementation would use async)
-        let _ = timeout;
+        let status = loop {
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stdout_reader);
+                drop(stderr_reader);
+                return Err(EngineError::config(format!(
+                    "Command '{}' timed out after {}ms",
+                    command,
+                    timeout.as_millis()
+                )));
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) => {
+                    return Err(EngineError::config(format!(
+                        "Error waiting for command '{}': {}",
+                        command, e
+                    )));
+                }
+            }
+        };
+        let stdout = join_output_reader(stdout_reader, "stdout")?;
+        let stderr = join_output_reader(stderr_reader, "stderr")?;
 
         // Log stdout
-        if capture_stdout && !output.stdout.is_empty() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        if capture_stdout && !stdout.is_empty() {
+            let stdout = String::from_utf8_lossy(&stdout);
             self.console.push(ConsoleEntry {
                 timestamp: "now".into(),
                 level: ConsoleLevel::Info,
@@ -1437,9 +1531,9 @@ impl AgentSession {
         }
 
         // Log stderr
-        if capture_stderr && !output.stderr.is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let level = if output.status.success() {
+        if capture_stderr && !stderr.is_empty() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let level = if status.success() {
                 ConsoleLevel::Warn
             } else {
                 ConsoleLevel::Error
@@ -1457,8 +1551,8 @@ impl AgentSession {
         }
 
         // Check exit status
-        if !output.status.success() {
-            let exit_code = output.status.code().unwrap_or(-1);
+        if !status.success() {
+            let exit_code = status.code().unwrap_or(-1);
             return Err(EngineError::config(format!(
                 "Command '{}' failed with exit code {}",
                 command, exit_code
@@ -1549,10 +1643,41 @@ impl AgentSession {
     }
 }
 
+fn join_output_reader(
+    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stream: &str,
+) -> EngineResult<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| EngineError::config(format!("{stream} reader thread panicked")))?
+        .map_err(|error| EngineError::config(format!("failed to read command {stream}: {error}")))
+}
+
+fn operation_is_transactional(operation: &AgentOperation) -> bool {
+    match operation {
+        AgentOperation::WriteScript { .. }
+        | AgentOperation::ExecuteCommand { .. }
+        | AgentOperation::UpdateProjectMemory { .. }
+        | AgentOperation::UpdateUserMemory { .. }
+        | AgentOperation::GenerateAsset { .. }
+        | AgentOperation::ShowInViewport { .. }
+        | AgentOperation::RunCommand { .. } => false,
+        AgentOperation::BatchOperation {
+            operations,
+            rollback_on_failure: _,
+        } => operations.iter().all(operation_is_transactional),
+        _ => true,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OperationAccess {
     requires_write: bool,
     requires_filesystem_write: bool,
+    requires_process_execution: bool,
 }
 
 fn operation_access(operation: &AgentOperation) -> OperationAccess {
@@ -1564,20 +1689,24 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
         | AgentOperation::ShowInViewport { .. } => OperationAccess {
             requires_write: false,
             requires_filesystem_write: false,
+            requires_process_execution: false,
         },
         AgentOperation::WriteScript { .. }
         | AgentOperation::UpdateProjectMemory { .. }
         | AgentOperation::UpdateUserMemory { .. } => OperationAccess {
             requires_write: true,
             requires_filesystem_write: true,
+            requires_process_execution: false,
         },
         AgentOperation::GenerateAsset { .. } => OperationAccess {
             requires_write: true,
             requires_filesystem_write: true,
+            requires_process_execution: false,
         },
         AgentOperation::RunCommand { .. } => OperationAccess {
             requires_write: true,
             requires_filesystem_write: false,
+            requires_process_execution: true,
         },
         AgentOperation::ExecuteCommand { .. }
         | AgentOperation::CreateObject { .. }
@@ -1588,18 +1717,22 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
         | AgentOperation::MoveEntityTo { .. } => OperationAccess {
             requires_write: true,
             requires_filesystem_write: false,
+            requires_process_execution: false,
         },
         AgentOperation::BatchOperation { operations, .. } => {
-            // Batch operation requires write if any child requires write
             let any_write = operations
                 .iter()
                 .any(|op| operation_access(op).requires_write);
             let any_fs = operations
                 .iter()
                 .any(|op| operation_access(op).requires_filesystem_write);
+            let any_proc = operations
+                .iter()
+                .any(|op| operation_access(op).requires_process_execution);
             OperationAccess {
                 requires_write: any_write,
                 requires_filesystem_write: any_fs,
+                requires_process_execution: any_proc,
             }
         }
     }
@@ -1624,6 +1757,13 @@ fn validate_operation_policy(
     if access.requires_filesystem_write && !policy.filesystem_write {
         return Err(EngineError::config(format!(
             "{} requires filesystem write permission",
+            operation.action_name()
+        )));
+    }
+
+    if access.requires_process_execution && !policy.process_execution {
+        return Err(EngineError::config(format!(
+            "{} requires process execution permission",
             operation.action_name()
         )));
     }
@@ -1864,10 +2004,14 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let name = args["name"].as_str().unwrap_or("Untitled").to_owned();
             let position = args["position"].as_array().and_then(|a| {
                 if a.len() == 3 {
-                    Some([a[0].as_f64().unwrap_or(0.0) as f32,
-                          a[1].as_f64().unwrap_or(0.0) as f32,
-                          a[2].as_f64().unwrap_or(0.0) as f32])
-                } else { None }
+                    Some([
+                        a[0].as_f64().unwrap_or(0.0) as f32,
+                        a[1].as_f64().unwrap_or(0.0) as f32,
+                        a[2].as_f64().unwrap_or(0.0) as f32,
+                    ])
+                } else {
+                    None
+                }
             });
             let components: Vec<ComponentSpec> = args["components"]
                 .as_array()
@@ -1877,7 +2021,11 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Ok(AgentOperation::CreateObject { name, components, position })
+            Ok(AgentOperation::CreateObject {
+                name,
+                components,
+                position,
+            })
         }
         "write_script" => {
             let path = args["path"].as_str().unwrap_or("").to_owned();
@@ -1888,8 +2036,16 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
             let component = args["component"].as_str().unwrap_or("").to_owned();
             let field = args["field"].as_str().unwrap_or("").to_owned();
-            let value = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
-            Ok(AgentOperation::SetProperty { entity, component, field, value })
+            let value = args
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            Ok(AgentOperation::SetProperty {
+                entity,
+                component,
+                field,
+                value,
+            })
         }
         "remove_component" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
@@ -1906,7 +2062,10 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
         }
         "execute_command" => {
             let command = args["command"].as_str().unwrap_or("").to_owned();
-            let params = args.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let params = args
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             Ok(AgentOperation::ExecuteCommand { command, params })
         }
         "query_scene_semantic" => {
@@ -1915,57 +2074,91 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
         }
         "move_entity_to" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
-            let position = args["position"].as_array().and_then(|a| {
-                if a.len() == 3 {
-                    Some([a[0].as_f64().unwrap_or(0.0) as f32,
-                          a[1].as_f64().unwrap_or(0.0) as f32,
-                          a[2].as_f64().unwrap_or(0.0) as f32])
-                } else { None }
-            }).unwrap_or([0.0, 0.0, 0.0]);
+            let position = args["position"]
+                .as_array()
+                .and_then(|a| {
+                    if a.len() == 3 {
+                        Some([
+                            a[0].as_f64().unwrap_or(0.0) as f32,
+                            a[1].as_f64().unwrap_or(0.0) as f32,
+                            a[2].as_f64().unwrap_or(0.0) as f32,
+                        ])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or([0.0, 0.0, 0.0]);
             let animated = args["animated"].as_bool().unwrap_or(false);
             let duration = args["duration"].as_f64().map(|d| d as f32);
-            Ok(AgentOperation::MoveEntityTo { entity, position, animated, duration })
+            Ok(AgentOperation::MoveEntityTo {
+                entity,
+                position,
+                animated,
+                duration,
+            })
         }
         "show_in_viewport" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
             let highlight = args["highlight"].as_bool().unwrap_or(false);
             let frame = args["frame"].as_bool().unwrap_or(false);
-            Ok(AgentOperation::ShowInViewport { entity, highlight, frame })
+            Ok(AgentOperation::ShowInViewport {
+                entity,
+                highlight,
+                frame,
+            })
         }
         "attach_behavior" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
             if let Some(path) = args["behavior_path"].as_str() {
                 Ok(AgentOperation::AttachBehavior {
                     entity,
-                    behavior: BehaviorSource::File { behavior_path: path.to_owned() },
+                    behavior: BehaviorSource::File {
+                        behavior_path: path.to_owned(),
+                    },
                 })
             } else if let Some(tree) = args.get("behavior_tree") {
                 Ok(AgentOperation::AttachBehavior {
                     entity,
-                    behavior: BehaviorSource::Inline { behavior_tree: tree.clone() },
+                    behavior: BehaviorSource::Inline {
+                        behavior_tree: tree.clone(),
+                    },
                 })
             } else {
-                Err(EngineError::config("attach_behavior requires behavior_path or behavior_tree"))
+                Err(EngineError::config(
+                    "attach_behavior requires behavior_path or behavior_tree",
+                ))
             }
         }
         "run_command" => {
             let command = args["command"].as_str().unwrap_or("").to_owned();
             let args_vec: Vec<String> = args["args"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let working_dir = args["working_dir"].as_str().map(String::from);
             let timeout_ms = args["timeout_ms"].as_u64();
             Ok(AgentOperation::RunCommand {
-                command, args: args_vec, working_dir, timeout_ms,
-                capture_stdout: true, capture_stderr: true,
+                command,
+                args: args_vec,
+                working_dir,
+                timeout_ms,
+                capture_stdout: true,
+                capture_stderr: true,
             })
         }
         "update_project_memory" => {
             let content = args["content"].as_str().unwrap_or("").to_owned();
             let append = args["append"].as_bool().unwrap_or(false);
             let heading = args["heading"].as_str().map(String::from);
-            Ok(AgentOperation::UpdateProjectMemory { content, append, heading })
+            Ok(AgentOperation::UpdateProjectMemory {
+                content,
+                append,
+                heading,
+            })
         }
         "update_user_memory" => {
             let key = args["key"].as_str().unwrap_or("").to_owned();
@@ -2431,5 +2624,70 @@ mod tests {
         assert!(session.console.entries()[0]
             .message
             .contains("parse_response"));
+    }
+
+    #[test]
+    fn rollback_batch_restores_context_and_undo_state() {
+        let ctx = temp_project_context();
+        let mut session = AgentSession::new(ctx).unwrap();
+        let operations = vec![
+            AgentOperation::CreateObject {
+                name: "Temporary".into(),
+                components: Vec::new(),
+                position: None,
+            },
+            AgentOperation::SetProperty {
+                entity: "missing".into(),
+                component: "Transform".into(),
+                field: "translation".into(),
+                value: serde_json::json!([1.0, 2.0, 3.0]),
+            },
+        ];
+
+        let result = session.execute_batch_operation_inner(&operations, true, 0);
+
+        assert!(result.is_err());
+        assert!(session.context.scene.find_by_name("Temporary").is_none());
+        assert!(!session.undo_stack.can_undo());
+    }
+
+    #[test]
+    fn rollback_batch_rejects_external_side_effects() {
+        let ctx = temp_project_context();
+        let mut session = AgentSession::new(ctx).unwrap();
+        let operations = vec![AgentOperation::RunCommand {
+            command: "ignored".into(),
+            args: Vec::new(),
+            working_dir: None,
+            timeout_ms: None,
+            capture_stdout: true,
+            capture_stderr: true,
+        }];
+
+        let result = session.execute_batch_operation_inner(&operations, true, 0);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("in-memory transactional"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_with_output_larger_than_pipe_capacity_completes() {
+        let ctx = temp_project_context();
+        let mut session = AgentSession::new(ctx).unwrap();
+
+        let result = session.execute_run_command(
+            "sh",
+            &["-c".into(), "yes x | head -c 262144".into()],
+            None,
+            Some(5_000),
+            true,
+            true,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
     }
 }

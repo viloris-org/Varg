@@ -156,10 +156,13 @@ impl RenderService {
             .ok_or_else(|| EngineError::other(format!("unknown render target: {name}")))?
             .clone();
         let target = self.device.create_render_target(desc)?;
-        self.device
-            .submit_render_world(world, RenderFrame { frame_index: 0 })?;
+        let render_result = self.device.submit_render_world_to_target(
+            world,
+            &target,
+            RenderFrame { frame_index: 0 },
+        );
         self.device.destroy_render_target(target);
-        Ok(())
+        render_result
     }
 
     /// Returns a reference to the underlying device.

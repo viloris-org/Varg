@@ -40,6 +40,8 @@ serde_json = "1.0"
 thiserror = "1.0"
 toml = "0.8"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 winit = "0.30.13"
@@ -49,6 +51,8 @@ pollster = "0.4"
 rapier3d = "0.22.0"
 rhai = "1.21"
 notify = "6.1"
+cpal = "0.15.3"
+symphonia = { version = "0.5.4", default-features = false, features = ["ogg", "pcm", "vorbis", "wav"] }
 
 engine-core = { path = "crates/engine-core", version = "0.1.0" }
 engine-ecs = { path = "crates/engine-ecs", version = "0.1.0" }
@@ -79,3 +83,8 @@ editor = ["runtime-min/editor"]
 agent-tools = ["runtime-min/agent-tools"]
 script-python = ["runtime-min/script-python"]
 dev-full = ["runtime-min/dev-full"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

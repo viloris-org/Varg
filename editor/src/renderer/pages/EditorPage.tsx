@@ -234,7 +234,10 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, viewMode,
       } catch (e) {
         console.error('[viewport] readback error:', e);
       }
-      setTimeout(poll, 100);
+      // GPU readback is synchronous on the backend and copies the full RGBA
+      // frame through IPC. Cap play previews at 30 fps and keep scene previews
+      // on a low-cost dirty/version poll.
+      window.setTimeout(poll, playMode ? 33 : 100);
     };
     poll();
     return () => { isActiveRef.current = false; };

@@ -686,6 +686,11 @@ impl ProjectContext {
                 "volume": a.volume,
                 "looping": a.looping,
                 "play_on_start": a.play_on_start,
+                "spatial_blend": a.spatial_blend,
+                "pitch": a.pitch,
+                "bus": a.bus,
+                "priority": a.priority,
+                "virtualization": a.virtualization,
             }),
             ComponentData::ParticleEmitter(p) => serde_json::json!({
                 "type": "ParticleEmitter",
