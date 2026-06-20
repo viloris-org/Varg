@@ -8,6 +8,7 @@ pub struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
     pub(crate) uv: [f32; 2],
+    pub(crate) tangent: [f32; 4],
 }
 
 #[repr(C)]
@@ -20,6 +21,7 @@ pub(crate) struct Instance {
     pub(crate) metallic: f32,
     pub(crate) roughness: f32,
     pub(crate) emissive: [f32; 3],
+    pub(crate) receive_shadows: f32,
 }
 
 #[repr(C)]
@@ -134,6 +136,21 @@ pub(crate) struct SsaoSample {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct SsgiUniform {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) inv_width: f32,
+    pub(crate) inv_height: f32,
+    pub(crate) radius: f32,
+    pub(crate) intensity: f32,
+    pub(crate) thickness: f32,
+    pub(crate) sample_count: f32,
+    pub(crate) frame_index: f32,
+    pub(crate) _pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct FogUniform {
     pub(crate) density: f32,
     pub(crate) _pad: [f32; 3],
@@ -144,12 +161,19 @@ pub(crate) struct FogUniform {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct PostProcessUniform {
-    pub(crate) width: f32,
-    pub(crate) height: f32,
-    pub(crate) inv_width: f32,
-    pub(crate) inv_height: f32,
+    pub(crate) render_width: f32,
+    pub(crate) render_height: f32,
+    pub(crate) inv_render_width: f32,
+    pub(crate) inv_render_height: f32,
+    pub(crate) output_width: f32,
+    pub(crate) output_height: f32,
+    pub(crate) inv_output_width: f32,
+    pub(crate) inv_output_height: f32,
     pub(crate) exposure: f32,
     pub(crate) bloom_intensity: f32,
     pub(crate) ssao_enabled: f32,
-    pub(crate) time: f32,
+    pub(crate) upscale_sharpness: f32,
+    pub(crate) ssgi_enabled: f32,
+    pub(crate) ssgi_intensity: f32,
+    pub(crate) _pad: [f32; 2],
 }

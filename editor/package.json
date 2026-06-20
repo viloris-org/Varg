@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "linux:install-dev-desktop": "../scripts/install-linux-dev-desktop-entry.sh",
-    "tauri": "bun run linux:install-dev-desktop && tauri"
+    "dev:desktop": "bun run linux:install-dev-desktop",
+    "dev:tauri": "bash ../scripts/tauri-dev.sh",
+    "tauri": "bunx tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -247,6 +247,7 @@ resource_model = "Modelo"
 resource_skinned_model = "Modelo con Esqueleto"
 resource_animation = "Animación"
 resource_script = "Script"
+resource_prefab = "Prefab"
 resource_scene = "Escena"
 
 # Hub projects page

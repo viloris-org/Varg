@@ -44,6 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
+gilrs = "0.11.2"
 winit = "0.30.13"
 wgpu = "29.0.3"
 bytemuck = { version = "1.25", features = ["derive"] }

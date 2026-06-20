@@ -403,10 +403,9 @@ impl DefaultCapabilityIssuer {
             RiskClass::High => ReviewRoute {
                 local_review_required: true,
                 deep_review_required: true,
-                risk_audit_required: request
-                    .requested_operations
-                    .iter()
-                    .any(|op| op == "write_script" || op == "execute_command" || op == "run_command"),
+                risk_audit_required: request.requested_operations.iter().any(|op| {
+                    op == "write_script" || op == "execute_command" || op == "run_command"
+                }),
                 user_approval_required: true,
             },
             RiskClass::Medium => ReviewRoute {

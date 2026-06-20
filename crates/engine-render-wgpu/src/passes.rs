@@ -5,6 +5,8 @@ use crate::{device::*, meshes::*};
 pub(crate) fn encode_batched_forward_pass<'a>(
     encoder: &mut wgpu::CommandEncoder,
     color_view: &wgpu::TextureView,
+    normal_view: &wgpu::TextureView,
+    albedo_view: &wgpu::TextureView,
     depth_view: Option<&wgpu::TextureView>,
     pipeline: &wgpu::RenderPipeline,
     camera_bind_group: &wgpu::BindGroup,
@@ -14,7 +16,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     default_vertex_buffer: &'a wgpu::Buffer,
     default_index_buffer: &'a wgpu::Buffer,
     instance_buffer: &wgpu::Buffer,
-    batches: &[(String, u32, String)],
+    batches: &[(String, u32, String, bool)],
 ) {
     let color_attachment = Some(wgpu::RenderPassColorAttachment {
         view: color_view,
@@ -22,6 +24,34 @@ pub(crate) fn encode_batched_forward_pass<'a>(
         resolve_target: None,
         ops: wgpu::Operations {
             load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        },
+    });
+    let normal_attachment = Some(wgpu::RenderPassColorAttachment {
+        view: normal_view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.5,
+                g: 0.5,
+                b: 1.0,
+                a: 1.0,
+            }),
+            store: wgpu::StoreOp::Store,
+        },
+    });
+    let albedo_attachment = Some(wgpu::RenderPassColorAttachment {
+        view: albedo_view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }),
             store: wgpu::StoreOp::Store,
         },
     });
@@ -35,7 +65,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     });
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aster forward pass"),
-        color_attachments: &[color_attachment],
+        color_attachments: &[color_attachment, normal_attachment, albedo_attachment],
         depth_stencil_attachment: depth_attachment,
         timestamp_writes: None,
         occlusion_query_set: None,
@@ -45,7 +75,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     pass.set_bind_group(0, camera_bind_group, &[]);
 
     let mut instance_offset = 0u32;
-    for (mesh_name, count, material_name) in batches {
+    for (mesh_name, count, material_name, _) in batches {
         if *count == 0 {
             continue;
         }
@@ -81,7 +111,7 @@ pub(crate) fn encode_shadow_pass(
     vertex_buffer: &wgpu::Buffer,
     index_buffer: &wgpu::Buffer,
     instance_buffer: &wgpu::Buffer,
-    batches: &[(String, u32, String)],
+    batches: &[(String, u32, String, bool)],
     mesh_cache: &HashMap<String, MeshBuffers>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -103,8 +133,12 @@ pub(crate) fn encode_shadow_pass(
     pass.set_bind_group(0, bind_group, &[]);
 
     let mut instance_offset = 0u32;
-    for (mesh_name, count, _) in batches {
+    for (mesh_name, count, _, casts_shadows) in batches {
         if *count == 0 {
+            continue;
+        }
+        if !*casts_shadows {
+            instance_offset += count;
             continue;
         }
         let buffers = mesh_cache.get(mesh_name);

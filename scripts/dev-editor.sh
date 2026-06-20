@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")/../editor"
+set -euo pipefail
 
-# Start Vite dev server in background, then Tauri dev
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root/editor"
+
 echo "Starting Aster Editor (Tauri) dev mode..."
-bun run tauri dev
+bun run dev:tauri

@@ -15,7 +15,7 @@ mod system_prompt;
 pub use parser::parse_operations;
 pub use registry::ModelRegistry;
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use engine_core::{EngineError, EngineResult};
 
@@ -232,6 +232,13 @@ pub enum AgentOperation {
         /// Rhai source code.
         source: String,
     },
+    /// Create or update a text file relative to the project root.
+    WriteFile {
+        /// Path relative to the project root.
+        path: String,
+        /// Complete file content to write.
+        content: String,
+    },
     /// Create a new GameObject with optional components and position.
     CreateObject {
         /// Display name for the object.
@@ -390,6 +397,7 @@ impl AgentOperation {
         match self {
             Self::ExecuteCommand { .. } => "execute_command",
             Self::WriteScript { .. } => "write_script",
+            Self::WriteFile { .. } => "write_file",
             Self::CreateObject { .. } => "create_object",
             Self::SetProperty { .. } => "set_property",
             Self::RemoveComponent { .. } => "remove_component",
@@ -766,6 +774,31 @@ impl AgentSession {
                         line: None,
                     },
                     message: format!("Created script: {path}"),
+                });
+                Ok(())
+            }
+            AgentOperation::WriteFile { path, content } => {
+                let relative = sanitize_project_relative_path(path)?;
+                let full_path = self.context.root.join(relative);
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                }
+                std::fs::write(&full_path, content).map_err(|source| EngineError::Filesystem {
+                    path: full_path.clone(),
+                    source,
+                })?;
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "ai-agent".into(),
+                        file: Some(full_path),
+                        line: None,
+                    },
+                    message: format!("Wrote file: {path}"),
                 });
                 Ok(())
             }
@@ -1656,9 +1689,29 @@ fn join_output_reader(
         .map_err(|error| EngineError::config(format!("failed to read command {stream}: {error}")))
 }
 
+fn sanitize_project_relative_path(path: &str) -> EngineResult<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(EngineError::config(
+                    "file path must stay inside the project",
+                ));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(EngineError::config("file path must not be empty"));
+    }
+    Ok(relative)
+}
+
 fn operation_is_transactional(operation: &AgentOperation) -> bool {
     match operation {
         AgentOperation::WriteScript { .. }
+        | AgentOperation::WriteFile { .. }
         | AgentOperation::ExecuteCommand { .. }
         | AgentOperation::UpdateProjectMemory { .. }
         | AgentOperation::UpdateUserMemory { .. }
@@ -1692,6 +1745,7 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
             requires_process_execution: false,
         },
         AgentOperation::WriteScript { .. }
+        | AgentOperation::WriteFile { .. }
         | AgentOperation::UpdateProjectMemory { .. }
         | AgentOperation::UpdateUserMemory { .. } => OperationAccess {
             requires_write: true,
@@ -1785,6 +1839,9 @@ fn preview_operation(operation: &AgentOperation) -> String {
         }
         AgentOperation::WriteScript { path, .. } => {
             format!("Create or update Rhai script `{path}`")
+        }
+        AgentOperation::WriteFile { path, .. } => {
+            format!("Create or update project file `{path}`")
         }
         AgentOperation::CreateObject { name, .. } => format!("Create object `{name}`"),
         AgentOperation::SetProperty {
@@ -1893,7 +1950,7 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         | AgentOperation::DestroyObject { .. }
         | AgentOperation::AttachBehavior { .. }
         | AgentOperation::MoveEntityTo { .. } => "Use editor undo to revert this operation.",
-        AgentOperation::WriteScript { .. } => {
+        AgentOperation::WriteScript { .. } | AgentOperation::WriteFile { .. } => {
             "Review the generated script under the asset root and use version control or file history to revert it."
         }
         AgentOperation::ReadFile { .. }
@@ -1931,6 +1988,9 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
     match operation {
         AgentOperation::WriteScript { .. } => {
             "Fix the script path or source, then regenerate or reapply the plan."
+        }
+        AgentOperation::WriteFile { .. } => {
+            "Fix the file path or content, then regenerate or reapply the plan."
         }
         AgentOperation::ReadFile { .. } => "Check that the file path exists inside the project.",
         AgentOperation::ExecuteCommand { .. } => {
@@ -2031,6 +2091,11 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let path = args["path"].as_str().unwrap_or("").to_owned();
             let source = args["source"].as_str().unwrap_or("").to_owned();
             Ok(AgentOperation::WriteScript { path, source })
+        }
+        "write_file" => {
+            let path = args["path"].as_str().unwrap_or("").to_owned();
+            let content = args["content"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::WriteFile { path, content })
         }
         "set_property" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
@@ -2223,6 +2288,18 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                     "source": { "type": "string", "description": "Rhai source code" }
                 },
                 "required": ["path", "source"]
+            }),
+        },
+        ToolDefinition {
+            name: "write_file".into(),
+            description: "Create or update a UTF-8 text file relative to the project root. Use this for Rust, TypeScript, docs, schemas, configs, and other non-asset files.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path relative to project root, e.g. crates/foo/src/lib.rs" },
+                    "content": { "type": "string", "description": "Complete file content to write" }
+                },
+                "required": ["path", "content"]
             }),
         },
         ToolDefinition {

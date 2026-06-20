@@ -9,9 +9,10 @@ pub mod graph;
 pub mod performance;
 pub mod pipeline;
 pub mod resource;
+pub mod scaling;
 pub mod target;
 
-pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass};
+pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass, RenderStage};
 pub use performance::{
     DynamicResolutionConfig, DynamicResolutionController, PresentStrategy, RenderPerformanceConfig,
     RenderPerformanceMetrics,
@@ -22,6 +23,12 @@ pub use pipeline::{
 pub use resource::{
     BufferDesc, BufferHandle, BufferUsage, ImageDesc, ImageFormat, ImageHandle, ImageUsage,
     SamplerDesc, SamplerHandle, TextureCache,
+};
+pub use scaling::{
+    negotiate_render_scaling, BatteryPolicy, FrameGenerationCapability, FrameGenerationKind,
+    RenderPlatformClass, RenderQualityMode, RenderScalingCapabilities, RenderScalingContext,
+    RenderScalingSelection, RenderScalingSettings, TemporalCameraData, ThermalState,
+    UiCompositionPolicy, UpscalerBackend, UpscalerCapability, UpscalerFrameData, UpscalerKind,
 };
 pub use target::{RenderTarget, RenderTargetDesc, ViewKind};
 
@@ -97,6 +104,10 @@ pub struct RenderObject {
     pub mesh: String,
     /// Material identifier, either a built-in name or asset label.
     pub material: String,
+    /// Whether this object contributes to shadow maps.
+    pub casts_shadows: bool,
+    /// Whether this object receives real-time shadows.
+    pub receive_shadows: bool,
 }
 
 /// Texture handles for a PBR material, ready for GPU binding.
@@ -312,6 +323,8 @@ impl RenderWorld {
                             transform,
                             mesh: mesh_name,
                             material: material_name,
+                            casts_shadows: mesh.casts_shadows,
+                            receive_shadows: mesh.receive_shadows,
                         });
                     }
                     engine_ecs::ComponentData::Camera2D(camera) => {
@@ -438,6 +451,23 @@ pub trait RenderDevice {
 
     /// Updates the internal linear render scale.
     fn set_render_scale(&mut self, _scale: f32) {}
+
+    /// Returns scaling and frame generation capabilities exposed by this backend.
+    fn render_scaling_capabilities(&self) -> RenderScalingCapabilities {
+        RenderScalingCapabilities::built_in()
+    }
+
+    /// Negotiates scaling settings and applies the selected initial render scale.
+    fn configure_render_scaling(
+        &mut self,
+        settings: &RenderScalingSettings,
+        context: RenderScalingContext,
+    ) -> RenderScalingSelection {
+        let selection =
+            negotiate_render_scaling(settings, &self.render_scaling_capabilities(), context);
+        self.set_render_scale(selection.render_scale);
+        selection
+    }
 
     /// Returns the latest backend performance measurements.
     fn performance_metrics(&self) -> RenderPerformanceMetrics {
@@ -821,6 +851,28 @@ mod tests {
 
         assert!(world.is_visible());
         assert!(!world.particles.is_empty());
+    }
+
+    #[test]
+    fn extracts_mesh_shadow_flags() {
+        let mut scene = Scene::new();
+        let mesh = scene.create_object("No Shadows").unwrap();
+        scene
+            .upsert_component(
+                mesh,
+                ComponentData::MeshRenderer(engine_ecs::MeshRendererComponentData {
+                    casts_shadows: false,
+                    receive_shadows: false,
+                    ..engine_ecs::MeshRendererComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let world = RenderWorld::extract(&scene);
+
+        assert_eq!(world.objects.len(), 1);
+        assert!(!world.objects[0].casts_shadows);
+        assert!(!world.objects[0].receive_shadows);
     }
 
     #[test]

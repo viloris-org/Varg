@@ -10,6 +10,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 export default function GameView() {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sizeRef = useRef({ width: 1280, height: 720 });
   const isActiveRef = useRef(true);
@@ -42,12 +43,14 @@ export default function GameView() {
 
         // w === 0 means "no change" (GPU render skipped on backend)
         if (w > 0 && h > 0) {
-          const ctx = canvasRef.current.getContext('2d');
+          const canvas = canvasRef.current;
+          const ctx = contextRef.current ?? canvas.getContext('2d');
+          contextRef.current = ctx;
           if (ctx) {
             const pixelOffset = uint8.byteOffset + 8;
             const pixelBytes = w * h * 4;
             const imageData = new ImageData(
-              new Uint8ClampedArray(uint8.buffer.slice(pixelOffset, pixelOffset + pixelBytes)),
+              new Uint8ClampedArray(uint8.buffer, pixelOffset, pixelBytes),
               w, h,
             );
             ctx.putImageData(imageData, 0, 0);

@@ -45,6 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             transform: Transform::IDENTITY,
             mesh: "debug/cube".to_owned(),
             material: "debug/default".to_owned(),
+            casts_shadows: true,
+            receive_shadows: true,
         }],
         ..RenderWorld::default()
     };

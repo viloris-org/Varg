@@ -26,6 +26,7 @@ export default function CameraPreview({
 }: CameraPreviewProps) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const activeRef = useRef(true);
   const lastVersionRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,13 +57,15 @@ export default function CameraPreview({
           if (canvas.width !== w || canvas.height !== h) {
             canvas.width = w;
             canvas.height = h;
+            contextRef.current = null;
           }
-          const ctx = canvas.getContext('2d');
+          const ctx = contextRef.current ?? canvas.getContext('2d');
+          contextRef.current = ctx;
           if (ctx) {
             const pixelOffset = uint8.byteOffset + 8;
             const pixelBytes = w * h * 4;
             const imageData = new ImageData(
-              new Uint8ClampedArray(uint8.buffer.slice(pixelOffset, pixelOffset + pixelBytes)),
+              new Uint8ClampedArray(uint8.buffer, pixelOffset, pixelBytes),
               w, h,
             );
             ctx.putImageData(imageData, 0, 0);

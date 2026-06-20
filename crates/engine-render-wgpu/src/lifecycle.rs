@@ -1,8 +1,24 @@
 use crate::{device::*, format::*, render::*};
 use engine_core::{EngineError, EngineResult, Handle};
-use engine_render::{RenderDevice, RenderPerformanceConfig, RenderTarget, RenderTargetDesc};
+use engine_render::{RenderPerformanceConfig, RenderTarget, RenderTargetDesc};
 
 impl WgpuRenderDevice {
+    pub(crate) fn update_offscreen_internal_sizes(&mut self, scale: f32) {
+        for target in [
+            &mut self.default_target,
+            &mut self.game_target,
+            &mut self.preview_target,
+        ] {
+            let (width, height) = scaled_render_size(target.desc.width, target.desc.height, scale);
+            target.desc.internal_width = width;
+            target.desc.internal_height = height;
+            if let Some(gpu_target) = self.targets.get_mut(&target.handle) {
+                gpu_target._desc.internal_width = width;
+                gpu_target._desc.internal_height = height;
+            }
+        }
+    }
+
     /// Number of render worlds submitted to this backend.
     pub fn submitted_worlds(&self) -> u64 {
         self.submitted_worlds
@@ -48,6 +64,13 @@ impl WgpuRenderDevice {
             performance.render_scale,
         );
         self.performance_metrics.render_scale = self.dynamic_resolution.scale();
+        self.active_upscaler = if self.dynamic_resolution.scale() < 1.0 {
+            engine_render::UpscalerKind::BuiltInSpatial
+        } else {
+            engine_render::UpscalerKind::Native
+        };
+        self.performance_metrics.upscaler = self.active_upscaler;
+        self.update_offscreen_internal_sizes(self.dynamic_resolution.scale());
         if let (Some(surface), Some(config)) = (self.surface.as_ref(), self.surface_config.as_mut())
         {
             let caps = surface.get_capabilities(&self.adapter);
@@ -68,9 +91,15 @@ impl WgpuRenderDevice {
             return Ok(());
         }
         let old_handle = self.default_target.handle;
+        let (internal_width, internal_height) =
+            scaled_render_size(w, h, self.dynamic_resolution.scale());
         let desc = RenderTargetDesc {
             width: w,
             height: h,
+            internal_width,
+            internal_height,
+            ui_width: w,
+            ui_height: h,
             ..self.default_target.desc.clone()
         };
         self.default_target = self.create_resized_target(old_handle, desc)?;
@@ -87,9 +116,15 @@ impl WgpuRenderDevice {
             return Ok(());
         }
         let old_handle = self.game_target.handle;
+        let (internal_width, internal_height) =
+            scaled_render_size(w, h, self.dynamic_resolution.scale());
         let desc = RenderTargetDesc {
             width: w,
             height: h,
+            internal_width,
+            internal_height,
+            ui_width: w,
+            ui_height: h,
             ..self.game_target.desc.clone()
         };
         self.game_target = self.create_resized_target(old_handle, desc)?;
@@ -106,9 +141,15 @@ impl WgpuRenderDevice {
             return Ok(());
         }
         let old_handle = self.preview_target.handle;
+        let (internal_width, internal_height) =
+            scaled_render_size(w, h, self.dynamic_resolution.scale());
         let desc = RenderTargetDesc {
             width: w,
             height: h,
+            internal_width,
+            internal_height,
+            ui_width: w,
+            ui_height: h,
             ..self.preview_target.desc.clone()
         };
         self.preview_target = self.create_resized_target(old_handle, desc)?;

@@ -2,6 +2,16 @@ target = "native"
 release = false
 features = ["runtime-game", "physics", "audio"]
 
+[render]
+quality = "balanced"
+upscaler = "built-in-spatial"
+dynamic_resolution = true
+target_fps = 60
+min_render_scale_percent = 50
+max_render_scale_percent = 100
+sharpness_percent = 35
+battery_policy = "balanced"
+
 [format]
 version = 1
 

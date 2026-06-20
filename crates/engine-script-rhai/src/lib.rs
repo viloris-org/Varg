@@ -222,23 +222,23 @@ impl RhaiScriptBackend {
         if !config.enable_process_execution {
             engine.disable_symbol("eval");
         }
-        
+
         if !config.enable_file_read {
             engine.disable_symbol("read_file");
             engine.disable_symbol("read_text_file");
             engine.disable_symbol("list_dir");
         }
-        
+
         if !config.enable_file_write {
             engine.disable_symbol("write_file");
             engine.disable_symbol("remove_file");
             engine.disable_symbol("rename_file");
         }
-        
+
         if !config.enable_file_write {
             engine.disable_symbol("write_text_file");
         }
-        
+
         if !config.enable_network {
             engine.disable_symbol("http_get");
             engine.disable_symbol("http_post");
@@ -780,7 +780,9 @@ impl RhaiScriptBackend {
                 let guard = scene_ref
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let (Some(scene), Some(entity)) = (guard.as_ref(), Self::parse_entity_id(entity_str)) {
+                if let (Some(scene), Some(entity)) =
+                    (guard.as_ref(), Self::parse_entity_id(entity_str))
+                {
                     if let Some(parent) = scene.transforms().parent(entity) {
                         let handle = parent.handle();
                         return format!("{}:{}", handle.slot(), handle.generation().get());
@@ -797,7 +799,9 @@ impl RhaiScriptBackend {
                 let guard = scene_ref
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let (Some(scene), Some(entity)) = (guard.as_ref(), Self::parse_entity_id(entity_str)) {
+                if let (Some(scene), Some(entity)) =
+                    (guard.as_ref(), Self::parse_entity_id(entity_str))
+                {
                     return scene
                         .transforms()
                         .children(entity)
@@ -854,9 +858,7 @@ impl RhaiScriptBackend {
                         (guard.as_ref(), Self::parse_entity_id(entity_str))
                     {
                         if let Some(components) = scene.components(entity) {
-                            return components
-                                .iter()
-                                .any(|c| c.type_id() == component_type);
+                            return components.iter().any(|c| c.type_id() == component_type);
                         }
                     }
                     false
@@ -944,10 +946,9 @@ impl RhaiScriptBackend {
                             Self::parse_entity_id(entity_a_str),
                             Self::parse_entity_id(entity_b_str),
                         ) {
-                            if let (Some(ta), Some(tb)) = (
-                                scene.transforms().world(a),
-                                scene.transforms().world(b),
-                            ) {
+                            if let (Some(ta), Some(tb)) =
+                                (scene.transforms().world(a), scene.transforms().world(b))
+                            {
                                 let diff = ta.translation - tb.translation;
                                 return diff.length() as f64;
                             }
@@ -1004,15 +1005,10 @@ impl RhaiScriptBackend {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(physics) = guard.as_mut() {
-                            let impulse = engine_physics::Vec3::new(
-                                fx as f32,
-                                fy as f32,
-                                fz as f32,
-                            );
-                            let _ = physics.apply_impulse(
-                                engine_physics::BodyHandle(body_handle),
-                                impulse,
-                            );
+                            let impulse =
+                                engine_physics::Vec3::new(fx as f32, fy as f32, fz as f32);
+                            let _ = physics
+                                .apply_impulse(engine_physics::BodyHandle(body_handle), impulse);
                         }
                     }
                 },
@@ -1034,15 +1030,10 @@ impl RhaiScriptBackend {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(physics) = guard.as_mut() {
-                            let impulse = engine_physics::Vec3::new(
-                                ix as f32,
-                                iy as f32,
-                                iz as f32,
-                            );
-                            let _ = physics.apply_impulse(
-                                engine_physics::BodyHandle(body_handle),
-                                impulse,
-                            );
+                            let impulse =
+                                engine_physics::Vec3::new(ix as f32, iy as f32, iz as f32);
+                            let _ = physics
+                                .apply_impulse(engine_physics::BodyHandle(body_handle), impulse);
                         }
                     }
                 },
@@ -2719,7 +2710,6 @@ impl RhaiScriptBackend {
         })?;
         self.load_script(&full_path)?;
         Ok(full_path)
-
     }
 
     /// Runs the `on_start()` lifecycle function for an entity's script.

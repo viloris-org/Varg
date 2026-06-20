@@ -247,6 +247,7 @@ resource_model = "모델"
 resource_skinned_model = "스킨 모델"
 resource_animation = "애니메이션"
 resource_script = "스크립트"
+resource_prefab = "프리팹"
 resource_scene = "씬"
 
 # Hub projects page

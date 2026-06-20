@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use crate::{device::*, format::*, render::*, scene_uniforms::*, uniforms::*};
+use crate::{
+    device::*, format::*, meshes::with_generated_tangents, render::*, scene_uniforms::*,
+    uniforms::*,
+};
 use engine_core::{EngineError, EngineResult};
 use engine_render::{
     BufferDesc, BufferHandle, GuiDrawList, GuiTextureId, ImageDesc, ImageHandle, RenderApi,
@@ -74,7 +77,8 @@ impl RenderDevice for WgpuRenderDevice {
             let scale = self.dynamic_resolution.scale();
             let (rw, rh) = scaled_render_size(sw, sh, scale);
 
-            let frame_res = self.encode_frame_passes(&batches, &csm, rw, rh, true, "aster surface");
+            let frame_res =
+                self.encode_frame_passes(&batches, &csm, rw, rh, sw, sh, true, "aster surface");
 
             let mut encoder = self
                 .device
@@ -97,24 +101,30 @@ impl RenderDevice for WgpuRenderDevice {
                 internal_width: rw,
                 internal_height: rh,
                 render_scale: scale,
+                upscaler: self.active_upscaler,
+                frame_generation_multiplier: 1,
+                ..RenderPerformanceMetrics::default()
             };
             return Ok(());
         }
 
         // Fallback: offscreen path
-        let (tw, th, target_handle) = {
+        let (tw, th, ow, oh, target_handle) = {
             let target = self
                 .targets
                 .get(&self.default_target.handle)
                 .ok_or_else(|| EngineError::invalid_handle("default wgpu target is missing"))?;
             (
+                target._desc.internal_width,
+                target._desc.internal_height,
                 target._desc.width,
                 target._desc.height,
                 self.default_target.handle,
             )
         };
 
-        let frame_res = self.encode_frame_passes(&batches, &csm, tw, th, false, "aster offscreen");
+        let frame_res =
+            self.encode_frame_passes(&batches, &csm, tw, th, ow, oh, false, "aster offscreen");
 
         let target = self
             .targets
@@ -137,11 +147,14 @@ impl RenderDevice for WgpuRenderDevice {
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
         self.performance_metrics = RenderPerformanceMetrics {
             render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
-            output_width: tw,
-            output_height: th,
+            output_width: ow,
+            output_height: oh,
             internal_width: tw,
             internal_height: th,
-            render_scale: 1.0,
+            render_scale: self.dynamic_resolution.scale(),
+            upscaler: self.active_upscaler,
+            frame_generation_multiplier: 1,
+            ..RenderPerformanceMetrics::default()
         };
         Ok(())
     }
@@ -168,7 +181,43 @@ impl RenderDevice for WgpuRenderDevice {
             self.performance_config.dynamic_resolution,
             scale,
         );
+        self.active_upscaler = if self.dynamic_resolution.scale() < 1.0 {
+            engine_render::UpscalerKind::BuiltInSpatial
+        } else {
+            engine_render::UpscalerKind::Native
+        };
         self.performance_metrics.render_scale = self.dynamic_resolution.scale();
+        self.performance_metrics.upscaler = self.active_upscaler;
+        self.update_offscreen_internal_sizes(self.dynamic_resolution.scale());
+    }
+
+    fn configure_render_scaling(
+        &mut self,
+        settings: &engine_render::RenderScalingSettings,
+        context: engine_render::RenderScalingContext,
+    ) -> engine_render::RenderScalingSelection {
+        let settings = settings.clone().normalized();
+        let selection = engine_render::negotiate_render_scaling(
+            &settings,
+            &self.render_scaling_capabilities(),
+            context,
+        );
+        self.performance_config.dynamic_resolution.enabled = settings.dynamic_resolution
+            && selection.upscaler != engine_render::UpscalerKind::Native;
+        self.performance_config.dynamic_resolution.target_fps = settings.target_fps;
+        self.performance_config.dynamic_resolution.min_scale = settings.min_render_scale;
+        self.performance_config.dynamic_resolution.max_scale = settings.max_render_scale;
+        self.performance_config.render_scale = selection.render_scale;
+        self.dynamic_resolution = engine_render::DynamicResolutionController::new(
+            self.performance_config.dynamic_resolution,
+            selection.render_scale,
+        );
+        self.active_upscaler = selection.upscaler;
+        self.upscale_sharpness = settings.sharpness;
+        self.performance_metrics.render_scale = self.dynamic_resolution.scale();
+        self.performance_metrics.upscaler = self.active_upscaler;
+        self.update_offscreen_internal_sizes(self.dynamic_resolution.scale());
+        selection
     }
 
     fn performance_metrics(&self) -> RenderPerformanceMetrics {
@@ -178,6 +227,7 @@ impl RenderDevice for WgpuRenderDevice {
     fn record_frame_time(&mut self, frame_ms: f32) {
         if let Some(scale) = self.dynamic_resolution.record_frame(frame_ms) {
             self.performance_metrics.render_scale = scale;
+            self.update_offscreen_internal_sizes(scale);
         }
     }
 
@@ -342,8 +392,10 @@ impl RenderDevice for WgpuRenderDevice {
                 position: positions[i],
                 normal: normals[i],
                 uv: texcoords[i],
+                tangent: [1.0, 0.0, 0.0, 1.0],
             })
             .collect();
+        let vertices = with_generated_tangents(vertices, indices);
         self.upload_mesh(mesh_name, &vertices, indices);
         Ok(())
     }

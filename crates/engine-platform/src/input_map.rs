@@ -41,6 +41,23 @@ pub enum GamepadButton {
     DPadRight,
 }
 
+/// Gamepad axis identifiers normalized across common controllers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GamepadAxis {
+    /// Left stick horizontal axis.
+    LeftStickX,
+    /// Left stick vertical axis.
+    LeftStickY,
+    /// Right stick horizontal axis.
+    RightStickX,
+    /// Right stick vertical axis.
+    RightStickY,
+    /// Left trigger analog value.
+    LeftTrigger,
+    /// Right trigger analog value.
+    RightTrigger,
+}
+
 /// Dead zone configuration for analog input.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeadZone {
@@ -84,6 +101,10 @@ pub struct InputBinding {
     pub positive_gamepad: Vec<GamepadButton>,
     /// Gamepad buttons for negative action.
     pub negative_gamepad: Vec<GamepadButton>,
+    /// Gamepad axes for positive action values.
+    pub positive_gamepad_axes: Vec<GamepadAxis>,
+    /// Gamepad axes inverted into negative action values.
+    pub negative_gamepad_axes: Vec<GamepadAxis>,
     /// Dead zone for this binding.
     pub dead_zone: Option<DeadZone>,
     /// Number of frames to buffer this input for.
@@ -102,6 +123,8 @@ impl Default for InputBinding {
             positive_mouse: Vec::new(),
             positive_gamepad: Vec::new(),
             negative_gamepad: Vec::new(),
+            positive_gamepad_axes: Vec::new(),
+            negative_gamepad_axes: Vec::new(),
             dead_zone: None,
             buffer_frames: 0,
             chord_keys: Vec::new(),
@@ -211,6 +234,28 @@ impl InputMap {
     }
 
     fn gamepad_value(binding: &InputBinding, input: &InputState, _deadzone: DeadZone) -> f32 {
+        let axis_value = input
+            .gamepad_states()
+            .iter()
+            .flat_map(|gamepad| {
+                binding
+                    .positive_gamepad_axes
+                    .iter()
+                    .map(|axis| gamepad_axis_value(gamepad, *axis))
+                    .chain(
+                        binding
+                            .negative_gamepad_axes
+                            .iter()
+                            .map(|axis| -gamepad_axis_value(gamepad, *axis)),
+                    )
+            })
+            .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+            .unwrap_or(0.0);
+
+        if axis_value.abs() > f32::EPSILON {
+            return axis_value;
+        }
+
         if binding
             .positive_gamepad
             .iter()
@@ -226,6 +271,17 @@ impl InputMap {
         } else {
             0.0
         }
+    }
+}
+
+fn gamepad_axis_value(gamepad: &crate::gamepad::GamepadState, axis: GamepadAxis) -> f32 {
+    match axis {
+        GamepadAxis::LeftStickX => gamepad.left_stick_x,
+        GamepadAxis::LeftStickY => gamepad.left_stick_y,
+        GamepadAxis::RightStickX => gamepad.right_stick_x,
+        GamepadAxis::RightStickY => gamepad.right_stick_y,
+        GamepadAxis::LeftTrigger => gamepad.left_trigger,
+        GamepadAxis::RightTrigger => gamepad.right_trigger,
     }
 }
 
@@ -310,6 +366,30 @@ mod tests {
 
         let values = map.evaluate(&input);
         assert!(values.contains_key("Jump"));
+    }
+
+    #[test]
+    fn gamepad_axis_maps_to_action_with_deadzone() {
+        use crate::gamepad::GamepadState;
+
+        let mut gamepad = GamepadState::connected(0, "Test Controller");
+        gamepad.left_stick_x = 0.5;
+
+        let mut input = InputState::default();
+        input.apply_gamepad_state(gamepad);
+
+        let mut map = InputMap::default();
+        map.actions.insert(
+            "MoveX".to_string(),
+            InputBinding {
+                positive_gamepad_axes: vec![GamepadAxis::LeftStickX],
+                axis_type: AxisType::Axis1D,
+                ..Default::default()
+            },
+        );
+
+        let values = map.evaluate(&input);
+        assert!(values.get("MoveX").is_some_and(|value| *value > 0.3));
     }
 
     #[test]

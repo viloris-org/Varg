@@ -5,8 +5,10 @@
 
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Component, Path, PathBuf},
+    process::Command,
     sync::Mutex,
     thread::ThreadId,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -15,7 +17,7 @@ use std::{
 use base64::Engine as _;
 use engine_ai::{AgentPlan, AgentSession};
 use engine_core::{EngineConfig, EngineError, EngineResult, RuntimeProfile};
-use engine_editor::agent::PermissionPolicy;
+use engine_editor::agent::{PermissionPolicy, SandboxPolicy, TraceEntry};
 use engine_editor::{
     ConsoleEntry, ConsoleLevel, ConsoleService, DurableEditorState, EditorPreferences,
     FileEditorStore, ProjectMetadata, ThemePreference, UndoCommand,
@@ -27,9 +29,22 @@ use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 use runtime_min::{headless_services_from_scene, RuntimeServices};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{image::Image, utils::config::Color, Emitter, Manager, State};
+use tauri::{
+    image::Image,
+    utils::config::Color,
+    webview::{PageLoadEvent, WebviewWindowBuilder},
+    Emitter, Manager, State,
+};
 
 mod game_window;
+mod quest;
+mod scene_window;
+
+use quest::{
+    transaction_groups_from_changed_files, ChangedFile, QuestExplorationAttempt, QuestProject,
+    QuestReview, QuestReviewAction, QuestReviewFinding, QuestReviewMetrics, QuestStatus,
+    QuestStore, ValidationResult,
+};
 
 const APP_WINDOW_ICON: Image<'static> = tauri::include_image!("./icons/128x128.png");
 
@@ -52,6 +67,13 @@ fn normalize_relative_path(path: &str) -> EngineResult<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn required_string<'a>(params: &'a Value, key: &str) -> EngineResult<&'a str> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| EngineError::config(format!("missing '{key}' parameter")))
 }
 
 fn validate_file_name(name: &str) -> EngineResult<()> {
@@ -263,6 +285,20 @@ struct PendingCodexOAuth {
     interval_seconds: u64,
 }
 
+#[derive(Debug)]
+struct GeneratedQuestSpec {
+    title: String,
+    spec: String,
+    tasks: Vec<GeneratedQuestTask>,
+}
+
+#[derive(Debug)]
+struct GeneratedQuestTask {
+    title: String,
+    summary: Option<String>,
+    acceptance: Vec<String>,
+}
+
 struct PreparedCopilotRequest {
     request: engine_ai::AiRequest,
     original_prompt: String,
@@ -275,6 +311,7 @@ struct PreparedCopilotRequest {
     mimo_config: Option<engine_editor::MimoConfig>,
     glm_config: Option<engine_editor::GlmConfig>,
     cached_context: engine_editor::ProjectContext,
+    knowledge_entries_used: usize,
 }
 
 struct CompletedCopilotRequest {
@@ -282,6 +319,7 @@ struct CompletedCopilotRequest {
     response: Result<String, String>,
     tool_calls: Vec<engine_ai::ToolCall>,
     cached_context: engine_editor::ProjectContext,
+    knowledge_entries_used: usize,
 }
 
 #[derive(Default)]
@@ -317,6 +355,258 @@ fn unix_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis() as u64
+}
+
+fn context_relevance_score(detail: &quest::QuestDetail) -> f32 {
+    let mut score: f32 = 0.45;
+    if !detail.intent.trim().is_empty() {
+        score += 0.15;
+    }
+    if !detail.spec.trim().is_empty() {
+        score += 0.2;
+    }
+    if !detail.attached_knowledge.is_empty() {
+        score += 0.1;
+    }
+    if !detail.events.is_empty() {
+        score += 0.1;
+    }
+    score.min(1.0)
+}
+
+fn failed_action_recovery_rate(trace_entries: &[TraceEntry]) -> f32 {
+    let failed = trace_entries
+        .iter()
+        .filter(|entry| entry.result != "applied")
+        .count();
+    if failed == 0 {
+        return 1.0;
+    }
+    let recoverable = trace_entries
+        .iter()
+        .filter(|entry| entry.result != "applied" && !entry.recovery_hint.trim().is_empty())
+        .count();
+    recoverable as f32 / failed as f32
+}
+
+fn review_evidence_quality_score(
+    has_changes: bool,
+    validations: &[ValidationResult],
+    has_failed_validation: bool,
+) -> f32 {
+    let mut score: f32 = 0.25;
+    if has_changes {
+        score += 0.25;
+    }
+    if !validations.is_empty() {
+        score += 0.25;
+    }
+    if validations
+        .iter()
+        .any(|validation| validation.status == "passed")
+    {
+        score += 0.15;
+    }
+    if has_failed_validation {
+        score -= 0.15;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn quest_review_actions_for_result(
+    unresolved_issues: &[String],
+    has_failed_validation: bool,
+    has_no_changes: bool,
+) -> Vec<QuestReviewAction> {
+    let mut actions = Vec::new();
+    if has_failed_validation {
+        for (index, issue) in unresolved_issues.iter().enumerate() {
+            actions.push(QuestReviewAction::with_target(
+                format!("quick-fix-{index}"),
+                "Request quick fix",
+                "quick_fix",
+                issue.clone(),
+            ));
+        }
+        actions.push(QuestReviewAction::new(
+            "revise-spec",
+            "Revise Quest spec",
+            "revise",
+        ));
+        actions.push(QuestReviewAction::new(
+            "retry-validation",
+            "Retry execution",
+            "retry",
+        ));
+        actions.push(QuestReviewAction::new(
+            "continue-quest",
+            "Continue Quest",
+            "continue",
+        ));
+    } else if has_no_changes {
+        actions.push(QuestReviewAction::with_target(
+            "inspect-no-changes",
+            "Inspect no-change finding",
+            "open_review_finding",
+            unresolved_issues
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Quest produced no file changes".to_owned()),
+        ));
+        actions.push(QuestReviewAction::new(
+            "revise-spec",
+            "Revise Quest spec",
+            "revise",
+        ));
+        actions.push(QuestReviewAction::new(
+            "continue-quest",
+            "Continue Quest",
+            "continue",
+        ));
+        actions.push(QuestReviewAction::new(
+            "archive-quest",
+            "Archive Quest",
+            "archive",
+        ));
+    } else {
+        actions.push(QuestReviewAction::new(
+            "apply-selected",
+            "Apply selected changes",
+            "apply_selected",
+        ));
+        actions.push(QuestReviewAction::new(
+            "request-revision",
+            "Request revision",
+            "revise",
+        ));
+        actions.push(QuestReviewAction::new(
+            "branch-result",
+            "Branch from result",
+            "branch",
+        ));
+        actions.push(QuestReviewAction::new(
+            "continue-quest",
+            "Continue Quest",
+            "continue",
+        ));
+        actions.push(QuestReviewAction::new(
+            "archive-quest",
+            "Archive Quest",
+            "archive",
+        ));
+        actions.push(QuestReviewAction::new(
+            "discard-selected",
+            "Discard selected changes",
+            "discard_selected",
+        ));
+    }
+    actions
+}
+
+fn selected_review_paths_from_params(
+    review: &QuestReview,
+    params: &Value,
+    selection_label: &str,
+) -> EngineResult<Vec<String>> {
+    let selected_groups = params
+        .get("transaction_group_ids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+    let selected_files = params.get("files").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let changed_files = match (selected_groups, selected_files) {
+        (Some(groups), _) if groups.is_empty() => {
+            return Err(EngineError::config(format!(
+                "at least one Quest transaction group must be selected to {selection_label}"
+            )));
+        }
+        (Some(groups), _) => {
+            let groups_by_id = review
+                .transaction_groups
+                .iter()
+                .map(|group| (group.id.as_str(), group))
+                .collect::<HashMap<_, _>>();
+            let mut files = Vec::new();
+            for group_id in &groups {
+                let group = groups_by_id.get(group_id.as_str()).ok_or_else(|| {
+                    EngineError::config(format!(
+                        "selected Quest transaction group is not present in the review bundle: {group_id}"
+                    ))
+                })?;
+                files.extend(group.files.iter().cloned());
+            }
+            files.sort();
+            files.dedup();
+            files
+        }
+        (_, Some(files)) if files.is_empty() => {
+            return Err(EngineError::config(format!(
+                "at least one Quest file must be selected to {selection_label}"
+            )));
+        }
+        (_, Some(files)) => files,
+        (None, None) => review
+            .changed_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect(),
+    };
+    let review_paths = review
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if changed_files
+        .iter()
+        .any(|path| !review_paths.contains(path.as_str()))
+    {
+        return Err(EngineError::config(
+            "selected Quest file is not present in the review bundle",
+        ));
+    }
+    Ok(changed_files)
+}
+
+fn project_fingerprint(root: &Path) -> EngineResult<String> {
+    let snapshot = collect_workspace_snapshot(root)?;
+    Ok(snapshot_fingerprint(&snapshot))
+}
+
+fn snapshot_fingerprint(snapshot: &BTreeMap<String, Vec<u8>>) -> String {
+    let mut hasher = DefaultHasher::new();
+    for (path, bytes) in snapshot {
+        path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn ensure_review_project_is_current(review: &QuestReview, project_root: &Path) -> EngineResult<()> {
+    let Some(expected) = review.project_fingerprint.as_deref() else {
+        return Ok(());
+    };
+    let current = project_fingerprint(project_root)?;
+    if current != expected {
+        return Err(EngineError::config(
+            "Quest review is stale because the active project changed after the isolated workspace snapshot. Re-run or revise the Quest before applying or discarding this review.",
+        ));
+    }
+    Ok(())
 }
 
 fn exchange_codex_token(form: &[(&str, &str)]) -> EngineResult<CodexTokenResponse> {
@@ -396,6 +686,10 @@ pub struct EditorHost {
     copilot_conversation: Vec<engine_ai::ChatMessage>,
     /// Native game window handle (direct GPU surface rendering).
     game_window: Option<game_window::GameWindowHandle>,
+    /// Native editor scene view handle (direct GPU surface rendering).
+    scene_window: Option<scene_window::SceneWindowHandle>,
+    /// Cross-project Quest registry and append-only history store.
+    quest_store: QuestStore,
 }
 
 /// Maximum number of messages to keep in the copilot conversation.
@@ -404,6 +698,18 @@ const MAX_COPILOT_CONVERSATION_MESSAGES: usize = 40;
 
 impl EditorHost {
     pub fn new(store: FileEditorStore) -> EngineResult<Self> {
+        let quest_root = store
+            .path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("quests");
+        Self::new_with_quest_root(store, quest_root)
+    }
+
+    pub fn new_with_quest_root(
+        store: FileEditorStore,
+        quest_root: impl Into<PathBuf>,
+    ) -> EngineResult<Self> {
         let durable_state = store.load().unwrap_or_default();
         let hub = HubState::from_durable_state(durable_state.clone());
         let locale = hub.preferences().locale;
@@ -439,6 +745,8 @@ impl EditorHost {
             pending_codex_oauth: None,
             copilot_conversation: Vec::new(),
             game_window: None,
+            scene_window: None,
+            quest_store: QuestStore::new(quest_root),
         };
 
         host.reopen_last_project_if_needed();
@@ -465,11 +773,48 @@ impl EditorHost {
             "project/list_assets" => self.project_list_assets(params),
             "project/import_file" => self.project_import_file(params),
             "project/create_script" => self.project_create_script(params),
+            "project/create_material" => self.project_create_material(params),
+            "project/create_prefab" => self.project_create_prefab(params),
+            "project/create_scene" => self.project_create_scene(params),
+            "project/list_asset_references" => self.project_list_asset_references(params),
             "project/rename_asset" => self.project_rename_asset(params),
             "project/delete_asset" => self.project_delete_asset(params),
             "project/reimport_asset" => self.project_reimport_asset(params),
             "project/read_file" => self.project_read_file(params),
             "project/write_file" => self.project_write_file(params),
+            "project/package" => self.project_package(params),
+
+            // ── Quests ──
+            "quest/list" => self.quest_list(params),
+            "quest/get" => self.quest_get(params),
+            "quest/create" => self.quest_create(params),
+            "quest/promote" => self.quest_promote(params),
+            "quest/update_intent" => self.quest_update_intent(params),
+            "quest/update_spec" => self.quest_update_spec(params),
+            "quest/update_knowledge_context" => self.quest_update_knowledge_context(params),
+            "quest/add_note" => self.quest_add_note(params),
+            "quest/request_quick_fix" => self.quest_request_quick_fix(params),
+            "quest/rename" => self.quest_rename(params),
+            "quest/branch" => self.quest_branch(params),
+            "quest/transition" => self.quest_transition(params),
+            "quest/delete" => self.quest_delete(params),
+            "quest/execute" => self.quest_execute(params),
+            "quest/apply" => self.quest_apply(params),
+            "quest/discard" => self.quest_discard(params),
+            "quest/rollback" => self.quest_rollback(params),
+            "quest/export" => self.quest_export(params),
+            "quest/cancel" => self.quest_cancel(params),
+            "quest/reopen" => self.quest_reopen(params),
+            "quest/continue" => self.quest_continue(params),
+            "quest/reject" => self.quest_reject(params),
+            "quest/request_revision" => self.quest_request_revision(params),
+            "quest/mock_execute" => self.quest_mock_execute(params),
+            "knowledge/list" => self.knowledge_list(params),
+            "knowledge/propose" => self.knowledge_propose(params),
+            "knowledge/approve" => self.knowledge_approve(params),
+            "knowledge/reject" => self.knowledge_reject(params),
+            "knowledge/revalidate" => self.knowledge_revalidate(params),
+            "knowledge/remove" => self.knowledge_remove(params),
 
             // ── Console ──
             "console/get_entries" => self.console_get_entries(params),
@@ -487,6 +832,7 @@ impl EditorHost {
             // ── Copilot ──
             "copilot/plan" => self.copilot_plan(params),
             "copilot/apply" => self.copilot_apply(params),
+            "copilot/undo_last" => self.copilot_undo_last(params),
             "copilot/allow_command" => self.copilot_allow_command(params),
             "copilot/clear_conversation" => self.copilot_clear_conversation(params),
             "copilot/get_conversation_length" => self.copilot_get_conversation_length(params),
@@ -531,9 +877,1176 @@ impl EditorHost {
         Ok(self.desktop_integration.as_json())
     }
 
-    fn app_open_folder(&mut self, params: &Value) -> EngineResult<Value> {
-        use std::process::Command;
+    fn quest_list(&mut self, _params: &Value) -> EngineResult<Value> {
+        Ok(serde_json::json!({ "quests": self.quest_store.list()? }))
+    }
 
+    fn quest_get(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        serde_json::to_value(self.quest_store.get(id)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_create(&mut self, params: &Value) -> EngineResult<Value> {
+        let title = params
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let goal = required_string(params, "goal")?.trim();
+        if goal.is_empty() {
+            return Err(EngineError::config("Quest goal must not be empty"));
+        }
+        let generated = self.generate_quest_spec(goal)?;
+        let title = if title.is_empty() {
+            generated.title
+        } else {
+            title.to_owned()
+        };
+        let project = self
+            .shell
+            .project()
+            .ok_or_else(|| EngineError::config("no project open"))?;
+        let detail = self.quest_store.create(
+            title,
+            goal.to_owned(),
+            generated.spec,
+            QuestProject {
+                name: project.name().to_owned(),
+                path: project.root.clone(),
+            },
+        )?;
+        for task in generated.tasks {
+            self.quest_store.append_timeline_event(
+                &detail.record.id,
+                "task_created",
+                &task.title,
+                serde_json::json!({
+                    "summary": task.summary,
+                    "acceptance": task.acceptance,
+                    "source": "ai_tool",
+                }),
+            )?;
+        }
+        let detail = self.quest_store.get(&detail.record.id)?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_promote(&mut self, params: &Value) -> EngineResult<Value> {
+        let prompt = required_string(params, "prompt")?.trim();
+        if prompt.is_empty() {
+            return Err(EngineError::config(
+                "Promoted Quest prompt must not be empty",
+            ));
+        }
+        let context = params
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let goal = if context.is_empty() {
+            prompt.to_owned()
+        } else {
+            format!("{prompt}\n\nPromoted Editor context:\n{context}")
+        };
+        let generated = self.generate_quest_spec(&goal)?;
+        let project = self
+            .shell
+            .project()
+            .ok_or_else(|| EngineError::config("no project open"))?;
+        let detail = self.quest_store.create(
+            generated.title,
+            goal.clone(),
+            generated.spec,
+            QuestProject {
+                name: project.name().to_owned(),
+                path: project.root.clone(),
+            },
+        )?;
+        if !context.is_empty() {
+            let promoted_intent = format!(
+                "# {}\n\n## Goal\n\n{}\n\n## Promoted Editor Context\n\n{}\n",
+                detail.record.title, prompt, context
+            );
+            self.quest_store
+                .update_intent(&detail.record.id, &promoted_intent)?;
+            self.quest_store.append_timeline_event(
+                &detail.record.id,
+                "context_attached",
+                "Promoted Editor context into Quest intent",
+                serde_json::json!({ "context_bytes": context.len() }),
+            )?;
+        }
+        for task in generated.tasks {
+            self.quest_store.append_timeline_event(
+                &detail.record.id,
+                "task_created",
+                &task.title,
+                serde_json::json!({
+                    "summary": task.summary,
+                    "acceptance": task.acceptance,
+                    "source": "promoted_editor_context",
+                }),
+            )?;
+        }
+        let detail = self.quest_store.get(&detail.record.id)?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn generate_quest_spec(&mut self, goal: &str) -> EngineResult<GeneratedQuestSpec> {
+        let provider_str = match self.copilot_settings.provider {
+            engine_editor::CopilotProvider::Anthropic => "anthropic",
+            engine_editor::CopilotProvider::Ollama => "ollama",
+            engine_editor::CopilotProvider::OpenAI => "openai",
+            engine_editor::CopilotProvider::CodexOAuth => "codex_oauth",
+            engine_editor::CopilotProvider::Gemini => "gemini",
+            engine_editor::CopilotProvider::Custom => "custom",
+            engine_editor::CopilotProvider::Mimo => "mimo",
+            engine_editor::CopilotProvider::DeepSeek => "deepseek",
+            engine_editor::CopilotProvider::Glm => "glm",
+            engine_editor::CopilotProvider::Stub => {
+                return Err(EngineError::config(
+                    "Quest creation requires a configured AI provider because the Quest spec and execution plan are AI-generated. Go to Settings → Copilot to configure an API key, OAuth provider, Ollama, or a custom endpoint.",
+                ));
+            }
+        };
+        let codex_oauth = if provider_str == "codex_oauth" {
+            Some(self.ensure_codex_oauth()?)
+        } else {
+            None
+        };
+        let model = engine_ai::providers::create_provider(
+            provider_str,
+            &self.copilot_settings.model,
+            self.copilot_settings.api_key.as_deref(),
+            if self.copilot_settings.provider.endpoint_configurable() {
+                self.copilot_settings.api_endpoint.as_deref()
+            } else {
+                None
+            },
+            self.copilot_settings.max_tokens,
+            codex_oauth,
+            if provider_str == "mimo" {
+                Some(&self.copilot_settings.mimo_config)
+            } else {
+                None
+            },
+            if provider_str == "glm" {
+                Some(&self.copilot_settings.glm_config)
+            } else {
+                None
+            },
+        )?;
+        let mut request = engine_ai::AiRequest::single_turn(
+            "You are Aster Quest Mode. Create the initial artifacts for an AI-led game-editor Quest by calling tools only. You must call `create_or_update_spec` exactly once. You may call `create_task` any number of times when concrete task slices are useful. Do not put the spec or task list in normal text. Do not force a generic workflow; choose the task shape that best fits the user's goal.".to_owned(),
+            serde_json::json!({}),
+            format!("Quest goal:\n{goal}"),
+        );
+        request.tools = quest_creation_tool_definitions();
+        let response = model.chat(request)?;
+        parse_generated_quest_tools(&response.tool_calls)
+    }
+
+    fn quest_update_spec(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let spec = required_string(params, "spec")?;
+        serde_json::to_value(self.quest_store.update_spec(id, spec)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_update_knowledge_context(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let knowledge_ids = params
+            .get("knowledge_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| EngineError::config("missing 'knowledge_ids'"))?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        serde_json::to_value(
+            self.quest_store
+                .update_knowledge_context(id, knowledge_ids)?,
+        )
+        .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_update_intent(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let intent = required_string(params, "intent")?;
+        serde_json::to_value(self.quest_store.update_intent(id, intent)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_add_note(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let kind = params
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        let message = required_string(params, "message")?;
+        serde_json::to_value(self.quest_store.add_user_note(id, kind, message)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_request_quick_fix(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let issue = required_string(params, "issue")?;
+        serde_json::to_value(self.quest_store.request_quick_fix(id, issue)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_rename(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let title = required_string(params, "title")?;
+        serde_json::to_value(self.quest_store.rename(id, title)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_branch(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let title = params.get("title").and_then(Value::as_str);
+        serde_json::to_value(self.quest_store.branch(id, title)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_transition(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let status: QuestStatus = serde_json::from_value(
+            params
+                .get("status")
+                .cloned()
+                .ok_or_else(|| EngineError::config("missing 'status'"))?,
+        )
+        .map_err(|error| EngineError::config(error.to_string()))?;
+        serde_json::to_value(self.quest_store.transition(id, status)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_delete(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        self.quest_store.delete(id)?;
+        Ok(serde_json::json!({ "deleted": true }))
+    }
+
+    fn knowledge_list(&mut self, _params: &Value) -> EngineResult<Value> {
+        Ok(serde_json::json!({ "entries": self.quest_store.list_knowledge()? }))
+    }
+
+    fn knowledge_propose(&mut self, params: &Value) -> EngineResult<Value> {
+        let category = required_string(params, "category")?;
+        let content = required_string(params, "content")?;
+        let source = params
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("manual");
+        Ok(serde_json::json!({
+            "entries": self.quest_store.propose_knowledge(category, content, source)?
+        }))
+    }
+
+    fn knowledge_approve(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        Ok(serde_json::json!({ "entries": self.quest_store.approve_knowledge(id)? }))
+    }
+
+    fn knowledge_reject(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        Ok(serde_json::json!({ "entries": self.quest_store.reject_knowledge(id)? }))
+    }
+
+    fn knowledge_revalidate(&mut self, _params: &Value) -> EngineResult<Value> {
+        Ok(serde_json::json!({ "entries": self.quest_store.revalidate_knowledge()? }))
+    }
+
+    fn knowledge_remove(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        Ok(serde_json::json!({ "entries": self.quest_store.remove_knowledge(id)? }))
+    }
+
+    fn quest_execute(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?.to_owned();
+        let started_at = Instant::now();
+        match self.run_quest_execution(&id) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let reason = error.to_string();
+                let findings = match self.quest_store.write_review_finding(
+                    &id,
+                    "execution-failed",
+                    "Quest execution failed",
+                    &reason,
+                    "high",
+                    Some("execution"),
+                ) {
+                    Ok(finding) => vec![finding],
+                    Err(_) => vec![QuestReviewFinding {
+                        id: "execution-failed".to_owned(),
+                        title: "Quest execution failed".to_owned(),
+                        summary: reason.clone(),
+                        severity: "high".to_owned(),
+                        artifact_path: None,
+                        source: Some("execution".to_owned()),
+                    }],
+                };
+                let review = QuestReview {
+                    summary: "Quest execution stopped before a reviewable bundle was produced."
+                        .to_owned(),
+                    changed_files: Vec::new(),
+                    transaction_groups: Vec::new(),
+                    exploration_attempts: Vec::new(),
+                    findings,
+                    validations: vec![ValidationResult::new(
+                        "Quest execution",
+                        "failed",
+                        reason.clone(),
+                    )],
+                    unresolved_issues: vec![reason.clone()],
+                    next_actions: vec![
+                        QuestReviewAction::with_target(
+                            "inspect-error",
+                            "Inspect failure details",
+                            "open_review_finding",
+                            reason.clone(),
+                        ),
+                        QuestReviewAction::with_target(
+                            "revise-spec",
+                            "Revise Quest spec",
+                            "revise",
+                            reason.clone(),
+                        ),
+                        QuestReviewAction::new("retry-execution", "Retry execution", "retry"),
+                    ],
+                    project_fingerprint: None,
+                    metrics: QuestReviewMetrics {
+                        intent_to_first_action_ms: Some(elapsed_millis(started_at)),
+                        tool_call_latency_ms: None,
+                        validator_turnaround_ms: None,
+                        context_relevance_score: None,
+                        failed_action_recovery_rate: Some(0.0),
+                        review_evidence_quality_score: Some(0.2),
+                        isolated_attempt_count: 0,
+                        validation_count: 1,
+                        validation_failure_count: 1,
+                        baseline_changed_file_count: 0,
+                        notes: vec!["Execution failed before the isolated attempt produced review evidence.".to_owned()],
+                    },
+                    risk: "medium".to_owned(),
+                };
+                let _ = self.quest_store.append_timeline_event(
+                    &id,
+                    "blocked",
+                    "Quest execution failed",
+                    serde_json::json!({ "error": reason }),
+                );
+                let detail = self
+                    .quest_store
+                    .set_review(&id, QuestStatus::Blocked, review)?;
+                serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+            }
+        }
+    }
+
+    fn run_quest_execution(&mut self, id: &str) -> EngineResult<Value> {
+        let mut detail = self.quest_store.get(id)?;
+        if detail.record.status == QuestStatus::Draft {
+            detail = self.quest_store.transition(id, QuestStatus::Specified)?;
+        }
+        if !matches!(
+            detail.record.status,
+            QuestStatus::Specified | QuestStatus::WaitingForUser | QuestStatus::Blocked
+        ) {
+            return Err(EngineError::config(
+                "Quest must be specified, waiting, or blocked before execution",
+            ));
+        }
+
+        let quest_started_at = Instant::now();
+        let project_root = detail.record.project.path.clone();
+        let workspace_root = self.prepare_quest_workspace(&detail)?;
+        let workspace_id = workspace_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_owned();
+        self.quest_store
+            .set_workspace_id(id, workspace_id.clone())?;
+        self.quest_store.transition(id, QuestStatus::Prepared)?;
+        self.quest_store.transition(id, QuestStatus::Running)?;
+        self.quest_store.append_timeline_event(
+            id,
+            "snapshot",
+            "Created isolated Quest workspace",
+            serde_json::json!({
+                "source_project": project_root,
+                "workspace": workspace_root,
+            }),
+        )?;
+        detail = self.quest_store.record_checkpoint(
+            id,
+            "isolated-workspace",
+            "Isolated workspace checkpoint",
+            "Captured the isolated Quest workspace before model execution and validation.",
+            Some(workspace_id.clone()),
+            Some(project_fingerprint(&project_root)?),
+        )?;
+        let baseline_workspace_root = self.prepare_quest_attempt_workspace(&detail, "baseline")?;
+        self.quest_store.append_timeline_event(
+            id,
+            "alternative",
+            "Created isolated baseline comparison workspace",
+            serde_json::json!({
+                "attempt_id": "baseline",
+                "workspace": baseline_workspace_root,
+                "selected": false,
+            }),
+        )?;
+
+        let before = collect_workspace_snapshot(&workspace_root)?;
+        let baseline_before = collect_workspace_snapshot(&baseline_workspace_root)?;
+        let mut context = engine_editor::ProjectContext::open(&workspace_root)?;
+        let knowledge_context = if detail.attached_knowledge.is_empty() {
+            String::new()
+        } else {
+            let entries = detail
+                .attached_knowledge
+                .iter()
+                .map(|entry| format!("- [{}] {}", entry.category, entry.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n\nApproved project Knowledge attached to this Quest:\n{entries}")
+        };
+        let prompt = format!(
+            "Execute this Quest inside the isolated workspace only. \
+             Produce concrete Aster editor operations. Do not request shell commands. \
+             When done, emit a complete operation with a concise summary.\n\n{}{}",
+            detail.spec, knowledge_context
+        );
+        let mut session = AgentSession::new(context)?;
+        let model = self.create_copilot_model()?;
+        let first_action_started_at = Instant::now();
+        let plan = session.plan(model.as_ref(), &prompt, PermissionPolicy::worktree_write())?;
+        let plan_latency_ms = elapsed_millis(first_action_started_at);
+        let planned: Vec<String> = plan
+            .operations
+            .iter()
+            .map(|operation| operation.preview.clone())
+            .collect();
+        self.quest_store.append_timeline_event(
+            id,
+            "plan",
+            "Model produced an executable Quest plan",
+            serde_json::json!({
+                "operations": planned,
+                "requires_write": plan.requires_write,
+            }),
+        )?;
+
+        let apply_started_at = Instant::now();
+        let outcome = session.apply_plan(&plan)?;
+        let tool_call_latency_ms = plan_latency_ms + elapsed_millis(apply_started_at);
+        context = session.context;
+        save_project_context_scene(&context)?;
+        self.quest_store.append_timeline_event(
+            id,
+            "execution",
+            "Applied model operations in isolated workspace",
+            serde_json::json!({
+                "operations_performed": outcome.operations_performed,
+                "completed": outcome.completed,
+                "summary": outcome.summary,
+                "trace": outcome.trace_entries.iter().map(|entry| serde_json::json!({
+                    "tool": entry.tool,
+                    "result": entry.result,
+                    "recovery_hint": entry.recovery_hint,
+                })).collect::<Vec<_>>(),
+            }),
+        )?;
+
+        let after = collect_workspace_snapshot(&workspace_root)?;
+        let changed_files = diff_workspace_snapshots(&before, &after);
+        let baseline_after = collect_workspace_snapshot(&baseline_workspace_root)?;
+        let baseline_changed_files = diff_workspace_snapshots(&baseline_before, &baseline_after);
+        for file in &changed_files {
+            self.quest_store.append_timeline_event(
+                id,
+                "file_edit",
+                &format!("{} {}", file.status, file.path),
+                serde_json::json!({
+                    "path": file.path,
+                    "status": file.status,
+                    "additions": file.additions,
+                    "deletions": file.deletions,
+                }),
+            )?;
+        }
+
+        let validation_started_at = Instant::now();
+        let validations = validate_quest_workspace(&workspace_root);
+        let baseline_validations = validate_quest_workspace(&baseline_workspace_root);
+        let validator_turnaround_ms = elapsed_millis(validation_started_at);
+        for validation in &validations {
+            self.quest_store.append_timeline_event(
+                id,
+                "validation",
+                &format!("{}: {}", validation.name, validation.status),
+                serde_json::json!({
+                    "name": validation.name,
+                    "status": validation.status,
+                    "summary": validation.summary,
+                    "policy_registry": quest_validation_registry()
+                        .into_iter()
+                        .map(|command| serde_json::json!({
+                            "id": command.id,
+                            "program": command.program,
+                            "args": command.args,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+            )?;
+        }
+        for validation in &baseline_validations {
+            self.quest_store.append_timeline_event(
+                id,
+                "validation",
+                &format!("baseline {}: {}", validation.name, validation.status),
+                serde_json::json!({
+                    "attempt_id": "baseline",
+                    "name": validation.name,
+                    "status": validation.status,
+                    "summary": validation.summary,
+                    "policy_registry": quest_validation_registry()
+                        .into_iter()
+                        .map(|command| serde_json::json!({
+                            "id": command.id,
+                            "program": command.program,
+                            "args": command.args,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+            )?;
+        }
+
+        let has_failed_validation = validations
+            .iter()
+            .any(|validation| validation.status != "passed" && validation.status != "skipped");
+        let baseline_failed_validation = baseline_validations
+            .iter()
+            .any(|validation| validation.status != "passed" && validation.status != "skipped");
+        let exploration_summary = if has_failed_validation {
+            "Selected implementation attempt preserved with validation failures for repair or revision."
+        } else {
+            "Selected implementation attempt produced the current review bundle."
+        };
+        self.quest_store.write_exploration_attempt(
+            id,
+            "selected-implementation",
+            "Selected implementation attempt",
+            exploration_summary,
+            true,
+        )?;
+        let baseline_summary = format!(
+            "Baseline comparison attempt preserved before applying model edits: {} changed file(s), {} validation issue(s).",
+            baseline_changed_files.len(),
+            baseline_validations
+                .iter()
+                .filter(|validation| validation.status == "failed")
+                .count()
+        );
+        self.quest_store.write_exploration_attempt(
+            id,
+            "baseline",
+            "Baseline comparison attempt",
+            &baseline_summary,
+            false,
+        )?;
+        let unresolved_issues = if has_failed_validation {
+            validations
+                .iter()
+                .filter(|validation| validation.status == "failed")
+                .map(|validation| format!("Validation failed: {}", validation.summary))
+                .collect()
+        } else if changed_files.is_empty() {
+            vec!["Quest execution completed without producing file changes.".to_owned()]
+        } else {
+            Vec::new()
+        };
+        let mut findings = Vec::new();
+        if has_failed_validation {
+            for (index, validation) in validations
+                .iter()
+                .filter(|validation| validation.status == "failed")
+                .enumerate()
+            {
+                findings.push(self.quest_store.write_review_finding(
+                    id,
+                    &format!("validation-failed-{index}"),
+                    &format!("Validation failed: {}", validation.name),
+                    &validation.summary,
+                    "high",
+                    Some("validation"),
+                )?);
+            }
+        } else if changed_files.is_empty() {
+            findings.push(self.quest_store.write_review_finding(
+                id,
+                "no-changes",
+                "Quest produced no file changes",
+                "Quest execution completed in the isolated workspace without producing changed files.",
+                "medium",
+                Some("review"),
+            )?);
+        }
+        let next_actions = quest_review_actions_for_result(
+            &unresolved_issues,
+            has_failed_validation,
+            changed_files.is_empty(),
+        );
+        let status = if has_failed_validation {
+            QuestStatus::Blocked
+        } else {
+            QuestStatus::ReadyForReview
+        };
+        let has_changes = !changed_files.is_empty();
+        let validation_count = validations.len() as u32;
+        let validation_failure_count = validations
+            .iter()
+            .filter(|validation| validation.status == "failed")
+            .count() as u32;
+        let context_relevance = context_relevance_score(&detail);
+        let recovery_rate = failed_action_recovery_rate(&outcome.trace_entries);
+        let evidence_quality =
+            review_evidence_quality_score(has_changes, &validations, has_failed_validation);
+        let review = QuestReview {
+            summary: if changed_files.is_empty() {
+                "Quest executed in an isolated workspace but produced no file changes.".to_owned()
+            } else {
+                format!(
+                    "Quest executed in isolated workspace `{workspace_id}` and produced {} changed file(s).",
+                    changed_files.len()
+                )
+            },
+            transaction_groups: transaction_groups_from_changed_files(&changed_files),
+            exploration_attempts: vec![
+                QuestExplorationAttempt {
+                    id: "selected-implementation".to_owned(),
+                    label: "Selected implementation attempt".to_owned(),
+                    summary: exploration_summary.to_owned(),
+                    outcome: if has_failed_validation {
+                        "needs_repair"
+                    } else {
+                        "selected"
+                    }
+                    .to_owned(),
+                    artifact_path: "explorations/selected-implementation.md".to_owned(),
+                    selected: true,
+                },
+                QuestExplorationAttempt {
+                    id: "baseline".to_owned(),
+                    label: "Baseline comparison attempt".to_owned(),
+                    summary: baseline_summary,
+                    outcome: if baseline_failed_validation {
+                        "baseline_failed_validation"
+                    } else {
+                        "baseline_reference"
+                    }
+                    .to_owned(),
+                    artifact_path: "explorations/baseline.md".to_owned(),
+                    selected: false,
+                },
+            ],
+            findings,
+            changed_files,
+            validations,
+            unresolved_issues,
+            next_actions,
+            project_fingerprint: Some(project_fingerprint(&project_root)?),
+            metrics: QuestReviewMetrics {
+                intent_to_first_action_ms: Some(elapsed_millis(quest_started_at)),
+                tool_call_latency_ms: Some(tool_call_latency_ms),
+                validator_turnaround_ms: Some(validator_turnaround_ms),
+                context_relevance_score: Some(context_relevance),
+                failed_action_recovery_rate: Some(recovery_rate),
+                review_evidence_quality_score: Some(evidence_quality),
+                isolated_attempt_count: 2,
+                validation_count,
+                validation_failure_count,
+                baseline_changed_file_count: baseline_changed_files.len() as u32,
+                notes: vec![
+                    "Metrics are captured from the isolated Quest execution path.".to_owned(),
+                    "Baseline attempt is preserved for comparison against the selected implementation.".to_owned(),
+                ],
+            },
+            risk: if has_failed_validation {
+                "medium"
+            } else {
+                "low"
+            }
+            .to_owned(),
+        };
+        let detail = self.quest_store.set_review(id, status, review)?;
+        self.quest_store.append_timeline_event(
+            id,
+            if status == QuestStatus::ReadyForReview {
+                "review_ready"
+            } else {
+                "blocked"
+            },
+            if status == QuestStatus::ReadyForReview {
+                "Quest is ready for review"
+            } else {
+                "Quest is blocked by validation failures"
+            },
+            serde_json::json!({ "workspace": workspace_root }),
+        )?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_mock_execute(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        serde_json::to_value(self.quest_store.mock_execute(id)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_cancel(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let reason = params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Canceled Quest");
+        serde_json::to_value(self.quest_store.cancel(id, reason)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_reopen(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let reason = params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Reopened Quest");
+        serde_json::to_value(self.quest_store.reopen(id, reason)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_continue(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let reason = params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Continue Quest from current evidence");
+        serde_json::to_value(self.quest_store.continue_quest(id, reason)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_apply(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let detail = self.quest_store.get(id)?;
+        if detail.record.status != QuestStatus::ReadyForReview {
+            return Err(EngineError::config("Quest must be in review before apply"));
+        }
+        let review = detail
+            .record
+            .review
+            .as_ref()
+            .ok_or_else(|| EngineError::config("Quest has no review bundle"))?;
+        ensure_review_project_is_current(review, &detail.record.project.path)?;
+        let workspace_id = detail
+            .record
+            .workspace_id
+            .as_deref()
+            .ok_or_else(|| EngineError::config("Quest has no workspace"))?;
+        let workspace_root = self
+            .quest_store
+            .quest_path(id)?
+            .join("workspaces")
+            .join(workspace_id);
+        if !workspace_root.is_dir() {
+            return Err(EngineError::config("Quest workspace is missing"));
+        }
+
+        let changed_files = selected_review_paths_from_params(review, params, "apply")?;
+        let selected_paths: std::collections::HashSet<&str> =
+            changed_files.iter().map(String::as_str).collect();
+        let selected_review_files = review
+            .changed_files
+            .iter()
+            .filter(|file| selected_paths.contains(file.path.as_str()))
+            .collect::<Vec<_>>();
+        if selected_review_files.len() != changed_files.len() {
+            return Err(EngineError::config(
+                "selected Quest file is not present in the review bundle",
+            ));
+        }
+
+        let project_root = detail.record.project.path.clone();
+        let mut applied = Vec::new();
+        let rollback_id = format!("rollback-{}", unix_time_ms());
+        let rollback_root = self
+            .quest_store
+            .quest_path(id)?
+            .join("rollbacks")
+            .join(&rollback_id);
+        for file in selected_review_files {
+            let relative = normalize_relative_path(&file.path)?;
+            let source = workspace_root.join(&relative);
+            let destination = project_root.join(&relative);
+            snapshot_rollback_file(&rollback_root, &relative, &destination)?;
+            if file.status == "deleted" {
+                if destination.exists() {
+                    std::fs::remove_file(&destination).map_err(|source| {
+                        EngineError::Filesystem {
+                            path: destination.clone(),
+                            source,
+                        }
+                    })?;
+                }
+            } else {
+                if !source.is_file() {
+                    return Err(EngineError::config(format!(
+                        "changed file is missing from Quest workspace: {}",
+                        file.path
+                    )));
+                }
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                }
+                std::fs::copy(&source, &destination).map_err(|source| EngineError::Filesystem {
+                    path: destination.clone(),
+                    source,
+                })?;
+            }
+            applied.push(file.path.clone());
+        }
+
+        let total_changed = review.changed_files.len();
+        let partial = applied.len() < total_changed;
+        let summary = if partial {
+            format!(
+                "Partially applied {} of {} reviewed Quest file(s)",
+                applied.len(),
+                total_changed
+            )
+        } else {
+            "Applied reviewed Quest bundle to active project".to_owned()
+        };
+        let applied_paths = applied
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let _ = self.quest_store.record_decision_with_rollback(
+            id,
+            if partial { "partial_apply" } else { "apply" },
+            &summary,
+            applied.clone(),
+            Some(rollback_id.clone()),
+        )?;
+        let detail = if partial {
+            let mut remaining_review = review.clone();
+            remaining_review
+                .changed_files
+                .retain(|file| !applied_paths.contains(&file.path));
+            for group in &mut remaining_review.transaction_groups {
+                group.files.retain(|path| !applied_paths.contains(path));
+            }
+            remaining_review
+                .transaction_groups
+                .retain(|group| !group.files.is_empty());
+            remaining_review.summary = format!(
+                "{} {} reviewed file(s) remain pending.",
+                summary,
+                remaining_review.changed_files.len()
+            );
+            remaining_review.project_fingerprint = Some(project_fingerprint(&project_root)?);
+            self.quest_store
+                .set_review(id, QuestStatus::ReadyForReview, remaining_review)?
+        } else {
+            self.quest_store.transition(id, QuestStatus::Applying)?;
+            let detail = self.quest_store.transition(id, QuestStatus::Completed)?;
+            let _ = self.quest_store.propose_knowledge(
+                "quest-completion",
+                &format!(
+                    "{} completed with {} applied file(s). Review validations before reusing this as project knowledge.",
+                    detail.record.title,
+                    detail
+                        .record
+                        .decisions
+                        .last()
+                        .map(|decision| decision.files.len())
+                        .unwrap_or_default()
+                ),
+                id,
+            );
+            detail
+        };
+        self.quest_store.append_timeline_event(
+            id,
+            "apply_result",
+            &summary,
+            serde_json::json!({ "partial": partial }),
+        )?;
+        if detail.record.project.path == project_root {
+            let _ = self.hub_open_project(&serde_json::json!({ "path": project_root }));
+        }
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_discard(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let detail = self.quest_store.get(id)?;
+        if detail.record.status != QuestStatus::ReadyForReview {
+            return Err(EngineError::config(
+                "Quest must be in review before discarding pending items",
+            ));
+        }
+        let review = detail
+            .record
+            .review
+            .as_ref()
+            .ok_or_else(|| EngineError::config("Quest has no review bundle"))?;
+        ensure_review_project_is_current(review, &detail.record.project.path)?;
+        let discarded = selected_review_paths_from_params(review, params, "discard")?;
+        let discarded_paths = discarded
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        let total_changed = review.changed_files.len();
+        let partial = discarded.len() < total_changed;
+        let summary = if partial {
+            format!(
+                "Discarded {} of {} pending Quest file(s)",
+                discarded.len(),
+                total_changed
+            )
+        } else {
+            "Discarded remaining Quest review bundle".to_owned()
+        };
+        let _ = self
+            .quest_store
+            .record_decision(id, "discard", &summary, discarded.clone())?;
+        let detail = if partial {
+            let mut remaining_review = review.clone();
+            remaining_review
+                .changed_files
+                .retain(|file| !discarded_paths.contains(&file.path));
+            for group in &mut remaining_review.transaction_groups {
+                group.files.retain(|path| !discarded_paths.contains(path));
+            }
+            remaining_review
+                .transaction_groups
+                .retain(|group| !group.files.is_empty());
+            remaining_review.summary = format!(
+                "{} {} reviewed file(s) remain pending.",
+                summary,
+                remaining_review.changed_files.len()
+            );
+            self.quest_store
+                .set_review(id, QuestStatus::ReadyForReview, remaining_review)?
+        } else {
+            let detail = self.quest_store.transition(id, QuestStatus::Completed)?;
+            let _ = self.quest_store.propose_knowledge(
+                "quest-completion",
+                &format!(
+                    "{} completed by intentionally discarding {} reviewed file(s). Preserve this as a review decision before reusing the Quest result.",
+                    detail.record.title,
+                    discarded.len()
+                ),
+                id,
+            );
+            detail
+        };
+        self.quest_store.append_timeline_event(
+            id,
+            "discard_result",
+            &summary,
+            serde_json::json!({ "partial": partial, "files": discarded }),
+        )?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_rollback(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let rollback_id = required_string(params, "rollback_id")?;
+        let detail = self.quest_store.get(id)?;
+        let decision = detail
+            .record
+            .decisions
+            .iter()
+            .find(|decision| decision.rollback_id.as_deref() == Some(rollback_id))
+            .ok_or_else(|| EngineError::config("rollback snapshot is not linked to this Quest"))?;
+        let rollback_root = self
+            .quest_store
+            .quest_path(id)?
+            .join("rollbacks")
+            .join(rollback_id);
+        if !rollback_root.is_dir() {
+            return Err(EngineError::config("rollback snapshot is missing"));
+        }
+        restore_rollback_files(&rollback_root, &detail.record.project.path, &decision.files)?;
+        let files = decision.files.clone();
+        let detail = self.quest_store.record_decision(
+            id,
+            "rollback",
+            "Rolled back applied Quest files",
+            files.clone(),
+        )?;
+        self.quest_store.append_timeline_event(
+            id,
+            "rollback",
+            "Rolled back applied Quest files",
+            serde_json::json!({ "rollback_id": rollback_id, "files": files }),
+        )?;
+        let _ = self
+            .hub_open_project(&serde_json::json!({ "path": detail.record.project.path.clone() }));
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_export(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let detail = self.quest_store.get(id)?;
+        let quest_dir = self.quest_store.quest_path(id)?;
+        let export_root = detail
+            .record
+            .project
+            .path
+            .join(".aster")
+            .join("quests")
+            .join(id);
+        std::fs::create_dir_all(&export_root).map_err(|source| EngineError::Filesystem {
+            path: export_root.clone(),
+            source,
+        })?;
+        for file_name in ["quest.json", "intent.md", "spec.md", "events.jsonl"] {
+            let source = quest_dir.join(file_name);
+            if source.is_file() {
+                std::fs::copy(&source, export_root.join(file_name)).map_err(|source| {
+                    EngineError::Filesystem {
+                        path: export_root.join(file_name),
+                        source,
+                    }
+                })?;
+            }
+        }
+        let relative_export = format!(".aster/quests/{id}");
+        let detail = self.quest_store.record_decision(
+            id,
+            "export",
+            &format!("Exported Quest artifacts to {relative_export}"),
+            vec![relative_export.clone()],
+        )?;
+        self.quest_store.append_timeline_event(
+            id,
+            "exported",
+            "Exported Quest artifacts to project",
+            serde_json::json!({ "path": relative_export }),
+        )?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_reject(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let reason = params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Rejected reviewed Quest result");
+        let _ = self
+            .quest_store
+            .record_decision(id, "reject", reason, Vec::new())?;
+        let detail = self.quest_store.transition(id, QuestStatus::Archived)?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_request_revision(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let reason = params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("Requested Quest revision");
+        let _ = self
+            .quest_store
+            .record_decision(id, "revise", reason, Vec::new())?;
+        let detail = self.quest_store.transition(id, QuestStatus::Specified)?;
+        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn create_copilot_model(&mut self) -> EngineResult<Box<dyn engine_ai::AiModel>> {
+        let provider_str = match self.copilot_settings.provider {
+            engine_editor::CopilotProvider::Anthropic => "anthropic",
+            engine_editor::CopilotProvider::Ollama => "ollama",
+            engine_editor::CopilotProvider::OpenAI => "openai",
+            engine_editor::CopilotProvider::CodexOAuth => "codex_oauth",
+            engine_editor::CopilotProvider::Gemini => "gemini",
+            engine_editor::CopilotProvider::Custom => "custom",
+            engine_editor::CopilotProvider::Mimo => "mimo",
+            engine_editor::CopilotProvider::DeepSeek => "deepseek",
+            engine_editor::CopilotProvider::Glm => "glm",
+            engine_editor::CopilotProvider::Stub => {
+                return Err(EngineError::config(
+                    "Quest execution requires a configured AI provider.",
+                ));
+            }
+        };
+        let codex_oauth = if provider_str == "codex_oauth" {
+            Some(self.ensure_codex_oauth()?)
+        } else {
+            None
+        };
+        engine_ai::providers::create_provider(
+            provider_str,
+            &self.copilot_settings.model,
+            self.copilot_settings.api_key.as_deref(),
+            if self.copilot_settings.provider.endpoint_configurable() {
+                self.copilot_settings.api_endpoint.as_deref()
+            } else {
+                None
+            },
+            self.copilot_settings.max_tokens,
+            codex_oauth,
+            if provider_str == "mimo" {
+                Some(&self.copilot_settings.mimo_config)
+            } else {
+                None
+            },
+            if provider_str == "glm" {
+                Some(&self.copilot_settings.glm_config)
+            } else {
+                None
+            },
+        )
+    }
+
+    fn prepare_quest_workspace(&self, detail: &quest::QuestDetail) -> EngineResult<PathBuf> {
+        self.prepare_quest_attempt_workspace(detail, &format!("workspace-{}", unix_time_ms()))
+    }
+
+    fn prepare_quest_attempt_workspace(
+        &self,
+        detail: &quest::QuestDetail,
+        attempt_id: &str,
+    ) -> EngineResult<PathBuf> {
+        let workspace_id = format!("{attempt_id}-{}", unix_time_ms());
+        let workspace_root = self
+            .quest_store
+            .quest_path(&detail.record.id)?
+            .join("workspaces")
+            .join(workspace_id);
+        if let Some(parent) = workspace_root.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        if try_create_git_worktree(&detail.record.project.path, &workspace_root)? {
+            return Ok(workspace_root);
+        }
+        copy_project_tree(&detail.record.project.path, &workspace_root)?;
+        Ok(workspace_root)
+    }
+
+    fn app_open_folder(&mut self, params: &Value) -> EngineResult<Value> {
         let path = params
             .get("path")
             .and_then(|v| v.as_str())
@@ -872,6 +2385,7 @@ impl EditorHost {
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
         let backend = params
             .get("backend")
             .and_then(|v| v.as_str())
@@ -946,6 +2460,162 @@ fn on_update(entity, dt) {
         Ok(serde_json::json!({
             "path": script_path,
             "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    fn project_create_material(&mut self, params: &Value) -> EngineResult<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let material = engine_assets::MaterialFormat {
+            version: engine_assets::CURRENT_SCHEMA_VERSION,
+            shader: engine_assets::AssetGuid::from_u128(0),
+            textures: HashMap::new(),
+            parameters: HashMap::new(),
+        };
+        let content = serde_json::to_string_pretty(&material).map_err(|error| {
+            EngineError::other(format!("material serialization failed: {error}"))
+        })?;
+        let (asset_path, full_path) = write_project_asset(
+            project,
+            &format!("materials/{name}.material.json"),
+            &content,
+        )?;
+        project.rescan_assets()?;
+        push_created_asset_console(&mut self.console, "material", &full_path);
+
+        Ok(serde_json::json!({
+            "path": asset_path,
+            "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    fn project_create_prefab(&mut self, params: &Value) -> EngineResult<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let scene_file = engine_ecs::Scene::new().to_scene_file(name)?;
+        let prefab = engine_ecs::PrefabFile::new(name, scene_file);
+        let content = serde_json::to_string_pretty(&prefab)
+            .map_err(|error| EngineError::other(format!("prefab serialization failed: {error}")))?;
+        let (asset_path, full_path) =
+            write_project_asset(project, &format!("prefabs/{name}.prefab.json"), &content)?;
+        project.rescan_assets()?;
+        push_created_asset_console(&mut self.console, "prefab", &full_path);
+
+        Ok(serde_json::json!({
+            "path": asset_path,
+            "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    fn project_create_scene(&mut self, params: &Value) -> EngineResult<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let content = engine_ecs::Scene::new().to_json(name)?;
+        let (asset_path, full_path) =
+            write_project_asset(project, &format!("scenes/{name}.scene.json"), &content)?;
+        project.rescan_assets()?;
+        push_created_asset_console(&mut self.console, "scene", &full_path);
+
+        Ok(serde_json::json!({
+            "path": asset_path,
+            "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    fn project_list_asset_references(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+        project.rescan_assets()?;
+
+        let asset_path = normalize_relative_path(path_str)?;
+        let guid = project
+            .database
+            .guid_for_path(&asset_path)
+            .map_err(EngineError::from)?;
+        let mut rows = Vec::new();
+
+        for dependency in project.database.dependencies().dependencies(guid) {
+            rows.push(asset_reference_row(
+                "dependency",
+                "Asset dependency",
+                resolve_asset_reference_label(project, dependency),
+            ));
+        }
+        for dependent in project.database.dependencies().dependents(guid) {
+            rows.push(asset_reference_row(
+                "dependent",
+                "Used by asset",
+                resolve_asset_reference_label(project, dependent),
+            ));
+        }
+
+        for (_entity, object) in project.scene.objects() {
+            for component in &object.components {
+                collect_component_asset_references(&mut rows, &object.name, component, guid);
+                if let engine_ecs::ComponentData::Script(script) = component {
+                    if script.script == path_str {
+                        rows.push(asset_reference_row(
+                            "scene",
+                            "Script component",
+                            format!("{} -> {}", object.name, script.script),
+                        ));
+                    }
+                }
+            }
+            for script in &object.scripts {
+                if script.script == path_str {
+                    rows.push(asset_reference_row(
+                        "scene",
+                        "Legacy script",
+                        format!("{} -> {}", object.name, script.script),
+                    ));
+                }
+            }
+        }
+
+        rows.sort_by(|left, right| {
+            left["kind"]
+                .as_str()
+                .cmp(&right["kind"].as_str())
+                .then_with(|| left["label"].as_str().cmp(&right["label"].as_str()))
+                .then_with(|| left["detail"].as_str().cmp(&right["detail"].as_str()))
+        });
+        rows.dedup();
+
+        Ok(serde_json::json!({
+            "guid": guid.to_string(),
+            "path": asset_path.to_string_lossy(),
+            "references": rows,
         }))
     }
 
@@ -1193,6 +2863,134 @@ fn on_update(entity, dt) {
         })?;
 
         Ok(serde_json::json!({ "saved": true }))
+    }
+
+    fn project_package(&mut self, params: &Value) -> EngineResult<Value> {
+        let target = params
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or(current_desktop_package_target());
+        let format = params
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("folder");
+        let channel = params
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or("release");
+        let optimize_assets = params
+            .get("optimize_assets")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let include_debug_symbols = params
+            .get("include_debug_symbols")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if target != current_desktop_package_target() {
+            return Err(EngineError::UnsupportedCapability {
+                capability: "cross-platform game packaging",
+            });
+        }
+        if format != "folder" {
+            return Err(EngineError::UnsupportedCapability {
+                capability: "installer package generation",
+            });
+        }
+        if channel != "debug" && channel != "release" {
+            return Err(EngineError::config("channel must be 'debug' or 'release'"));
+        }
+
+        let project_root = {
+            let Some(project) = self.shell.project() else {
+                return Err(EngineError::config("no project open"));
+            };
+            project.root.clone()
+        };
+
+        if self
+            .shell
+            .project()
+            .is_some_and(|project| project.scene_dirty)
+        {
+            self.shell_save_scene(&serde_json::json!({}))?;
+        }
+
+        let project = runtime_min::load_runtime_project(&project_root)?;
+        let repo_root = aster_repo_root();
+        let release = channel == "release";
+        let profile_dir = if release { "release" } else { "debug" };
+        let package_root = project_root
+            .join("exports")
+            .join(sanitize_package_path_segment(&project.manifest.name))
+            .join(target)
+            .join(channel);
+        let project_package_root = package_root.join("project");
+        let bin_dir = package_root.join("bin");
+
+        remove_dir_if_exists(&package_root)?;
+        std::fs::create_dir_all(&project_package_root).map_err(|source| {
+            EngineError::Filesystem {
+                path: project_package_root.clone(),
+                source,
+            }
+        })?;
+        std::fs::create_dir_all(&bin_dir).map_err(|source| EngineError::Filesystem {
+            path: bin_dir.clone(),
+            source,
+        })?;
+
+        build_runtime_binary(&repo_root, release)?;
+
+        let runtime_source = repo_root
+            .join("target")
+            .join(profile_dir)
+            .join(runtime_binary_file_name());
+        let runtime_name = packaged_runtime_file_name();
+        let runtime_dest = bin_dir.join(runtime_name);
+        std::fs::copy(&runtime_source, &runtime_dest).map_err(|source| {
+            EngineError::Filesystem {
+                path: runtime_source.clone(),
+                source,
+            }
+        })?;
+
+        copy_project_for_package(&project_root, &project_package_root)?;
+        write_launcher(&package_root, &runtime_name)?;
+        write_package_manifest(
+            &package_root,
+            &project.manifest.name,
+            target,
+            format,
+            channel,
+            optimize_assets,
+            include_debug_symbols,
+        )?;
+
+        self.console.push(ConsoleEntry {
+            timestamp: timestamp_now(),
+            level: ConsoleLevel::Info,
+            source: engine_editor::ConsoleSource {
+                subsystem: "build".to_owned(),
+                file: None,
+                line: None,
+            },
+            message: format!(
+                "Packaged {} for {target}/{channel} at {}",
+                project.manifest.name,
+                package_root.display()
+            ),
+        });
+
+        Ok(serde_json::json!({
+            "project": project.manifest.name,
+            "target": target,
+            "format": format,
+            "channel": channel,
+            "path": package_root.to_string_lossy(),
+            "binary": runtime_dest.to_string_lossy(),
+            "launcher": package_root.join(launcher_file_name()).to_string_lossy(),
+        }))
     }
 
     // ── Console handlers ──
@@ -1935,6 +3733,7 @@ fn on_update(entity, dt) {
             &response.content,
             &response.tool_calls,
             prepared.cached_context,
+            prepared.knowledge_entries_used,
         )
     }
 
@@ -1965,15 +3764,30 @@ fn on_update(entity, dt) {
             }
         });
 
-        // Build enriched prompt with selected entity context
+        let selected_knowledge_ids = params
+            .get("knowledge_ids")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let attached_knowledge = self.selected_approved_knowledge(&selected_knowledge_ids)?;
+        let knowledge_context = format_editor_knowledge_context(&attached_knowledge);
+
+        // Build enriched prompt with selected entity and explicit Knowledge context.
         let enriched_prompt = if let Some(entity) = params.get("selected_entity") {
             format!(
-                "{}\n\n[Selected Entity Context]\n{}",
+                "{}{}\n\n[Selected Entity Context]\n{}",
                 prompt,
+                knowledge_context,
                 serde_json::to_string_pretty(entity).unwrap_or_default()
             )
         } else {
-            prompt.to_string()
+            format!("{prompt}{knowledge_context}")
         };
 
         let scene = self.scene_clone_for_agent()?;
@@ -2032,7 +3846,39 @@ fn on_update(entity, dt) {
                 None
             },
             cached_context: session.context,
+            knowledge_entries_used: attached_knowledge.len(),
         })
+    }
+
+    fn selected_approved_knowledge(
+        &self,
+        selected_ids: &[String],
+    ) -> EngineResult<Vec<quest::KnowledgeEntry>> {
+        if selected_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entries = self.quest_store.list_knowledge()?;
+        let approved_by_id = entries
+            .iter()
+            .filter(|entry| entry.status == "approved")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut selected = Vec::new();
+        for id in selected_ids {
+            if selected
+                .iter()
+                .any(|entry: &quest::KnowledgeEntry| entry.id == *id)
+            {
+                continue;
+            }
+            let entry = approved_by_id.get(id.as_str()).ok_or_else(|| {
+                EngineError::config(
+                    "Editor AI can only attach approved Knowledge entries to requests",
+                )
+            })?;
+            selected.push((*entry).clone());
+        }
+        Ok(selected)
     }
 
     fn finish_copilot_response_with_tools(
@@ -2041,6 +3887,7 @@ fn on_update(entity, dt) {
         response: &str,
         tool_calls: &[engine_ai::ToolCall],
         cached_context: engine_editor::ProjectContext,
+        knowledge_entries_used: usize,
     ) -> EngineResult<Value> {
         let mut session = AgentSession::new(cached_context)?;
 
@@ -2138,6 +3985,7 @@ fn on_update(entity, dt) {
             "operations": operations,
             "read_only": operations.iter().all(|o| !o["requires_write"].as_bool().unwrap_or(true)),
             "requires_write": operations.iter().any(|o| o["requires_write"].as_bool().unwrap_or(false)),
+            "knowledge_entries_used": knowledge_entries_used,
         }))
     }
 
@@ -2177,6 +4025,7 @@ fn on_update(entity, dt) {
             }));
         }
 
+        let before_snapshot = self.scene_snapshot().ok();
         let scene = self.scene_clone_for_agent()?;
         let ctx = self.build_agent_context(scene)?;
 
@@ -2200,6 +4049,27 @@ fn on_update(entity, dt) {
                 self.console.push(entry.clone());
             }
         }
+
+        let after_snapshot = self.scene_snapshot().ok();
+        let undo_available = if !applied_read_only {
+            if let (Some(before), Some(after)) = (before_snapshot, after_snapshot) {
+                if before != after {
+                    self.shell.push_undo(UndoCommand::new(
+                        "AI scoped edit",
+                        "copilot",
+                        before,
+                        after,
+                    ));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
         self.bump_scene_version();
 
@@ -2261,7 +4131,34 @@ fn on_update(entity, dt) {
             "summary": outcome.summary,
             "trace_entries": trace_entries,
             "console_entries": console_entries,
+            "undo_available": undo_available,
+            "undo_label": if undo_available { Some("AI scoped edit") } else { None::<&str> },
             "needs_continuation": should_continue_copilot(applied_read_only, outcome.completed),
+        }))
+    }
+
+    fn copilot_undo_last(&mut self, _params: &Value) -> EngineResult<Value> {
+        let applied = self.shell.undo_scene_command()?;
+        if applied {
+            self.drain_shell_console();
+            self.bump_scene_version();
+            self.copilot_conversation
+                .push(engine_ai::ChatMessage::assistant(
+                    "Undid the last AI scoped edit through the editor undo stack.".to_owned(),
+                ));
+        }
+        Ok(serde_json::json!({
+            "applied": applied,
+            "summary": if applied {
+                "Undid the last AI scoped edit."
+            } else {
+                "No undoable AI scoped edit was available."
+            },
+            "trace_entries": [{
+                "tool": "editor.undo",
+                "result": if applied { "applied" } else { "skipped" },
+                "recovery_hint": null
+            }]
         }))
     }
 
@@ -3079,6 +4976,23 @@ fn on_update(entity, dt) {
         ))
     }
 
+    fn create_scene_runtime_snapshot(&self) -> EngineResult<scene_window::SceneRuntimeSnapshot> {
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+        let config = EngineConfig::new(
+            project.name().to_owned(),
+            project.root.clone(),
+            RuntimeProfile::RuntimeGame,
+        );
+        Ok(scene_window::SceneRuntimeSnapshot::new(
+            config,
+            project.root.clone(),
+            project.root.join(&project.manifest.asset_root),
+            project.scene.to_json(project.name())?,
+        ))
+    }
+
     fn start_play_runtime(&mut self) -> EngineResult<()> {
         self.play_runtime = Some(self.create_play_runtime()?);
         self.play_last_frame = Some(Instant::now());
@@ -3115,15 +5029,43 @@ fn on_update(entity, dt) {
             return;
         };
 
+        let mut closed = false;
         for event in gw.poll_events() {
             match event {
                 game_window::GameEvent::Closed => {
-                    tracing::debug!(target: "editor", "game window hidden");
+                    tracing::debug!(target: "editor", "game window closed");
+                    closed = true;
                 }
                 game_window::GameEvent::Error(msg) => {
                     tracing::error!(target: "editor", "game window error: {msg}");
                 }
             }
+        }
+        if closed {
+            self.game_window = None;
+        }
+    }
+
+    /// Polls events from the native scene window and handles close/error.
+    fn poll_scene_window(&mut self) {
+        let Some(scene_window) = self.scene_window.as_ref() else {
+            return;
+        };
+
+        let mut closed = false;
+        for event in scene_window.poll_events() {
+            match event {
+                scene_window::SceneEvent::Closed => {
+                    tracing::debug!(target: "editor", "scene window closed");
+                    closed = true;
+                }
+                scene_window::SceneEvent::Error(msg) => {
+                    tracing::error!(target: "editor", "scene window error: {msg}");
+                }
+            }
+        }
+        if closed {
+            self.scene_window = None;
         }
     }
 
@@ -3133,6 +5075,1181 @@ fn on_update(entity, dt) {
             self.console.push(entry.clone());
         }
     }
+}
+
+fn save_project_context_scene(context: &engine_editor::ProjectContext) -> EngineResult<()> {
+    let scene_name = context
+        .scene_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Scene");
+    let json = context.scene.to_json(scene_name)?;
+    if let Some(parent) = context.scene_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&context.scene_path, json).map_err(|source| EngineError::Filesystem {
+        path: context.scene_path.clone(),
+        source,
+    })
+}
+
+fn asset_reference_row(kind: &str, label: &str, detail: String) -> Value {
+    serde_json::json!({
+        "kind": kind,
+        "label": label,
+        "detail": detail,
+    })
+}
+
+fn resolve_asset_reference_label(
+    project: &engine_editor::ProjectContext,
+    guid: engine_assets::AssetGuid,
+) -> String {
+    project
+        .database
+        .resolve_guid(guid)
+        .ok()
+        .and_then(|path| path.to_utf8().ok().map(str::to_owned))
+        .unwrap_or_else(|| guid.to_string())
+}
+
+fn asset_id_matches_guid(
+    asset: Option<engine_core::AssetId>,
+    guid: engine_assets::AssetGuid,
+) -> bool {
+    asset.is_some_and(|asset| asset.as_u128() == guid.as_u128())
+}
+
+fn collect_component_asset_references(
+    rows: &mut Vec<Value>,
+    object_name: &str,
+    component: &engine_ecs::ComponentData,
+    guid: engine_assets::AssetGuid,
+) {
+    use engine_ecs::ComponentData;
+    match component {
+        ComponentData::MeshRenderer(mesh) => {
+            if asset_id_matches_guid(mesh.mesh, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "MeshRenderer mesh",
+                    format!("{object_name} -> MeshRenderer.mesh"),
+                ));
+            }
+            if asset_id_matches_guid(mesh.material.asset, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "MeshRenderer material",
+                    format!("{object_name} -> MeshRenderer.material"),
+                ));
+            }
+        }
+        ComponentData::SkinnedMeshRenderer(mesh) => {
+            if asset_id_matches_guid(mesh.mesh, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "SkinnedMeshRenderer mesh",
+                    format!("{object_name} -> SkinnedMeshRenderer.mesh"),
+                ));
+            }
+            if asset_id_matches_guid(mesh.material.asset, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "SkinnedMeshRenderer material",
+                    format!("{object_name} -> SkinnedMeshRenderer.material"),
+                ));
+            }
+        }
+        ComponentData::AudioSource(audio) => {
+            if asset_id_matches_guid(audio.clip, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "AudioSource clip",
+                    format!("{object_name} -> AudioSource.clip"),
+                ));
+            }
+        }
+        ComponentData::AudioStreamPlayer2D(audio) => {
+            if asset_id_matches_guid(audio.clip, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "AudioStreamPlayer2D clip",
+                    format!("{object_name} -> AudioStreamPlayer2D.clip"),
+                ));
+            }
+        }
+        ComponentData::AudioStreamPlayer3D(audio) => {
+            if asset_id_matches_guid(audio.clip, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "AudioStreamPlayer3D clip",
+                    format!("{object_name} -> AudioStreamPlayer3D.clip"),
+                ));
+            }
+        }
+        ComponentData::Skybox(skybox) => {
+            if asset_id_matches_guid(skybox.cubemap, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "Skybox cubemap",
+                    format!("{object_name} -> Skybox.cubemap"),
+                ));
+            }
+        }
+        ComponentData::Sprite2D(sprite) => {
+            if asset_id_matches_guid(sprite.texture, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "Sprite2D texture",
+                    format!("{object_name} -> Sprite2D.texture"),
+                ));
+            }
+        }
+        ComponentData::TileMap(tilemap) => {
+            if asset_id_matches_guid(tilemap.tileset, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "TileMap tileset",
+                    format!("{object_name} -> TileMap.tileset"),
+                ));
+            }
+        }
+        ComponentData::AnimationPlayer(animation) => {
+            if asset_id_matches_guid(animation.clip, guid) {
+                rows.push(asset_reference_row(
+                    "scene",
+                    "AnimationPlayer clip",
+                    format!("{object_name} -> AnimationPlayer.clip"),
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_project_asset(
+    project: &engine_editor::ProjectContext,
+    asset_path: &str,
+    content: &str,
+) -> EngineResult<(String, PathBuf)> {
+    let asset_root = project.root.join(&project.manifest.asset_root);
+    let full_path = resolve_writable_relative_path(&asset_root, asset_path)?;
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&full_path, content).map_err(|source| EngineError::Filesystem {
+        path: full_path.clone(),
+        source,
+    })?;
+
+    Ok((asset_path.to_owned(), full_path))
+}
+
+fn push_created_asset_console(console: &mut ConsoleService, kind: &str, full_path: &Path) {
+    console.push(engine_editor::ConsoleEntry {
+        timestamp: timestamp_now(),
+        level: engine_editor::ConsoleLevel::Info,
+        source: engine_editor::ConsoleSource {
+            subsystem: "editor".into(),
+            file: Some(full_path.to_path_buf()),
+            line: None,
+        },
+        message: format!("Created {kind}: {}", full_path.display()),
+    });
+}
+
+fn current_desktop_package_target() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "linux-x64"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows-x64"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos-universal"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        "desktop"
+    }
+}
+
+fn runtime_binary_file_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "runtime-min.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "runtime-min"
+    }
+}
+
+fn packaged_runtime_file_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "aster-runtime.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "aster-runtime"
+    }
+}
+
+fn launcher_file_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "run.bat"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "run.sh"
+    }
+}
+
+fn aster_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn sanitize_package_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('-');
+        }
+    }
+    if out.is_empty() {
+        "project".to_owned()
+    } else {
+        out
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> EngineResult<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(path).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn build_runtime_binary(repo_root: &Path, release: bool) -> EngineResult<()> {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(repo_root)
+        .arg("build")
+        .arg("-p")
+        .arg("runtime-min")
+        .arg("--no-default-features")
+        .arg("--features")
+        .arg("runtime-game,physics,script-rhai");
+    if release {
+        command.arg("--release");
+    }
+
+    let output = command.output().map_err(|source| EngineError::Filesystem {
+        path: repo_root.join("cargo"),
+        source,
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(EngineError::other(format!(
+        "runtime build failed with status {}\n{}\n{}",
+        output.status, stdout, stderr
+    )))
+}
+
+fn copy_project_for_package(source: &Path, destination: &Path) -> EngineResult<()> {
+    copy_project_dir(source, destination, source)
+}
+
+fn copy_project_dir(source: &Path, destination: &Path, project_root: &Path) -> EngineResult<()> {
+    std::fs::create_dir_all(destination).map_err(|source_error| EngineError::Filesystem {
+        path: destination.to_path_buf(),
+        source: source_error,
+    })?;
+
+    for entry in std::fs::read_dir(source).map_err(|source_error| EngineError::Filesystem {
+        path: source.to_path_buf(),
+        source: source_error,
+    })? {
+        let entry = entry.map_err(|source_error| EngineError::Filesystem {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        let source_path = entry.path();
+        let file_name = entry.file_name();
+        if source_path == project_root.join("exports") || file_name == "target" {
+            continue;
+        }
+
+        let destination_path = destination.join(file_name);
+        let file_type = entry
+            .file_type()
+            .map_err(|source_error| EngineError::Filesystem {
+                path: source_path.clone(),
+                source: source_error,
+            })?;
+        if file_type.is_dir() {
+            copy_project_dir(&source_path, &destination_path, project_root)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &destination_path).map_err(|source_error| {
+                EngineError::Filesystem {
+                    path: source_path,
+                    source: source_error,
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn write_launcher(package_root: &Path, runtime_name: &str) -> EngineResult<()> {
+    let launcher_path = package_root.join(launcher_file_name());
+    #[cfg(target_os = "windows")]
+    let launcher = format!("@echo off\r\n\"%~dp0bin\\{runtime_name}\" \"%~dp0project\"\r\n");
+    #[cfg(not(target_os = "windows"))]
+    let launcher = format!("#!/usr/bin/env sh\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$DIR/bin/{runtime_name}\" \"$DIR/project\"\n");
+
+    std::fs::write(&launcher_path, launcher).map_err(|source| EngineError::Filesystem {
+        path: launcher_path.clone(),
+        source,
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&launcher_path)
+            .map_err(|source| EngineError::Filesystem {
+                path: launcher_path.clone(),
+                source,
+            })?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher_path, permissions).map_err(|source| {
+            EngineError::Filesystem {
+                path: launcher_path,
+                source,
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+fn write_package_manifest(
+    package_root: &Path,
+    project_name: &str,
+    target: &str,
+    format: &str,
+    channel: &str,
+    optimize_assets: bool,
+    include_debug_symbols: bool,
+) -> EngineResult<()> {
+    let manifest_path = package_root.join("package-manifest.json");
+    let manifest = serde_json::json!({
+        "schema": "aster.package.v1",
+        "project": project_name,
+        "target": target,
+        "format": format,
+        "channel": channel,
+        "runtime": format!("bin/{}", packaged_runtime_file_name()),
+        "project_root": "project",
+        "launcher": launcher_file_name(),
+        "optimize_assets": optimize_assets,
+        "include_debug_symbols": include_debug_symbols,
+        "created_at": timestamp_now(),
+    });
+    let content = serde_json::to_string_pretty(&manifest).map_err(|error| {
+        EngineError::other(format!("package manifest serialization failed: {error}"))
+    })?;
+    std::fs::write(&manifest_path, content).map_err(|source| EngineError::Filesystem {
+        path: manifest_path,
+        source,
+    })
+}
+
+fn try_create_git_worktree(project_root: &Path, workspace_root: &Path) -> EngineResult<bool> {
+    let inside_git = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output();
+    let Ok(inside_git) = inside_git else {
+        return Ok(false);
+    };
+    if !inside_git.status.success() {
+        return Ok(false);
+    }
+
+    let branch = workspace_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| format!("quest/{name}"))
+        .unwrap_or_else(|| format!("quest/workspace-{}", unix_time_ms()));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .arg("worktree")
+        .arg("add")
+        .arg("-b")
+        .arg(&branch)
+        .arg(workspace_root)
+        .arg("HEAD")
+        .output()
+        .map_err(|source| EngineError::Filesystem {
+            path: project_root.to_path_buf(),
+            source,
+        })?;
+    Ok(output.status.success())
+}
+
+fn copy_project_tree(source: &Path, destination: &Path) -> EngineResult<()> {
+    const SKIPPED_DIRS: &[&str] = &[
+        ".git",
+        "target",
+        "dist",
+        "node_modules",
+        ".ralph-tui",
+        ".reasonix",
+    ];
+    std::fs::create_dir_all(destination).map_err(|source| EngineError::Filesystem {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    for entry in std::fs::read_dir(source).map_err(|source_error| EngineError::Filesystem {
+        path: source.to_path_buf(),
+        source: source_error,
+    })? {
+        let entry = entry.map_err(|source_error| EngineError::Filesystem {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_string = name.to_string_lossy();
+        if SKIPPED_DIRS.iter().any(|skipped| *skipped == name_string) {
+            continue;
+        }
+        let target = destination.join(&name);
+        let file_type = entry
+            .file_type()
+            .map_err(|source_error| EngineError::Filesystem {
+                path: path.clone(),
+                source: source_error,
+            })?;
+        if file_type.is_dir() {
+            copy_project_tree(&path, &target)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            std::fs::copy(&path, &target).map_err(|source| EngineError::Filesystem {
+                path: target,
+                source,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_rollback_file(
+    rollback_root: &Path,
+    relative: &Path,
+    active_file: &Path,
+) -> EngineResult<()> {
+    let target = rollback_root.join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if active_file.is_file() {
+        std::fs::copy(active_file, &target).map_err(|source| EngineError::Filesystem {
+            path: target,
+            source,
+        })?;
+    } else {
+        let tombstone = target.with_extension(format!(
+            "{}missing",
+            target
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!("{extension}."))
+                .unwrap_or_default()
+        ));
+        std::fs::write(&tombstone, b"").map_err(|source| EngineError::Filesystem {
+            path: tombstone,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn restore_rollback_files(
+    rollback_root: &Path,
+    project_root: &Path,
+    files: &[String],
+) -> EngineResult<()> {
+    for file in files {
+        let relative = normalize_relative_path(file)?;
+        let snapshot = rollback_root.join(&relative);
+        let destination = project_root.join(&relative);
+        let tombstone = snapshot.with_extension(format!(
+            "{}missing",
+            snapshot
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!("{extension}."))
+                .unwrap_or_default()
+        ));
+        if tombstone.is_file() {
+            if destination.exists() {
+                std::fs::remove_file(&destination).map_err(|source| EngineError::Filesystem {
+                    path: destination.clone(),
+                    source,
+                })?;
+            }
+            continue;
+        }
+        if !snapshot.is_file() {
+            return Err(EngineError::config(format!(
+                "rollback file is missing: {file}"
+            )));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::copy(&snapshot, &destination).map_err(|source| EngineError::Filesystem {
+            path: destination,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn collect_workspace_snapshot(root: &Path) -> EngineResult<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    collect_workspace_snapshot_inner(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_workspace_snapshot_inner(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> EngineResult<()> {
+    const SKIPPED_DIRS: &[&str] = &[".git", "target", "dist", "node_modules"];
+    if !current.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(current).map_err(|source| EngineError::Filesystem {
+        path: current.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| EngineError::Filesystem {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| EngineError::Filesystem {
+                path: path.clone(),
+                source,
+            })?;
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if SKIPPED_DIRS.iter().any(|skipped| *skipped == name) {
+                continue;
+            }
+            collect_workspace_snapshot_inner(root, &path, files)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = std::fs::read(&path).map_err(|source| EngineError::Filesystem {
+                path: path.clone(),
+                source,
+            })?;
+            files.insert(relative, bytes);
+        }
+    }
+    Ok(())
+}
+
+fn diff_workspace_snapshots(
+    before: &BTreeMap<String, Vec<u8>>,
+    after: &BTreeMap<String, Vec<u8>>,
+) -> Vec<ChangedFile> {
+    let mut changed = Vec::new();
+    for (path, after_bytes) in after {
+        match before.get(path) {
+            Some(before_bytes) if before_bytes == after_bytes => {}
+            Some(before_bytes) => changed.push(ChangedFile {
+                path: path.clone(),
+                additions: count_added_lines(before_bytes, after_bytes),
+                deletions: count_added_lines(after_bytes, before_bytes),
+                status: "modified".to_owned(),
+                diff: format_line_diff(path, Some(before_bytes), Some(after_bytes)),
+            }),
+            None => changed.push(ChangedFile {
+                path: path.clone(),
+                additions: String::from_utf8_lossy(after_bytes).lines().count() as u32,
+                deletions: 0,
+                status: "added".to_owned(),
+                diff: format_line_diff(path, None, Some(after_bytes)),
+            }),
+        }
+    }
+    for (path, before_bytes) in before {
+        if !after.contains_key(path) {
+            changed.push(ChangedFile {
+                path: path.clone(),
+                additions: 0,
+                deletions: String::from_utf8_lossy(before_bytes).lines().count() as u32,
+                status: "deleted".to_owned(),
+                diff: format_line_diff(path, Some(before_bytes), None),
+            });
+        }
+    }
+    changed
+}
+
+fn format_line_diff(path: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            let before_text = String::from_utf8_lossy(before);
+            let after_text = String::from_utf8_lossy(after);
+            let before_lines: std::collections::HashSet<&str> = before_text.lines().collect();
+            let after_lines: std::collections::HashSet<&str> = after_text.lines().collect();
+            for line in before_text
+                .lines()
+                .filter(|line| !after_lines.contains(line))
+                .take(80)
+            {
+                output.push_str(&format!("-{line}\n"));
+            }
+            for line in after_text
+                .lines()
+                .filter(|line| !before_lines.contains(line))
+                .take(80)
+            {
+                output.push_str(&format!("+{line}\n"));
+            }
+        }
+        (None, Some(after)) => {
+            for line in String::from_utf8_lossy(after).lines().take(120) {
+                output.push_str(&format!("+{line}\n"));
+            }
+        }
+        (Some(before), None) => {
+            for line in String::from_utf8_lossy(before).lines().take(120) {
+                output.push_str(&format!("-{line}\n"));
+            }
+        }
+        (None, None) => {}
+    }
+    output
+}
+
+fn count_added_lines(before: &[u8], after: &[u8]) -> u32 {
+    let before_text = String::from_utf8_lossy(before);
+    let after_text = String::from_utf8_lossy(after);
+    let before_lines: std::collections::HashSet<&str> = before_text.lines().collect();
+    after_text
+        .lines()
+        .filter(|line| !before_lines.contains(line))
+        .count() as u32
+}
+
+fn validate_quest_workspace(workspace_root: &Path) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    let project = match engine_editor::ProjectContext::open(workspace_root) {
+        Ok(project) => {
+            results.push(ValidationResult::new(
+                "Project load",
+                "passed",
+                "Project manifest, default scene, and asset database loaded.",
+            ));
+            project
+        }
+        Err(error) => {
+            results.push(ValidationResult::new(
+                "Project load",
+                "failed",
+                error.to_string(),
+            ));
+            return results;
+        }
+    };
+
+    results.push(validate_quest_scene_round_trip(&project));
+    results.push(validate_quest_asset_scan(&project));
+    results.push(validate_quest_script_references(&project));
+    results.push(validate_quest_play_preview(workspace_root, &project));
+
+    let cargo_toml = workspace_root.join("Cargo.toml");
+    if cargo_toml.is_file() {
+        let command = quest_validation_registry()
+            .into_iter()
+            .find(|command| command.id == "cargo_check_quiet")
+            .expect("quest validation registry must include cargo_check_quiet");
+        match command.run(workspace_root) {
+            Ok(output) if output.status.success() => results.push(
+                ValidationResult::new(
+                    command.label,
+                    "passed",
+                    format!(
+                        "{} completed successfully through policy-approved registry entry `{}`.",
+                        command.display(),
+                        command.id
+                    ),
+                )
+                .with_policy_command(
+                    command.id,
+                    command.display(),
+                    command_output_log(&output),
+                ),
+            ),
+            Ok(output) => {
+                let log = command_output_log(&output);
+                let summary = log.lines().take(12).collect::<Vec<_>>().join("\n");
+                results.push(
+                    ValidationResult::new(command.label, "failed", summary).with_policy_command(
+                        command.id,
+                        command.display(),
+                        log,
+                    ),
+                );
+            }
+            Err(error) => results.push(
+                ValidationResult::new(
+                    command.label,
+                    "failed",
+                    format!("failed to run {}: {error}", command.display()),
+                )
+                .with_policy_command(
+                    command.id,
+                    command.display(),
+                    error.to_string(),
+                ),
+            ),
+        }
+    } else {
+        results.push(ValidationResult::new(
+            "cargo check",
+            "skipped",
+            "No Cargo.toml found in Quest workspace.",
+        ));
+    }
+    results
+}
+
+fn validate_quest_scene_round_trip(project: &engine_editor::ProjectContext) -> ValidationResult {
+    match project
+        .scene
+        .to_json("quest-validation")
+        .and_then(|scene_json| engine_ecs::Scene::from_json(&scene_json).map(|_| scene_json))
+    {
+        Ok(scene_json) => ValidationResult::new(
+            "Scene schema",
+            "passed",
+            format!(
+                "Default scene round-tripped through the ECS JSON schema ({} bytes).",
+                scene_json.len()
+            ),
+        ),
+        Err(error) => ValidationResult::new("Scene schema", "failed", error.to_string()),
+    }
+}
+
+fn validate_quest_asset_scan(project: &engine_editor::ProjectContext) -> ValidationResult {
+    let assets = project.sorted_assets();
+    let missing = assets
+        .iter()
+        .filter(|asset| {
+            !project
+                .root
+                .join(&project.manifest.asset_root)
+                .join(&asset.source_path)
+                .is_file()
+        })
+        .map(|asset| asset.source_path.display().to_string())
+        .take(8)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        ValidationResult::new(
+            "Asset scan",
+            "passed",
+            format!(
+                "Asset database scanned {} supported asset(s).",
+                assets.len()
+            ),
+        )
+    } else {
+        ValidationResult::new(
+            "Asset scan",
+            "failed",
+            format!(
+                "Asset metadata points at missing source files: {}",
+                missing.join(", ")
+            ),
+        )
+    }
+}
+
+fn validate_quest_script_references(project: &engine_editor::ProjectContext) -> ValidationResult {
+    let mut script_refs = Vec::new();
+    for (_, object) in project.scene.objects() {
+        for script in &object.scripts {
+            if !script.script.trim().is_empty() {
+                script_refs.push(script.script.clone());
+            }
+        }
+        for component in &object.components {
+            if let engine_ecs::ComponentData::Script(script) = component {
+                if !script.script.trim().is_empty() {
+                    script_refs.push(script.script.clone());
+                }
+            }
+        }
+    }
+    script_refs.sort();
+    script_refs.dedup();
+    let missing = script_refs
+        .iter()
+        .filter(|script| !resolve_project_script_reference(project, script).is_file())
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        ValidationResult::new(
+            "Script references",
+            "passed",
+            format!("Validated {} scene script reference(s).", script_refs.len()),
+        )
+    } else {
+        ValidationResult::new(
+            "Script references",
+            "failed",
+            format!("Missing script reference(s): {}", missing.join(", ")),
+        )
+    }
+}
+
+fn resolve_project_script_reference(
+    project: &engine_editor::ProjectContext,
+    script: &str,
+) -> PathBuf {
+    let script_path = Path::new(script);
+    if let Ok(stripped) = script_path.strip_prefix("project:/") {
+        project.root.join(stripped)
+    } else if script_path.is_absolute() {
+        script_path.to_path_buf()
+    } else {
+        project.root.join(script_path)
+    }
+}
+
+fn validate_quest_play_preview(
+    workspace_root: &Path,
+    project: &engine_editor::ProjectContext,
+) -> ValidationResult {
+    match headless_services_from_scene(
+        EngineConfig::default(),
+        workspace_root.to_path_buf(),
+        &project.scene,
+    )
+    .and_then(|mut services| {
+        services.load_project_assets(project.root.join(&project.manifest.asset_root))?;
+        services.tick_game_frame(Duration::from_millis(16), true)?;
+        Ok(services.diagnostics)
+    }) {
+        Ok(diagnostics) => {
+            let errors = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.level == "error")
+                .take(5)
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect::<Vec<_>>();
+            if errors.is_empty() {
+                ValidationResult::new(
+                    "Play preview smoke",
+                    "passed",
+                    format!(
+                        "Headless runtime advanced one frame with {} diagnostic(s).",
+                        diagnostics.len()
+                    ),
+                )
+            } else {
+                ValidationResult::new("Play preview smoke", "failed", errors.join("\n"))
+            }
+        }
+        Err(error) => ValidationResult::new("Play preview smoke", "failed", error.to_string()),
+    }
+}
+
+fn command_output_log(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = Vec::new();
+    if !stdout.trim().is_empty() {
+        lines.push("stdout:".to_owned());
+        lines.extend(stdout.lines().map(str::to_owned));
+    }
+    if !stderr.trim().is_empty() {
+        lines.push("stderr:".to_owned());
+        lines.extend(stderr.lines().map(str::to_owned));
+    }
+    if lines.is_empty() {
+        "Command completed without stdout or stderr.".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct QuestValidationCommand {
+    id: &'static str,
+    label: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+impl QuestValidationCommand {
+    fn display(&self) -> String {
+        std::iter::once(self.program)
+            .chain(self.args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn run(&self, workspace_root: &Path) -> EngineResult<std::process::Output> {
+        let mut sandbox = SandboxPolicy::new([workspace_root.to_path_buf()]);
+        sandbox.allow_command(std::iter::once(self.program).chain(self.args.iter().copied()));
+        let command: Vec<String> = std::iter::once(self.program)
+            .chain(self.args.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        if !sandbox.allows_path(workspace_root) || !sandbox.allows_command(&command) {
+            return Err(EngineError::config(format!(
+                "Quest validation command `{}` is not policy-approved",
+                self.display()
+            )));
+        }
+        Command::new(self.program)
+            .args(self.args)
+            .current_dir(workspace_root)
+            .output()
+            .map_err(|source| EngineError::Filesystem {
+                path: workspace_root.to_path_buf(),
+                source,
+            })
+    }
+}
+
+fn quest_validation_registry() -> Vec<QuestValidationCommand> {
+    vec![QuestValidationCommand {
+        id: "cargo_check_quiet",
+        label: "cargo check",
+        program: "cargo",
+        args: &["check", "--quiet"],
+    }]
+}
+
+fn parse_generated_quest_tools(
+    tool_calls: &[engine_ai::ToolCall],
+) -> EngineResult<GeneratedQuestSpec> {
+    let mut spec_artifact: Option<(String, String)> = None;
+    let mut tasks = Vec::new();
+    for call in tool_calls {
+        match call.name.as_str() {
+            "create_or_update_spec" => {
+                let title = call
+                    .arguments
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches(['"', '\'', '`', '.', ':', '#', '*'])
+                    .trim()
+                    .chars()
+                    .take(96)
+                    .collect::<String>();
+                let spec = call
+                    .arguments
+                    .get("markdown")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if title.is_empty() {
+                    return Err(EngineError::config(
+                        "Quest spec tool call must include a non-empty title",
+                    ));
+                }
+                if spec.is_empty() {
+                    return Err(EngineError::config(
+                        "Quest spec tool call must include non-empty markdown",
+                    ));
+                }
+                spec_artifact = Some((title, spec));
+            }
+            "create_task" => {
+                let title = call
+                    .arguments
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if title.is_empty() {
+                    return Err(EngineError::config(
+                        "Quest task tool call must include a non-empty title",
+                    ));
+                }
+                let summary = call
+                    .arguments
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                let acceptance = call
+                    .arguments
+                    .get("acceptance")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                tasks.push(GeneratedQuestTask {
+                    title,
+                    summary,
+                    acceptance,
+                });
+            }
+            other => {
+                return Err(EngineError::config(format!(
+                    "unsupported Quest creation tool call: {other}"
+                )));
+            }
+        }
+    }
+    let Some((title, spec)) = spec_artifact else {
+        return Err(EngineError::config(
+            "Quest creation model must call `create_or_update_spec`; text-only responses are not accepted.",
+        ));
+    };
+    Ok(GeneratedQuestSpec { title, spec, tasks })
+}
+
+fn quest_creation_tool_definitions() -> Vec<engine_ai::ToolDefinition> {
+    vec![
+        engine_ai::ToolDefinition {
+            name: "create_or_update_spec".to_owned(),
+            description: "Create the editable Markdown specification for the Quest.".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["title", "markdown"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short Quest title."
+                    },
+                    "markdown": {
+                        "type": "string",
+                        "description": "Editable Markdown spec. Choose sections that fit the goal; do not force a fixed template."
+                    }
+                }
+            }),
+        },
+        engine_ai::ToolDefinition {
+            name: "create_task".to_owned(),
+            description:
+                "Create one flexible execution or investigation task for the Quest timeline."
+                    .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["title"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Task title."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Optional context or intent for this task."
+                    },
+                    "acceptance": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional task-specific acceptance checks."
+                    }
+                }
+            }),
+        },
+    ]
+}
+
+fn format_editor_knowledge_context(entries: &[quest::KnowledgeEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let lines = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "- [{}] {} (source: {})",
+                entry.category, entry.content, entry.source
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\n[Approved Project Knowledge]\n{lines}")
 }
 
 fn model_detection_config(
@@ -3276,6 +6393,7 @@ fn start_copilot_plan(
     std::thread::spawn(move || {
         let original_prompt = prepared.original_prompt.clone();
         let cached_context = prepared.cached_context;
+        let knowledge_entries_used = prepared.knowledge_entries_used;
         let result = engine_ai::providers::create_provider(
             &prepared.provider,
             &prepared.model,
@@ -3332,6 +6450,7 @@ fn start_copilot_plan(
                 response: content_result,
                 tool_calls,
                 cached_context,
+                knowledge_entries_used,
             },
         );
         drop(request_state);
@@ -3364,6 +6483,7 @@ fn finish_copilot_plan(
                 &response,
                 &completed.tool_calls,
                 completed.cached_context,
+                completed.knowledge_entries_used,
             )
         })
         .map_err(|error| error.to_string())
@@ -3564,6 +6684,7 @@ fn dirs_data_dir() -> Option<PathBuf> {
 #[tauri::command]
 fn open_game_view(_app: tauri::AppHandle, state: State<'_, EditorHostState>) -> Result<(), String> {
     state.with_host(|host| {
+        host.poll_game_window();
         let snapshot = host
             .create_game_runtime_snapshot()
             .map_err(|e| e.to_string())?;
@@ -3575,6 +6696,54 @@ fn open_game_view(_app: tauri::AppHandle, state: State<'_, EditorHostState>) -> 
 
         let handle = game_window::spawn_game_window("Game View".to_string(), 1280, 720, snapshot);
         host.game_window = Some(handle);
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn set_game_render_scaling(
+    settings: engine_render::RenderScalingSettings,
+    state: State<'_, EditorHostState>,
+) -> Result<(), String> {
+    state.with_host(|host| {
+        let game_window = host
+            .game_window
+            .as_ref()
+            .ok_or_else(|| "game window is not running".to_owned())?;
+        game_window.set_render_scaling(settings)
+    })
+}
+
+#[tauri::command]
+fn open_native_scene_view(
+    state: State<'_, EditorHostState>,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+) -> Result<(), String> {
+    state.with_host(|host| {
+        host.poll_scene_window();
+        let snapshot = host
+            .create_scene_runtime_snapshot()
+            .map_err(|error| error.to_string())?;
+        let camera = scene_window::SceneCameraState {
+            yaw,
+            pitch,
+            distance,
+            target: engine_core::math::Vec3::new(target_x, target_y, target_z),
+        };
+
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.restart(snapshot, camera)?;
+            return scene_window.show();
+        }
+
+        let handle =
+            scene_window::spawn_scene_window("Scene View".to_owned(), 1280, 720, snapshot, camera);
+        host.scene_window = Some(handle);
         Ok(())
     })
 }
@@ -3629,6 +6798,31 @@ fn apply_desktop_window_adaptations(app: &tauri::App) -> Result<(), Box<dyn std:
         window.set_background_color(Some(Color(24, 24, 24, 255)))?;
         window.set_decorations(desktop.prefers_native_chrome())?;
     }
+    Ok(())
+}
+
+fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(window_config) = app.config().app.windows.first() else {
+        return Ok(());
+    };
+
+    let window = WebviewWindowBuilder::from_config(app, window_config)?
+        .on_page_load(|window, payload| {
+            tracing::info!(
+                target: "editor",
+                "webview page load {:?}: {}",
+                payload.event(),
+                payload.url()
+            );
+            if payload.event() == PageLoadEvent::Finished {
+                #[cfg(debug_assertions)]
+                window.open_devtools();
+            }
+        })
+        .build()?;
+
+    tracing::info!(target: "editor", "main webview window created");
+    window.set_focus()?;
     Ok(())
 }
 
@@ -3688,7 +6882,10 @@ pub fn run() {
     let store_path = config_dir.join("aster-editor-state.toml");
     let store = FileEditorStore::new(&store_path);
 
-    let host = match EditorHost::new(store) {
+    let quest_root = dirs_data_dir()
+        .unwrap_or_else(|| config_dir.clone())
+        .join("quests");
+    let host = match EditorHost::new_with_quest_root(store, quest_root) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("FATAL: failed to initialize editor host: {e}");
@@ -3705,6 +6902,8 @@ pub fn run() {
             finish_copilot_plan,
             cancel_copilot_plan,
             open_game_view,
+            set_game_render_scaling,
+            open_native_scene_view,
             select_project_location,
             viewport_readback_raw,
             open_scene_dialog,
@@ -3712,6 +6911,7 @@ pub fn run() {
             save_scene_as_dialog
         ])
         .setup(|app| {
+            create_main_window(app)?;
             apply_desktop_window_adaptations(app)?;
             Ok(())
         })
@@ -3723,8 +6923,12 @@ pub fn run() {
 mod tests {
     use super::{
         asset_meta_path_for_source, copilot_execution_summary, extract_codex_account_id,
-        model_detection_config, normalize_relative_path, resolve_existing_relative_path,
-        resolve_writable_relative_path, should_continue_copilot, DesktopEnvironment, EditorHost,
+        model_detection_config, normalize_relative_path, parse_generated_quest_tools,
+        project_fingerprint, quest_review_actions_for_result, resolve_existing_relative_path,
+        resolve_writable_relative_path, should_continue_copilot,
+        transaction_groups_from_changed_files, validate_quest_workspace, ChangedFile,
+        DesktopEnvironment, EditorHost, QuestProject, QuestReview, QuestReviewMetrics, QuestStatus,
+        ValidationResult,
     };
     use base64::Engine as _;
     use engine_editor::{CopilotProvider, FileEditorStore};
@@ -3793,6 +6997,64 @@ mod tests {
                 .unwrap()
                 .join("scripts/new_script.rhai")
         );
+    }
+
+    #[test]
+    fn quest_creation_rejects_text_only_model_responses() {
+        let error = parse_generated_quest_tools(&[]).unwrap_err();
+        assert!(error.to_string().contains("create_or_update_spec"));
+    }
+
+    #[test]
+    fn blocked_quest_reviews_include_clear_next_actions() {
+        let issues = vec!["Validation failed: cargo test failed".to_owned()];
+        let actions = quest_review_actions_for_result(&issues, true, false);
+
+        assert!(actions.iter().any(|action| action.kind == "quick_fix"
+            && action.target.as_deref() == Some("Validation failed: cargo test failed")));
+        assert!(actions.iter().any(|action| action.kind == "revise"));
+        assert!(actions.iter().any(|action| action.kind == "retry"));
+    }
+
+    #[test]
+    fn no_change_reviews_offer_inspect_revise_or_archive_actions() {
+        let issues = vec!["Quest execution completed without producing file changes.".to_owned()];
+        let actions = quest_review_actions_for_result(&issues, false, true);
+
+        assert!(actions
+            .iter()
+            .any(|action| action.kind == "open_review_finding"));
+        assert!(actions.iter().any(|action| action.kind == "revise"));
+        assert!(actions.iter().any(|action| action.kind == "archive"));
+    }
+
+    #[test]
+    fn quest_creation_accepts_native_spec_and_task_tool_calls() {
+        let generated = parse_generated_quest_tools(&[
+            engine_ai::ToolCall {
+                id: "call-spec".to_owned(),
+                name: "create_or_update_spec".to_owned(),
+                arguments: serde_json::json!({
+                    "title": "Build Patrol Scene",
+                    "markdown": "# Build Patrol Scene\n\nThe model chose this spec shape."
+                }),
+            },
+            engine_ai::ToolCall {
+                id: "call-task".to_owned(),
+                name: "create_task".to_owned(),
+                arguments: serde_json::json!({
+                    "title": "Create patrol behavior",
+                    "summary": "Author the behavior through available editor tools.",
+                    "acceptance": ["Behavior file exists", "Scene references it"]
+                }),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(generated.title, "Build Patrol Scene");
+        assert!(generated.spec.contains("model chose"));
+        assert_eq!(generated.tasks.len(), 1);
+        assert_eq!(generated.tasks[0].acceptance.len(), 2);
     }
 
     #[test]
@@ -3987,6 +7249,64 @@ mod tests {
     }
 
     #[test]
+    fn editor_ai_requests_can_attach_only_approved_knowledge() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        host.handle(
+            "hub/create_project",
+            &serde_json::json!({
+                "name": "KnowledgeContextProject",
+                "location": temp.path(),
+                "template_id": "three_d",
+                "toolchain_version": "0.1.0",
+            }),
+        )
+        .unwrap();
+        let project_path = temp.path().join("KnowledgeContextProject");
+        host.handle(
+            "hub/open_project",
+            &serde_json::json!({ "path": project_path }),
+        )
+        .unwrap();
+        host.copilot_settings.provider = CopilotProvider::Custom;
+        host.copilot_settings.model = "test-model".to_owned();
+        host.copilot_settings.api_endpoint = Some("https://provider.example/v1".to_owned());
+        let pending = host
+            .quest_store
+            .propose_knowledge(
+                "architecture",
+                "Use the render graph for frame orchestration.",
+                "manual",
+            )
+            .unwrap();
+        let error = match host.prepare_copilot_request(&serde_json::json!({
+            "prompt": "How should I wire rendering?",
+            "knowledge_ids": [pending[0].id],
+        })) {
+            Ok(_) => panic!("pending Knowledge must not be accepted as Editor AI context"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("only attach approved Knowledge"));
+
+        let approved = host.quest_store.approve_knowledge(&pending[0].id).unwrap();
+        let prepared = host
+            .prepare_copilot_request(&serde_json::json!({
+                "prompt": "How should I wire rendering?",
+                "knowledge_ids": [approved[0].id, approved[0].id],
+            }))
+            .unwrap();
+
+        assert_eq!(prepared.knowledge_entries_used, 1);
+        let user_message = prepared.request.messages.last().unwrap();
+        assert!(user_message
+            .content
+            .contains("[Approved Project Knowledge]"));
+        assert!(user_message
+            .content
+            .contains("Use the render graph for frame orchestration."));
+    }
+
+    #[test]
     fn read_only_inspection_requests_an_agent_continuation() {
         assert!(should_continue_copilot(true, false));
         assert!(!should_continue_copilot(false, false));
@@ -4005,5 +7325,441 @@ mod tests {
         assert!(summary.contains("query_scene_semantic: applied"));
         assert!(summary.contains("Tool results:"));
         assert!(summary.contains("1:1 - Player"));
+    }
+
+    fn quest_project(root: &Path) -> QuestProject {
+        QuestProject {
+            name: "QuestApplyProject".to_owned(),
+            path: root.to_path_buf(),
+        }
+    }
+
+    fn host_with_quest_root(root: &Path) -> EditorHost {
+        let store = FileEditorStore::new(root.join("aster-editor-state.toml"));
+        EditorHost::new_with_quest_root(store, root.join("quests")).unwrap()
+    }
+
+    fn create_reviewable_quest(
+        host: &mut EditorHost,
+        project_root: &Path,
+        changed_files: Vec<ChangedFile>,
+    ) -> (String, std::path::PathBuf) {
+        let created = host
+            .quest_store
+            .create(
+                "Review apply boundary".to_owned(),
+                "Apply reviewed files only.".to_owned(),
+                "# Review apply boundary\n\n## Goal\n\nApply reviewed files only.".to_owned(),
+                quest_project(project_root),
+            )
+            .unwrap();
+        let id = created.record.id.clone();
+        let workspace_id = "workspace-test".to_owned();
+        let workspace_root = host
+            .quest_store
+            .quest_path(&id)
+            .unwrap()
+            .join("workspaces")
+            .join(&workspace_id);
+        fs::create_dir_all(&workspace_root).unwrap();
+        host.quest_store
+            .set_workspace_id(&id, workspace_id)
+            .unwrap();
+        host.quest_store
+            .set_review(
+                &id,
+                QuestStatus::ReadyForReview,
+                QuestReview {
+                    summary: "Reviewable files are staged in an isolated workspace.".to_owned(),
+                    transaction_groups: transaction_groups_from_changed_files(&changed_files),
+                    changed_files,
+                    exploration_attempts: Vec::new(),
+                    findings: Vec::new(),
+                    validations: vec![ValidationResult::new(
+                        "Focused review test",
+                        "passed",
+                        "Workspace artifact was prepared by the test.",
+                    )],
+                    unresolved_issues: Vec::new(),
+                    next_actions: Vec::new(),
+                    project_fingerprint: Some(project_fingerprint(project_root).unwrap()),
+                    metrics: QuestReviewMetrics::default(),
+                    risk: "low".to_owned(),
+                },
+            )
+            .unwrap();
+        (id, workspace_root)
+    }
+
+    #[test]
+    fn quest_validations_include_policy_registry_command_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_location = temp.path().join("projects");
+        let mut host = host_with_quest_root(temp.path());
+        let created = host
+            .handle(
+                "hub/create_project",
+                &serde_json::json!({
+                    "name": "Validation Evidence",
+                    "location": project_location,
+                    "template_id": "two_d",
+                    "toolchain_version": "0.1.0",
+                }),
+            )
+            .unwrap();
+        let project_root = Path::new(created["path"].as_str().unwrap());
+        fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"validation-evidence\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+
+        let validations = validate_quest_workspace(project_root);
+        let cargo_check = validations
+            .iter()
+            .find(|validation| validation.name == "cargo check")
+            .unwrap();
+
+        assert_eq!(cargo_check.status, "passed");
+        assert_eq!(cargo_check.command_id.as_deref(), Some("cargo_check_quiet"));
+        assert_eq!(cargo_check.command.as_deref(), Some("cargo check --quiet"));
+        assert!(cargo_check.policy_approved);
+        assert!(!cargo_check.log.trim().is_empty());
+    }
+
+    #[test]
+    fn quest_apply_copies_reviewed_workspace_files_and_rollback_restores_active_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(
+            project_root.join("src/main.rs"),
+            "fn main() {\n    old();\n}\n",
+        )
+        .unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/main.rs".to_owned(),
+            additions: 1,
+            deletions: 1,
+            status: "modified".to_owned(),
+            diff: "--- a/src/main.rs\n+++ b/src/main.rs\n".to_owned(),
+        }];
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(
+            workspace_root.join("src/main.rs"),
+            "fn main() {\n    new();\n}\n",
+        )
+        .unwrap();
+
+        let applied = host
+            .handle("quest/apply", &serde_json::json!({ "id": id }))
+            .unwrap();
+
+        assert_eq!(applied["status"], "completed");
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    new();\n}\n"
+        );
+        let rollback_id = applied["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|decision| decision["kind"] == "apply")
+            .and_then(|decision| decision["rollback_id"].as_str())
+            .unwrap()
+            .to_owned();
+
+        let rolled_back = host
+            .handle(
+                "quest/rollback",
+                &serde_json::json!({ "id": id, "rollback_id": rollback_id }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    old();\n}\n"
+        );
+        assert!(rolled_back["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["kind"] == "rollback"));
+    }
+
+    #[test]
+    fn quest_apply_rejects_stale_review_when_active_project_changed_after_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/main.rs"), "old\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/main.rs".to_owned(),
+            additions: 1,
+            deletions: 1,
+            status: "modified".to_owned(),
+            diff: "main diff".to_owned(),
+        }];
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(workspace_root.join("src/main.rs"), "quest output\n").unwrap();
+        fs::write(project_root.join("src/main.rs"), "user edit\n").unwrap();
+
+        let error = host
+            .handle("quest/apply", &serde_json::json!({ "id": id }))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("review is stale"));
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/main.rs")).unwrap(),
+            "user edit\n"
+        );
+    }
+
+    #[test]
+    fn quest_partial_apply_respects_selected_transaction_groups() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/a.rs"), "old a\n").unwrap();
+        fs::write(project_root.join("src/b.rs"), "old b\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![
+            ChangedFile {
+                path: "src/a.rs".to_owned(),
+                additions: 1,
+                deletions: 1,
+                status: "modified".to_owned(),
+                diff: "a diff".to_owned(),
+            },
+            ChangedFile {
+                path: "src/b.rs".to_owned(),
+                additions: 1,
+                deletions: 1,
+                status: "modified".to_owned(),
+                diff: "b diff".to_owned(),
+            },
+        ];
+        let selected_group = transaction_groups_from_changed_files(&changed_files)[0]
+            .id
+            .clone();
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(workspace_root.join("src/a.rs"), "new a\n").unwrap();
+        fs::write(workspace_root.join("src/b.rs"), "new b\n").unwrap();
+
+        let applied = host
+            .handle(
+                "quest/apply",
+                &serde_json::json!({
+                    "id": id,
+                    "transaction_group_ids": [selected_group],
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(applied["status"], "ready_for_review");
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/a.rs")).unwrap(),
+            "new a\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/b.rs")).unwrap(),
+            "old b\n"
+        );
+        assert!(applied["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["kind"] == "partial_apply"
+                && decision["files"].as_array().unwrap().len() == 1));
+        let remaining_files = applied["review"]["changed_files"].as_array().unwrap();
+        assert_eq!(remaining_files.len(), 1);
+        assert_eq!(remaining_files[0]["path"], "src/b.rs");
+        let remaining_groups = applied["review"]["transaction_groups"].as_array().unwrap();
+        assert_eq!(remaining_groups.len(), 1);
+        assert_eq!(
+            remaining_groups[0]["files"].as_array().unwrap()[0],
+            "src/b.rs"
+        );
+    }
+
+    #[test]
+    fn quest_discard_prunes_selected_transaction_groups_without_mutating_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/a.rs"), "old a\n").unwrap();
+        fs::write(project_root.join("src/b.rs"), "old b\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![
+            ChangedFile {
+                path: "src/a.rs".to_owned(),
+                additions: 1,
+                deletions: 1,
+                status: "modified".to_owned(),
+                diff: "a diff".to_owned(),
+            },
+            ChangedFile {
+                path: "src/b.rs".to_owned(),
+                additions: 1,
+                deletions: 1,
+                status: "modified".to_owned(),
+                diff: "b diff".to_owned(),
+            },
+        ];
+        let selected_group = transaction_groups_from_changed_files(&changed_files)[0]
+            .id
+            .clone();
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(workspace_root.join("src/a.rs"), "new a\n").unwrap();
+        fs::write(workspace_root.join("src/b.rs"), "new b\n").unwrap();
+
+        let discarded = host
+            .handle(
+                "quest/discard",
+                &serde_json::json!({
+                    "id": id,
+                    "transaction_group_ids": [selected_group],
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(discarded["status"], "ready_for_review");
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/a.rs")).unwrap(),
+            "old a\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/b.rs")).unwrap(),
+            "old b\n"
+        );
+        assert!(discarded["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["kind"] == "discard"
+                && decision["files"].as_array().unwrap().len() == 1));
+        let remaining_files = discarded["review"]["changed_files"].as_array().unwrap();
+        assert_eq!(remaining_files.len(), 1);
+        assert_eq!(remaining_files[0]["path"], "src/b.rs");
+    }
+
+    #[test]
+    fn quest_discard_rejects_stale_review_when_active_project_changed_after_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/main.rs"), "old\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/main.rs".to_owned(),
+            additions: 1,
+            deletions: 1,
+            status: "modified".to_owned(),
+            diff: "main diff".to_owned(),
+        }];
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(workspace_root.join("src/main.rs"), "quest output\n").unwrap();
+        fs::write(project_root.join("src/main.rs"), "user edit\n").unwrap();
+
+        let error = host
+            .handle("quest/discard", &serde_json::json!({ "id": id }))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("review is stale"));
+        let detail = host.quest_store.get(&id).unwrap();
+        assert!(detail.record.decisions.is_empty());
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/main.rs")).unwrap(),
+            "user edit\n"
+        );
+    }
+
+    #[test]
+    fn quest_discard_all_marks_reviewed_result_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/a.rs"), "old a\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/a.rs".to_owned(),
+            additions: 1,
+            deletions: 1,
+            status: "modified".to_owned(),
+            diff: "a diff".to_owned(),
+        }];
+        let (id, workspace_root) = create_reviewable_quest(&mut host, &project_root, changed_files);
+        fs::create_dir_all(workspace_root.join("src")).unwrap();
+        fs::write(workspace_root.join("src/a.rs"), "new a\n").unwrap();
+
+        let discarded = host
+            .handle("quest/discard", &serde_json::json!({ "id": id }))
+            .unwrap();
+
+        assert_eq!(discarded["status"], "completed");
+        assert_eq!(
+            fs::read_to_string(project_root.join("src/a.rs")).unwrap(),
+            "old a\n"
+        );
+        assert!(discarded["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["kind"] == "discard"
+                && decision["files"].as_array().unwrap().len() == 1));
+        let knowledge = host.quest_store.list_knowledge().unwrap();
+        assert!(knowledge.iter().any(|entry| {
+            entry.status == "pending"
+                && entry.category == "quest-completion"
+                && entry.source == id
+                && entry.content.contains("intentionally discarding")
+        }));
+    }
+
+    #[test]
+    fn quest_export_publishes_selected_artifacts_under_project_local_aster_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let created = host
+            .quest_store
+            .create(
+                "Export Quest".to_owned(),
+                "Publish task artifacts for review.".to_owned(),
+                "# Export Quest\n\n## Goal\n\nPublish task artifacts for review.".to_owned(),
+                quest_project(&project_root),
+            )
+            .unwrap();
+
+        let exported = host
+            .handle(
+                "quest/export",
+                &serde_json::json!({ "id": created.record.id }),
+            )
+            .unwrap();
+        let export_root = project_root
+            .join(".aster")
+            .join("quests")
+            .join(created.record.id);
+
+        assert!(export_root.join("quest.json").is_file());
+        assert!(export_root.join("intent.md").is_file());
+        assert!(export_root.join("spec.md").is_file());
+        assert!(export_root.join("events.jsonl").is_file());
+        assert!(exported["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["kind"] == "export"));
     }
 }

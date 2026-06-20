@@ -2,7 +2,9 @@ import React, { useEffect, useState, useCallback } from 'react';
 import HubPage from './pages/HubPage';
 import EditorPage from './pages/EditorPage';
 import GameView from './pages/GameView';
+import QuestPage from './pages/QuestPage';
 import { rpc } from './api';
+import { promoteQuest } from './quest';
 import { I18nProvider, useTranslation } from './i18n';
 
 interface DesktopIntegration {
@@ -32,7 +34,15 @@ interface HubState {
   desktop_integration?: DesktopIntegration;
 }
 
-type Screen = 'loading' | 'hub' | 'editor' | 'game-view';
+type Screen = 'loading' | 'hub' | 'editor' | 'quest' | 'game-view';
+
+export interface QuestEditorArtifact {
+  questId: string;
+  questTitle: string;
+  kind: 'intent' | 'spec' | 'trace' | 'changed_file' | 'validation' | 'review_finding' | 'exploration' | 'checkpoint';
+  label: string;
+  path?: string;
+}
 
 function AppFrame({ children }: { children: React.ReactNode }) {
   return (
@@ -52,9 +62,24 @@ function LoadingScreen() {
   );
 }
 
+function StartupErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="startup-error-screen">
+      <div className="startup-error-panel">
+        <h1>Aster Editor could not start</h1>
+        <p>{message}</p>
+        <button type="button" onClick={onRetry}>Retry</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('loading');
   const [hubState, setHubState] = useState<HubState | null>(null);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const [questArtifact, setQuestArtifact] = useState<QuestEditorArtifact | null>(null);
+  const [initialQuestId, setInitialQuestId] = useState<string | null>(null);
 
   // ── Refresh hub state from backend ──
   const refreshHubState = useCallback(async () => {
@@ -75,8 +100,10 @@ export default function App() {
     document.body.style.background = integration.window_background;
   }, []);
 
-  // ── Init ──
-  useEffect(() => {
+  const initialize = useCallback(() => {
+    setStartupError(null);
+    setScreen('loading');
+
     // Check hash-based routing first (Game View opens via Tauri new window)
     if (window.location.hash === '#/game-view') {
       rpc<DesktopIntegration>('app/get_desktop_integration')
@@ -103,9 +130,16 @@ export default function App() {
       setScreen(state.open_project ? 'editor' : 'hub');
     }).catch((err) => {
       console.error('Failed to connect to host:', err);
-      setScreen('hub');
+      const message = err instanceof Error ? err.message : String(err);
+      setStartupError(message || 'The editor backend did not respond.');
+      setScreen('loading');
     });
   }, [applyDesktopIntegration]);
+
+  // ── Init ──
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
 
   // ── Handlers ──
 
@@ -128,6 +162,26 @@ export default function App() {
     await refreshHubState();
     setScreen('hub');
   }, [refreshHubState]);
+
+  const handleOpenQuest = useCallback(() => {
+    setInitialQuestId(null);
+    setScreen('quest');
+  }, []);
+
+  const handlePromoteToQuest = useCallback(async (prompt: string, context: string) => {
+    const detail = await promoteQuest(prompt, context);
+    setInitialQuestId(detail.id);
+    setScreen('quest');
+  }, []);
+
+  const handleOpenEditor = useCallback(async (projectPath: string, artifact?: QuestEditorArtifact) => {
+    if (hubState?.open_project !== projectPath) {
+      await rpc('hub/open_project', { path: projectPath });
+      await refreshHubState();
+    }
+    setQuestArtifact(artifact ?? null);
+    setScreen('editor');
+  }, [hubState?.open_project, refreshHubState]);
 
   const handleNavigate = useCallback(async (page: string) => {
     await rpc('hub/set_page', { page });
@@ -163,7 +217,11 @@ export default function App() {
     return (
       <I18nProvider locale={locale}>
         <AppFrame>
-          <LoadingScreen />
+          {startupError ? (
+            <StartupErrorScreen message={startupError} onRetry={initialize} />
+          ) : (
+            <LoadingScreen />
+          )}
         </AppFrame>
       </I18nProvider>
     );
@@ -180,15 +238,36 @@ export default function App() {
             onSetTheme={handleSetTheme}
             onSetLocale={handleSetLocale}
             onRefresh={async () => { await refreshHubState(); }}
+            onOpenQuests={handleOpenQuest}
           />
         </AppFrame>
       </I18nProvider>
     );
   }
 
+  if (screen === 'quest' && hubState) {
+    return (
+      <I18nProvider locale={locale}>
+        <QuestPage
+          currentProjectPath={hubState.open_project}
+          initialQuestId={initialQuestId}
+          onOpenEditor={handleOpenEditor}
+          onCloseProject={handleCloseProject}
+        />
+      </I18nProvider>
+    );
+  }
+
   return (
     <I18nProvider locale={locale}>
-      <EditorPage onCloseProject={handleCloseProject} onOpenSettings={handleOpenSettings} />
+      <EditorPage
+        onCloseProject={handleCloseProject}
+        onOpenSettings={handleOpenSettings}
+        onOpenQuest={handleOpenQuest}
+        onPromoteToQuest={handlePromoteToQuest}
+        questArtifact={questArtifact}
+        onDismissQuestArtifact={() => setQuestArtifact(null)}
+      />
     </I18nProvider>
   );
 }

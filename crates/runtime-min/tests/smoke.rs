@@ -1,5 +1,8 @@
 use engine_core::EngineConfig;
-use engine_render::{RenderFrame, RenderGraphBuilder};
+use engine_render::{
+    RenderFrame, RenderGraphBuilder, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
+    RenderScalingSettings, UpscalerKind,
+};
 use runtime_min::{build_default_render_graph, smoke_runtime_min, RuntimeServices};
 
 #[test]
@@ -10,10 +13,12 @@ fn native_runtime_min_smoke_test() {
 #[test]
 fn default_render_graph_pass_order() {
     let graph = build_default_render_graph();
-    assert_eq!(graph.pass_count(), 3);
+    assert_eq!(graph.pass_count(), 5);
     assert_eq!(graph.passes[0].name, "shadow");
     assert_eq!(graph.passes[1].name, "forward");
-    assert_eq!(graph.passes[2].name, "post");
+    assert_eq!(graph.passes[2].name, "upscale");
+    assert_eq!(graph.passes[3].name, "post");
+    assert_eq!(graph.passes[4].name, "ui");
 }
 
 #[test]
@@ -23,6 +28,30 @@ fn runtime_services_ticks_multiple_frames() {
         services.tick().unwrap();
     }
     assert_eq!(services.frame_index(), 5);
+}
+
+#[test]
+fn player_render_settings_apply_without_recreating_runtime() {
+    let mut services = RuntimeServices::minimal(EngineConfig::default());
+    let selection = services.set_render_scaling(
+        RenderScalingSettings {
+            quality: RenderQualityMode::Performance,
+            preferred_upscaler: Some(UpscalerKind::BuiltInSpatial),
+            dynamic_resolution: false,
+            ..Default::default()
+        },
+        RenderScalingContext {
+            platform: RenderPlatformClass::Desktop,
+            ..Default::default()
+        },
+    );
+    assert_eq!(selection.upscaler, UpscalerKind::BuiltInSpatial);
+    assert_eq!(selection.render_scale, 0.5);
+    assert_eq!(services.stats.upscaler, UpscalerKind::BuiltInSpatial);
+    assert_eq!(
+        services.render_scaling_settings.quality,
+        RenderQualityMode::Performance
+    );
 }
 
 #[test]

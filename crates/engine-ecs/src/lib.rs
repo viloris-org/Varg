@@ -28,9 +28,9 @@ pub use scene::{
     SkyboxComponentData, Sprite2DComponentData, TileMap2DComponentData,
 };
 pub use schema::{
-    BuildConfiguration, ComponentFieldKind, ComponentFieldSchema, ComponentSchema,
-    ComponentSchemaRegistry, EditorPreferences, FormatDiagnostic, FormatVersion, PrefabFile,
-    ProjectManifest, SchemaEvolution,
+    BuildConfiguration, BuildRenderSettings, ComponentFieldKind, ComponentFieldSchema,
+    ComponentSchema, ComponentSchemaRegistry, EditorPreferences, FormatDiagnostic, FormatVersion,
+    PrefabFile, ProjectManifest, SchemaEvolution,
 };
 pub use transform::TransformHierarchy;
 pub use world::{Component, ComponentStorage, Entity, World};

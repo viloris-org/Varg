@@ -40,6 +40,8 @@ pub(crate) const SSAO_KERNEL_SIZE: u32 = 32;
 pub(crate) const SSAO_NOISE_RES: u32 = 4;
 pub(crate) const SSAO_RADIUS: f32 = 0.5;
 pub(crate) const SSAO_BIAS: f32 = 0.025;
+pub(crate) const SSGI_RADIUS: f32 = 2.5;
+pub(crate) const SSGI_INTENSITY: f32 = 0.65;
 pub(crate) const INTERMEDIATE_WIDTH: u32 = 1920;
 pub(crate) const INTERMEDIATE_HEIGHT: u32 = 1080;
 pub(crate) struct GpuImage {
@@ -170,8 +172,19 @@ pub struct WgpuRenderDevice {
     pub(crate) ssao_output_texture: Option<wgpu::Texture>,
     pub(crate) ssao_output_view: Option<wgpu::TextureView>,
     pub(crate) ssao_uniform: wgpu::Buffer,
+    // Real-time screen-space global illumination resources
+    pub(crate) ssgi_cached_bg: Option<Arc<wgpu::BindGroup>>,
+    pub(crate) ssgi_output_texture: Option<wgpu::Texture>,
+    pub(crate) ssgi_output_view: Option<wgpu::TextureView>,
+    pub(crate) ssgi_uniform: wgpu::Buffer,
+    pub(crate) ssgi_compute_pipeline: Option<wgpu::ComputePipeline>,
+    pub(crate) ssgi_compute_bgl: Option<wgpu::BindGroupLayout>,
     // HDR intermediate target
     pub(crate) hdr_target: Option<GpuTarget>,
+    pub(crate) hdr_normal_texture: Option<wgpu::Texture>,
+    pub(crate) hdr_normal_view: Option<wgpu::TextureView>,
+    pub(crate) hdr_albedo_texture: Option<wgpu::Texture>,
+    pub(crate) hdr_albedo_view: Option<wgpu::TextureView>,
     pub(crate) post_target_width: u32,
     pub(crate) post_target_height: u32,
     pub(crate) ibl_irradiance_compute: Option<wgpu::ComputePipeline>,
@@ -190,10 +203,14 @@ pub struct WgpuRenderDevice {
     pub(crate) performance_config: RenderPerformanceConfig,
     pub(crate) dynamic_resolution: engine_render::DynamicResolutionController,
     pub(crate) performance_metrics: RenderPerformanceMetrics,
+    pub(crate) active_upscaler: engine_render::UpscalerKind,
+    pub(crate) upscale_sharpness: f32,
 }
 pub(crate) struct FrameResources {
     pub(crate) ssao_bg: Option<Arc<wgpu::BindGroup>>,
     pub(crate) ssao_view: Option<wgpu::TextureView>,
+    pub(crate) ssgi_bg: Option<Arc<wgpu::BindGroup>>,
+    pub(crate) ssgi_view: Option<wgpu::TextureView>,
     pub(crate) bloom_down_bgs: Vec<Arc<wgpu::BindGroup>>,
     pub(crate) bloom_up_bgs: Vec<Arc<wgpu::BindGroup>>,
     pub(crate) post_bg: Option<Arc<wgpu::BindGroup>>,

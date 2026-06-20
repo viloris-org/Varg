@@ -518,6 +518,43 @@ impl Default for EditorPreferences {
 
 /// Build configuration format.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct BuildRenderSettings {
+    /// Engine quality preset name.
+    pub quality: String,
+    /// Preferred upscaler name.
+    pub upscaler: String,
+    /// Whether dynamic resolution is enabled.
+    pub dynamic_resolution: bool,
+    /// Target frames per second.
+    pub target_fps: u32,
+    /// Minimum render scale as an integer percentage.
+    pub min_render_scale_percent: u8,
+    /// Maximum render scale as an integer percentage.
+    pub max_render_scale_percent: u8,
+    /// Spatial sharpening strength as an integer percentage.
+    pub sharpness_percent: u8,
+    /// Battery policy name.
+    pub battery_policy: String,
+}
+
+impl Default for BuildRenderSettings {
+    fn default() -> Self {
+        Self {
+            quality: "balanced".to_owned(),
+            upscaler: "built-in-spatial".to_owned(),
+            dynamic_resolution: true,
+            target_fps: 60,
+            min_render_scale_percent: 50,
+            max_render_scale_percent: 100,
+            sharpness_percent: 35,
+            battery_policy: "balanced".to_owned(),
+        }
+    }
+}
+
+/// Build configuration format.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BuildConfiguration {
     /// Explicit schema version.
     pub format: FormatVersion,
@@ -527,6 +564,9 @@ pub struct BuildConfiguration {
     pub release: bool,
     /// Feature flags enabled for the build.
     pub features: Vec<String>,
+    /// Runtime rendering policy.
+    #[serde(default)]
+    pub render: BuildRenderSettings,
     /// Schema evolution metadata.
     pub evolution: SchemaEvolution,
 }
@@ -539,6 +579,7 @@ impl BuildConfiguration {
             target: "native".to_string(),
             release: false,
             features: vec!["runtime-min".to_string()],
+            render: BuildRenderSettings::default(),
             evolution: SchemaEvolution::default(),
         }
     }

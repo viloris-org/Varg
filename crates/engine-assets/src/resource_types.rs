@@ -226,6 +226,9 @@ pub struct InputActionDef {
     /// Gamepad button bindings.
     #[serde(default)]
     pub gamepad_buttons: Vec<String>,
+    /// Gamepad axis bindings.
+    #[serde(default)]
+    pub gamepad_axes: Vec<String>,
     /// Dead zone for analog input.
     #[serde(default = "default_deadzone")]
     pub deadzone: f32,
@@ -361,6 +364,7 @@ mod tests {
                 keys: vec!["Space".to_string()],
                 mouse_buttons: vec![],
                 gamepad_buttons: vec!["A".to_string()],
+                gamepad_axes: vec!["LeftStickX".to_string()],
                 deadzone: 0.2,
             }],
         };

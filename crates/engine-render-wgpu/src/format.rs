@@ -1,7 +1,7 @@
 use crate::uniforms::Instance;
 use engine_core::{EngineResult, HandleAllocator};
 use engine_render::{
-    BufferUsage, ImageDesc, ImageFormat, ImageUsage, RenderDevice, RenderTarget, RenderTargetDesc,
+    BufferUsage, ImageDesc, ImageFormat, ImageUsage, RenderTarget, RenderTargetDesc,
 };
 
 pub(crate) struct CreatedTarget(

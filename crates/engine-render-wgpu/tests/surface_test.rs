@@ -25,9 +25,10 @@ fn surface_creation_succeeds_with_winit_window() {
         use winit::platform::x11::EventLoopBuilderExtX11;
         builder.with_any_thread(true);
     }
-    let event_loop = builder
-        .build()
-        .expect("failed to create event loop (no display?)");
+    let Ok(event_loop) = builder.build() else {
+        eprintln!("skipping wgpu surface test: failed to create event loop");
+        return;
+    };
     let window = event_loop
         .create_window(
             WindowAttributes::default()

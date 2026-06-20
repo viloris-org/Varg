@@ -14,7 +14,7 @@ Aster is a Rust 2021 workspace. Engine subsystems live in `crates/`, generally o
 - `cargo xtask agent-smoke`: test editor agent tooling with its feature gate.
 - `cd editor && bun install`: install frontend and Tauri CLI dependencies.
 - `cd editor && bun run build`: type-check and build the Vite frontend.
-- `cd editor && bun run tauri dev`: launch the desktop editor in development mode.
+- `cd editor && bun run dev:tauri`: launch the desktop editor in development mode.
 
 Rust 1.78+, Bun 1.0+, and the platform-specific Tauri prerequisites are required.
 

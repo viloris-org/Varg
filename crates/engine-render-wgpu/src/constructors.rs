@@ -3,8 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{device::*, format::*, math::*, meshes::*, render::*, shaders::*, uniforms::*};
 use engine_core::{EngineError, EngineResult, HandleAllocator};
 use engine_render::{
-    ImageFormat, RenderDevice, RenderPerformanceConfig, RenderPerformanceMetrics, RenderTargetDesc,
-    ViewKind,
+    ImageFormat, RenderPerformanceConfig, RenderPerformanceMetrics, RenderTargetDesc, ViewKind,
 };
 use wgpu::util::DeviceExt;
 
@@ -292,6 +291,10 @@ impl WgpuRenderDevice {
             RenderTargetDesc {
                 width: width.max(1),
                 height: height.max(1),
+                internal_width: width.max(1),
+                internal_height: height.max(1),
+                ui_width: width.max(1),
+                ui_height: height.max(1),
                 color_format: format,
                 with_depth: true,
                 samples: 1,
@@ -305,6 +308,10 @@ impl WgpuRenderDevice {
             RenderTargetDesc {
                 width: width.max(1),
                 height: height.max(1),
+                internal_width: width.max(1),
+                internal_height: height.max(1),
+                ui_width: width.max(1),
+                ui_height: height.max(1),
                 color_format: format,
                 with_depth: true,
                 samples: 1,
@@ -318,6 +325,10 @@ impl WgpuRenderDevice {
             RenderTargetDesc {
                 width: 320,
                 height: 180,
+                internal_width: 320,
+                internal_height: 180,
+                ui_width: 320,
+                ui_height: 180,
                 color_format: format,
                 with_depth: true,
                 samples: 1,
@@ -1030,20 +1041,22 @@ impl WgpuRenderDevice {
                         attributes: &wgpu::vertex_attr_array![
                             0 => Float32x3,
                             1 => Float32x3,
-                            2 => Float32x2
+                            2 => Float32x2,
+                            3 => Float32x4
                         ],
                     },
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            3 => Float32x3,
                             4 => Float32x3,
-                            5 => Float32x4,
+                            5 => Float32x3,
                             6 => Float32x4,
-                            7 => Float32,
+                            7 => Float32x4,
                             8 => Float32,
-                            9 => Float32x3
+                            9 => Float32,
+                            10 => Float32x3,
+                            11 => Float32
                         ],
                     },
                 ],
@@ -1065,11 +1078,23 @@ impl WgpuRenderDevice {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
             }),
             multiview_mask: None,
             cache: None,
@@ -1118,7 +1143,7 @@ impl WgpuRenderDevice {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4],
                 }],
             },
             primitive: wgpu::PrimitiveState {
@@ -1205,20 +1230,22 @@ impl WgpuRenderDevice {
                         attributes: &wgpu::vertex_attr_array![
                             0 => Float32x3,
                             1 => Float32x3,
-                            2 => Float32x2
+                            2 => Float32x2,
+                            3 => Float32x4
                         ],
                     },
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
-                            3 => Float32x3,
                             4 => Float32x3,
-                            5 => Float32x4,
+                            5 => Float32x3,
                             6 => Float32x4,
-                            7 => Float32,
+                            7 => Float32x4,
                             8 => Float32,
-                            9 => Float32x3
+                            9 => Float32,
+                            10 => Float32x3,
+                            11 => Float32
                         ],
                     },
                 ],
@@ -1480,19 +1507,36 @@ impl WgpuRenderDevice {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let post_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aster post uniform"),
             contents: bytemuck::bytes_of(&PostProcessUniform {
-                width: width as f32,
-                height: height as f32,
-                inv_width: 1.0 / width as f32,
-                inv_height: 1.0 / height as f32,
+                render_width: width as f32,
+                render_height: height as f32,
+                inv_render_width: 1.0 / width as f32,
+                inv_render_height: 1.0 / height as f32,
+                output_width: width as f32,
+                output_height: height as f32,
+                inv_output_width: 1.0 / width as f32,
+                inv_output_height: 1.0 / height as f32,
                 exposure: 1.0,
                 bloom_intensity: 0.04,
                 ssao_enabled: 0.0,
-                time: 0.0,
+                upscale_sharpness: 0.35,
+                ssgi_enabled: 1.0,
+                ssgi_intensity: SSGI_INTENSITY,
+                _pad: [0.0; 2],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1716,6 +1760,97 @@ impl WgpuRenderDevice {
                 cache: None,
             },
         ));
+        // SSGI compute pipeline
+        let ssgi_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aster ssgi compute bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster ssgi shader"),
+            source: wgpu::ShaderSource::Wgsl(SSGI_SHADER.into()),
+        });
+        let ssgi_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("aster ssgi pipeline layout"),
+            bind_group_layouts: &[Some(&ssgi_compute_bgl)],
+            immediate_size: 0,
+        });
+        let ssgi_compute_pipeline = Some(device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("aster ssgi compute"),
+                layout: Some(&ssgi_pipeline_layout),
+                module: &ssgi_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            },
+        ));
         // Bloom compute pipelines
         let bloom_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("aster bloom compute bgl"),
@@ -1813,6 +1948,22 @@ impl WgpuRenderDevice {
                 height: height as f32,
                 inv_width: 1.0 / width.max(1) as f32,
                 inv_height: 1.0 / height.max(1) as f32,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let ssgi_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster ssgi uniform"),
+            contents: bytemuck::bytes_of(&SsgiUniform {
+                width: width as f32,
+                height: height as f32,
+                inv_width: 1.0 / width.max(1) as f32,
+                inv_height: 1.0 / height.max(1) as f32,
+                radius: SSGI_RADIUS,
+                intensity: SSGI_INTENSITY,
+                thickness: 0.08,
+                sample_count: 8.0,
+                frame_index: 0.0,
+                _pad: [0.0; 3],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1915,6 +2066,10 @@ impl WgpuRenderDevice {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&bloom_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&dummy_tex_view),
                 },
             ],
         });
@@ -2019,7 +2174,17 @@ impl WgpuRenderDevice {
             ssao_output_texture: None,
             ssao_output_view: None,
             ssao_uniform,
+            ssgi_cached_bg: None,
+            ssgi_output_texture: None,
+            ssgi_output_view: None,
+            ssgi_uniform,
+            ssgi_compute_pipeline,
+            ssgi_compute_bgl: Some(ssgi_compute_bgl),
             hdr_target: None,
+            hdr_normal_texture: None,
+            hdr_normal_view: None,
+            hdr_albedo_texture: None,
+            hdr_albedo_view: None,
             post_target_width: 0,
             post_target_height: 0,
             ibl_irradiance_compute,
@@ -2040,8 +2205,11 @@ impl WgpuRenderDevice {
             ),
             performance_metrics: RenderPerformanceMetrics {
                 render_scale: 1.0,
+                frame_generation_multiplier: 1,
                 ..RenderPerformanceMetrics::default()
             },
+            active_upscaler: engine_render::UpscalerKind::Native,
+            upscale_sharpness: 0.35,
         };
         renderer.upload_debug_meshes();
         renderer.bake_ibl();

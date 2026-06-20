@@ -1,5 +1,7 @@
 //! Runtime rendering performance policy and telemetry.
 
+use crate::{FrameGenerationKind, ThermalState, UpscalerKind};
+
 /// Presentation strategy for a native runtime surface.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PresentStrategy {
@@ -96,6 +98,20 @@ pub struct RenderPerformanceMetrics {
     pub internal_height: u32,
     /// Active internal linear resolution scale.
     pub render_scale: f32,
+    /// Active upscaler implementation.
+    pub upscaler: UpscalerKind,
+    /// Active frame generation implementation.
+    pub frame_generation: FrameGenerationKind,
+    /// Generated-frame multiplier; one means no generated frames.
+    pub frame_generation_multiplier: u8,
+    /// Latest GPU frame time when timestamp queries are available.
+    pub gpu_frame_ms: Option<f32>,
+    /// Estimated end-to-end input latency when available.
+    pub estimated_latency_ms: Option<f32>,
+    /// Current thermal condition.
+    pub thermal_state: ThermalState,
+    /// Number of dropped presentation frames observed by the backend.
+    pub dropped_frames: u64,
 }
 
 /// Stateful controller for dynamic internal resolution.

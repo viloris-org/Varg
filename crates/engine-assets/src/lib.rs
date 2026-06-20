@@ -165,6 +165,8 @@ pub enum ResourceKind {
     Animation,
     /// Script source for runtime engines (e.g., .rhai).
     Script,
+    /// Reusable scene object subset.
+    Prefab,
     /// Scene definition data.
     Scene,
 }
@@ -2006,6 +2008,8 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         "json" => {
             if path.to_string_lossy().contains("material") {
                 Some((ResourceKind::Material, "material-json"))
+            } else if path.to_string_lossy().contains("prefab") {
+                Some((ResourceKind::Prefab, "prefab-json"))
             } else {
                 infer_scene_json(path)
             }
@@ -2124,7 +2128,14 @@ pub fn scan_project_assets(
                 continue;
             }
             let relative = path.strip_prefix(asset_root).unwrap_or(&path).to_path_buf();
-            let Some((kind, importer)) = infer_importer(&relative) else {
+            let detected = infer_importer(&relative).or_else(|| {
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    infer_scene_json(&path)
+                } else {
+                    None
+                }
+            });
+            let Some((kind, importer)) = detected else {
                 report.ignored.push(relative);
                 continue;
             };
@@ -2462,6 +2473,7 @@ fn import_cpu_payload(
         ResourceKind::Audio
         | ResourceKind::Animation
         | ResourceKind::Script
+        | ResourceKind::Prefab
         | ResourceKind::Scene => ImportedCpuPayload {
             bytes: Arc::from(bytes),
             summary: format!("{} bytes imported by {}", bytes.len(), importer),

@@ -25,6 +25,8 @@ pub enum GameCommand {
     Restart(GameRuntimeSnapshot),
     /// Show the existing game window.
     Show,
+    /// Applies player-facing render settings immediately.
+    SetRenderScaling(engine_render::RenderScalingSettings),
     /// Shut down the game window.
     Shutdown,
 }
@@ -94,6 +96,16 @@ impl GameWindowHandle {
     pub fn show(&self) -> Result<(), String> {
         self.cmd_tx
             .send(GameCommand::Show)
+            .map_err(|_| "game window thread is not running".to_owned())
+    }
+
+    /// Applies render quality settings to the running game.
+    pub fn set_render_scaling(
+        &self,
+        settings: engine_render::RenderScalingSettings,
+    ) -> Result<(), String> {
+        self.cmd_tx
+            .send(GameCommand::SetRenderScaling(settings))
             .map_err(|_| "game window thread is not running".to_owned())
     }
 
@@ -235,7 +247,7 @@ impl ApplicationHandler for GameApp {
         }
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if !matches!(&event, WindowEvent::CloseRequested) {
             if let Some(runtime) = self.runtime.as_mut() {
                 runtime.process_winit_event(&event);
@@ -244,10 +256,8 @@ impl ApplicationHandler for GameApp {
         match event {
             WindowEvent::CloseRequested => {
                 self.visible = false;
-                if let Some(window) = self.window.as_ref() {
-                    window.set_visible(false);
-                }
                 let _ = self.event_tx.send(GameEvent::Closed);
+                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 self.width = size.width.max(1);
@@ -279,6 +289,12 @@ impl ApplicationHandler for GameApp {
                         window.set_visible(true);
                         window.focus_window();
                         window.request_redraw();
+                    }
+                }
+                GameCommand::SetRenderScaling(settings) => {
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime
+                            .set_render_scaling(settings, runtime_min::runtime_scaling_context());
                     }
                 }
                 GameCommand::Shutdown => {
@@ -320,9 +336,13 @@ impl GameApp {
             engine_render::RenderPerformanceConfig::competitive_120hz(),
         )
         .map_err(|error| format!("wgpu device: {error}"))?;
-        let runtime = snapshot
+        let mut runtime = snapshot
             .into_runtime(renderer)
             .map_err(|error| format!("runtime: {error}"))?;
+        runtime.set_render_scaling(
+            runtime_min::runtime_scaling_settings_from_env(),
+            runtime_min::runtime_scaling_context(),
+        );
         self.runtime = Some(runtime);
         self.last_frame = Instant::now();
         Ok(())

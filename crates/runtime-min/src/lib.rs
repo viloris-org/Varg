@@ -28,19 +28,22 @@ use engine_audio::{
     MemoryAudioBackend, OutputMode, SourceHandle, SpatialMode, VirtualizationPolicy, VoiceCategory,
 };
 use engine_core::{logging, EngineConfig, EngineError, EngineResult, FrameCounter, TimeState};
+#[cfg(feature = "audio")]
+use engine_ecs::AudioSourceComponentData;
 #[cfg(feature = "script-python")]
 use engine_ecs::ScriptComponentProxy;
-use engine_ecs::{AudioSourceComponentData, ComponentData, ProjectManifest, Scene};
+use engine_ecs::{BuildConfiguration, ComponentData, ProjectManifest, Scene};
 #[cfg(feature = "physics")]
 use engine_physics::{
     BodyHandle, BodyKind, CharacterControllerDesc, ColliderDesc, ColliderShape, ColliderShapeRef,
     PhysicsWorld, QueryFilter, RapierPhysicsBackend, RigidbodyDesc,
 };
-use engine_platform::{ActionMap, InputState};
+use engine_platform::{ActionMap, GamepadProvider, InputState};
 use engine_render::{
-    HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage, PresentStrategy,
-    RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder, RenderPerformanceConfig,
-    RenderWorld,
+    BatteryPolicy, HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage,
+    PresentStrategy, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder,
+    RenderPerformanceConfig, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
+    RenderScalingSettings, RenderWorld, ThermalState, UpscalerKind,
 };
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
@@ -78,11 +81,18 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     pub time: TimeState,
     /// Latest runtime counters for diagnostics UI and smoke tests.
     pub stats: RuntimeStats,
+    /// Current player-facing render scaling settings.
+    pub render_scaling_settings: RenderScalingSettings,
+    /// Last successfully negotiated render scaling selection.
+    pub render_scaling_selection: Option<engine_render::RenderScalingSelection>,
     /// Diagnostics emitted by runtime subsystems.
     pub diagnostics: Vec<RuntimeDiagnostic>,
     #[cfg(feature = "physics")]
     /// Physics world used by runtime-game.
     pub physics: PhysicsWorld,
+    #[cfg(feature = "runtime-game")]
+    /// Platform gamepad backend used by runtime-game.
+    pub gamepad_provider: Box<dyn GamepadProvider>,
     #[cfg(feature = "audio")]
     /// Audio context used by runtime-game.
     pub audio: AudioContext,
@@ -142,6 +152,16 @@ pub struct RuntimeStats {
     pub internal_render_size: (u32, u32),
     /// Active internal linear rendering scale.
     pub render_scale: f32,
+    /// Active upscaler implementation.
+    pub upscaler: engine_render::UpscalerKind,
+    /// Active frame generation implementation.
+    pub frame_generation: engine_render::FrameGenerationKind,
+    /// Latest GPU frame time, when supported.
+    pub gpu_frame_ms: Option<f32>,
+    /// Estimated input latency, when supported.
+    pub estimated_latency_ms: Option<f32>,
+    /// Dropped presentation frame count.
+    pub dropped_frames: u64,
     /// Number of logical audio sources.
     pub audio_sources: u32,
     /// Number of physical voices rendered in the latest audio block.
@@ -262,9 +282,15 @@ impl<R: RenderDevice> RuntimeServices<R> {
             paused: false,
             time: TimeState::new(),
             stats: RuntimeStats::default(),
+            render_scaling_settings: RenderScalingSettings::default(),
+            render_scaling_selection: None,
             diagnostics: Vec::new(),
             #[cfg(feature = "physics")]
             physics: PhysicsWorld::new(RapierPhysicsBackend::new()),
+            #[cfg(feature = "runtime-game")]
+            gamepad_provider: engine_platform::GilrsGamepadProvider::new()
+                .map(|provider| Box::new(provider) as Box<dyn GamepadProvider>)
+                .unwrap_or_else(|_| Box::new(engine_platform::NullGamepadProvider)),
             #[cfg(feature = "audio")]
             audio: AudioContext::new(MemoryAudioBackend::new()),
             project_root: None,
@@ -294,6 +320,27 @@ impl<R: RenderDevice> RuntimeServices<R> {
             #[cfg(feature = "physics")]
             physics_bindings: Vec::new(),
         }
+    }
+
+    /// Applies player-facing render settings immediately without recreating the renderer.
+    pub fn set_render_scaling(
+        &mut self,
+        settings: RenderScalingSettings,
+        context: RenderScalingContext,
+    ) -> engine_render::RenderScalingSelection {
+        let settings = settings.normalized();
+        let selection = self.renderer.configure_render_scaling(&settings, context);
+        self.render_scaling_settings = settings;
+        self.render_scaling_selection = Some(selection.clone());
+        self.stats.render_scale = selection.render_scale;
+        self.stats.upscaler = selection.upscaler;
+        self.stats.frame_generation = selection.frame_generation;
+        selection
+    }
+
+    /// Returns the renderer's currently available scaling capabilities.
+    pub fn render_scaling_capabilities(&self) -> engine_render::RenderScalingCapabilities {
+        self.renderer.render_scaling_capabilities()
     }
 
     #[cfg(all(feature = "audio", feature = "runtime-game"))]
@@ -343,6 +390,11 @@ impl<R: RenderDevice> RuntimeServices<R> {
         // ── begin_frame ────────────────────────────────────────────────
         logging::log_frame(self.frame_counter.get());
         self.input.end_frame();
+        #[cfg(feature = "runtime-game")]
+        {
+            let gamepads = self.gamepad_provider.poll_gamepads();
+            self.input.apply_gamepad_states(gamepads);
+        }
         self.time.update(dt);
         self.stats.frame_time_seconds = self.time.delta_seconds;
         self.stats.physics_steps = 0;
@@ -442,6 +494,11 @@ impl<R: RenderDevice> RuntimeServices<R> {
             render_metrics.internal_height,
         );
         self.stats.render_scale = render_metrics.render_scale;
+        self.stats.upscaler = render_metrics.upscaler;
+        self.stats.frame_generation = render_metrics.frame_generation;
+        self.stats.gpu_frame_ms = render_metrics.gpu_frame_ms;
+        self.stats.estimated_latency_ms = render_metrics.estimated_latency_ms;
+        self.stats.dropped_frames = render_metrics.dropped_frames;
         self.frame_counter.advance();
         Ok(())
     }
@@ -454,6 +511,9 @@ impl<R: RenderDevice> RuntimeServices<R> {
         mesh_resources: &HashMap<engine_core::AssetId, ModelResource>,
     ) {
         for obj in &mut world.objects {
+            if !obj.material.is_empty() && obj.material != "debug/default" {
+                continue;
+            }
             let Some(model_guid) = parse_asset_guid(&obj.mesh) else {
                 continue;
             };
@@ -889,6 +949,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             ResourceKind::Shader
             | ResourceKind::Animation
             | ResourceKind::Script
+            | ResourceKind::Prefab
             | ResourceKind::Scene => {}
         }
         Ok(())
@@ -1855,6 +1916,8 @@ pub struct RuntimeProject {
     pub root: PathBuf,
     /// Parsed project manifest.
     pub manifest: ProjectManifest,
+    /// Parsed build configuration.
+    pub build: BuildConfiguration,
     /// Default scene loaded from the manifest.
     pub scene: Scene,
 }
@@ -1890,9 +1953,24 @@ pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimePr
         source,
     })?;
     let scene = Scene::from_json(&scene_text)?;
+    let build_path = root.join(&manifest.build_config);
+    let build_text = fs::read_to_string(&build_path).map_err(|source| EngineError::Filesystem {
+        path: build_path.clone(),
+        source,
+    })?;
+    let build = toml::from_str::<BuildConfiguration>(&build_text).map_err(|error| {
+        EngineError::config(format!("build configuration parse failed: {error}"))
+    })?;
+    if let Some(diagnostic) = build.diagnostics().into_iter().next() {
+        return Err(EngineError::config(format!(
+            "{}: {}",
+            diagnostic.path, diagnostic.message
+        )));
+    }
     Ok(RuntimeProject {
         root,
         manifest,
+        build,
         scene,
     })
 }
@@ -1934,6 +2012,135 @@ pub fn runtime_performance_config_from_env() -> RenderPerformanceConfig {
     config
 }
 
+/// Builds render scaling settings from environment overrides.
+///
+/// Supported variables are `ASTER_UPSCALER`, `ASTER_RENDER_QUALITY`,
+/// `ASTER_RENDER_SCALE_MIN`, `ASTER_RENDER_SCALE_MAX`, `ASTER_UPSCALE_SHARPNESS`,
+/// `ASTER_TARGET_FPS`, `ASTER_DYNAMIC_RESOLUTION`, and `ASTER_BATTERY_POLICY`.
+pub fn runtime_scaling_settings_from_env() -> RenderScalingSettings {
+    apply_runtime_scaling_env(RenderScalingSettings::default())
+}
+
+/// Converts persisted build settings to the engine render scaling model.
+pub fn render_scaling_settings_from_build(build: &BuildConfiguration) -> RenderScalingSettings {
+    let render = &build.render;
+    let settings = RenderScalingSettings {
+        quality: parse_render_quality(&render.quality),
+        preferred_upscaler: Some(parse_upscaler(&render.upscaler)),
+        dynamic_resolution: render.dynamic_resolution,
+        min_render_scale: f32::from(render.min_render_scale_percent) / 100.0,
+        max_render_scale: f32::from(render.max_render_scale_percent) / 100.0,
+        sharpness: f32::from(render.sharpness_percent) / 100.0,
+        target_fps: render.target_fps,
+        battery_policy: parse_battery_policy(&render.battery_policy),
+        ..RenderScalingSettings::default()
+    };
+    apply_runtime_scaling_env(settings)
+}
+
+fn apply_runtime_scaling_env(mut settings: RenderScalingSettings) -> RenderScalingSettings {
+    if let Ok(value) = std::env::var("ASTER_UPSCALER") {
+        settings.preferred_upscaler = Some(parse_upscaler(&value));
+    }
+    if let Ok(value) = std::env::var("ASTER_RENDER_QUALITY") {
+        settings.quality = parse_render_quality(&value);
+    }
+    if let Ok(value) = std::env::var("ASTER_RENDER_SCALE_MIN") {
+        if let Ok(scale) = value.parse::<f32>() {
+            settings.min_render_scale = scale;
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_RENDER_SCALE_MAX") {
+        if let Ok(scale) = value.parse::<f32>() {
+            settings.max_render_scale = scale;
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_UPSCALE_SHARPNESS") {
+        if let Ok(sharpness) = value.parse::<f32>() {
+            settings.sharpness = sharpness;
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_TARGET_FPS") {
+        if let Ok(target_fps) = value.parse::<u32>() {
+            settings.target_fps = target_fps;
+        }
+    }
+    if let Ok(value) = std::env::var("ASTER_DYNAMIC_RESOLUTION") {
+        settings.dynamic_resolution = matches!(value.as_str(), "1" | "true" | "on");
+    }
+    if let Ok(value) = std::env::var("ASTER_BATTERY_POLICY") {
+        settings.battery_policy = parse_battery_policy(&value);
+    }
+    settings.normalized()
+}
+
+fn parse_upscaler(value: &str) -> UpscalerKind {
+    match value.to_ascii_lowercase().as_str() {
+        "native" | "off" => UpscalerKind::Native,
+        "temporal" => UpscalerKind::BuiltInTemporal,
+        "fsr" => UpscalerKind::Fsr,
+        "dlss" => UpscalerKind::Dlss,
+        "xess" => UpscalerKind::Xess,
+        "metalfx" => UpscalerKind::MetalFx,
+        "gsr" | "snapdragon-gsr" => UpscalerKind::SnapdragonGsr,
+        "directsr" => UpscalerKind::DirectSr,
+        "streamline" => UpscalerKind::Streamline,
+        _ => UpscalerKind::BuiltInSpatial,
+    }
+}
+
+fn parse_render_quality(value: &str) -> RenderQualityMode {
+    match value.to_ascii_lowercase().as_str() {
+        "native" => RenderQualityMode::Native,
+        "ultra-quality" => RenderQualityMode::UltraQuality,
+        "quality" => RenderQualityMode::Quality,
+        "performance" => RenderQualityMode::Performance,
+        "ultra-performance" => RenderQualityMode::UltraPerformance,
+        "auto" => RenderQualityMode::Auto,
+        _ => RenderQualityMode::Balanced,
+    }
+}
+
+fn parse_battery_policy(value: &str) -> BatteryPolicy {
+    match value.to_ascii_lowercase().as_str() {
+        "quality" => BatteryPolicy::Quality,
+        "saver" => BatteryPolicy::Saver,
+        _ => BatteryPolicy::Balanced,
+    }
+}
+
+/// Detects broad runtime conditions used by automatic scaling policy.
+pub fn runtime_scaling_context() -> RenderScalingContext {
+    let platform = if cfg!(target_os = "android") {
+        RenderPlatformClass::Android
+    } else if cfg!(any(
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos"
+    )) {
+        RenderPlatformClass::AppleMobile
+    } else {
+        RenderPlatformClass::Desktop
+    };
+    let thermal_state = match std::env::var("ASTER_THERMAL_STATE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "warm" => ThermalState::Warm,
+        "throttling" => ThermalState::Throttling,
+        "critical" => ThermalState::Critical,
+        _ => ThermalState::Nominal,
+    };
+    let battery_saver = std::env::var("ASTER_BATTERY_SAVER")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
+    RenderScalingContext {
+        platform,
+        thermal_state,
+        battery_saver,
+    }
+}
+
 /// Parses an asset GUID from a mesh/material name string formatted as
 /// `"asset:{:032x}"` or `"asset:{:032x}:N"` (multi-mesh model suffix).
 fn parse_asset_guid(name: &str) -> Option<engine_core::AssetId> {
@@ -1944,12 +2151,18 @@ fn parse_asset_guid(name: &str) -> Option<engine_core::AssetId> {
 
 /// Builds the default forward render graph used by the minimal runtime.
 pub fn build_default_render_graph() -> RenderGraph {
+    use engine_render::RenderStage;
+
     let mut builder = RenderGraphBuilder::new();
     let shadow = builder.add_pass("shadow");
     let forward = builder.add_pass("forward");
-    let post = builder.add_pass("post");
+    let upscale = builder.add_pass_at_stage("upscale", RenderStage::Upscale);
+    let post = builder.add_pass_at_stage("post", RenderStage::PostUpscale);
+    let ui = builder.add_pass_at_stage("ui", RenderStage::UiComposition);
     builder.order_before(shadow, forward);
-    builder.order_before(forward, post);
+    builder.order_before(forward, upscale);
+    builder.order_before(upscale, post);
+    builder.order_before(post, ui);
     builder.build()
 }
 
@@ -2203,7 +2416,9 @@ fn create_game_services(
     let mut renderer =
         WgpuRenderDevice::new_surface(surface, size.width.max(1), size.height.max(1))?;
     renderer.configure_performance(runtime_performance_config_from_env());
+    let scaling_settings = render_scaling_settings_from_build(&project.build);
     let mut services = RuntimeServices::with_renderer(config, renderer);
+    services.set_render_scaling(scaling_settings, runtime_scaling_context());
     #[cfg(feature = "audio")]
     services.enable_default_audio_output();
     services.set_project_root(project.root.clone());
@@ -2329,12 +2544,64 @@ mod tests {
     }
 
     #[test]
-    fn default_render_graph_has_three_passes() {
+    fn model_material_resolution_keeps_explicit_materials() {
+        let model_guid = engine_core::AssetId::from_u128(0x1234);
+        let explicit_guid = engine_core::AssetId::from_u128(0x5678);
+        let mut mesh_resources = HashMap::new();
+        mesh_resources.insert(
+            model_guid,
+            ModelResource {
+                materials: vec![engine_assets::CpuMaterialResource::default()],
+                ..ModelResource::default()
+            },
+        );
+        let model_mesh = format!("asset:{:032x}", model_guid.as_u128());
+        let mut world = RenderWorld {
+            objects: vec![
+                engine_render::RenderObject {
+                    object: engine_core::EntityId::from_u128(1),
+                    transform: engine_core::math::Transform::IDENTITY,
+                    mesh: model_mesh.clone(),
+                    material: format!("asset:{:032x}", explicit_guid.as_u128()),
+                    casts_shadows: true,
+                    receive_shadows: true,
+                },
+                engine_render::RenderObject {
+                    object: engine_core::EntityId::from_u128(2),
+                    transform: engine_core::math::Transform::IDENTITY,
+                    mesh: model_mesh,
+                    material: "debug/default".to_string(),
+                    casts_shadows: true,
+                    receive_shadows: true,
+                },
+            ],
+            ..RenderWorld::default()
+        };
+
+        RuntimeServices::<HeadlessRenderDevice>::resolve_render_materials(
+            &mut world,
+            &mesh_resources,
+        );
+
+        assert_eq!(
+            world.objects[0].material,
+            format!("asset:{:032x}", explicit_guid.as_u128())
+        );
+        assert_eq!(
+            world.objects[1].material,
+            format!("material:{:032x}:0", model_guid.as_u128())
+        );
+    }
+
+    #[test]
+    fn default_render_graph_has_expected_passes() {
         let graph = build_default_render_graph();
-        assert_eq!(graph.pass_count(), 3);
+        assert_eq!(graph.pass_count(), 5);
         assert_eq!(graph.passes[0].name, "shadow");
         assert_eq!(graph.passes[1].name, "forward");
-        assert_eq!(graph.passes[2].name, "post");
+        assert_eq!(graph.passes[2].name, "upscale");
+        assert_eq!(graph.passes[3].name, "post");
+        assert_eq!(graph.passes[4].name, "ui");
     }
 
     #[test]
@@ -2723,6 +2990,45 @@ mod tests {
                 .axis_value(&services.input, "MoveLeft", "MoveRight"),
             0.0
         );
+    }
+
+    #[cfg(feature = "runtime-game")]
+    #[derive(Debug)]
+    struct FixedGamepadProvider {
+        states: Vec<engine_platform::GamepadState>,
+    }
+
+    #[cfg(feature = "runtime-game")]
+    impl engine_platform::GamepadProvider for FixedGamepadProvider {
+        fn poll_gamepads(&mut self) -> Vec<engine_platform::GamepadState> {
+            self.states.clone()
+        }
+
+        fn gamepad_count(&self) -> usize {
+            self.states.len()
+        }
+    }
+
+    #[cfg(feature = "runtime-game")]
+    #[test]
+    fn runtime_game_frame_polls_gamepads() {
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        let mut gamepad = engine_platform::GamepadState::connected(0, "Xbox Wireless Controller");
+        gamepad.press_button(engine_platform::GamepadButton::A);
+        gamepad.left_stick_x = 0.75;
+        services.gamepad_provider = Box::new(FixedGamepadProvider {
+            states: vec![gamepad],
+        });
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services
+            .input
+            .gamepad_button_down(engine_platform::GamepadButton::A));
+        assert_eq!(services.input.gamepad_states().len(), 1);
+        assert_eq!(services.input.gamepad_states()[0].left_stick_x, 0.75);
     }
 
     #[test]

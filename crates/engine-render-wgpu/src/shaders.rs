@@ -57,13 +57,15 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) offset: vec3<f32>,
-    @location(4) scale: vec3<f32>,
-    @location(5) color: vec4<f32>,
-    @location(6) rotation: vec4<f32>,
-    @location(7) metallic: f32,
-    @location(8) roughness: f32,
-    @location(9) emissive: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
+    @location(4) offset: vec3<f32>,
+    @location(5) scale: vec3<f32>,
+    @location(6) color: vec4<f32>,
+    @location(7) rotation: vec4<f32>,
+    @location(8) metallic: f32,
+    @location(9) roughness: f32,
+    @location(10) emissive: vec3<f32>,
+    @location(11) receive_shadows: f32,
 };
 
 struct VsOut {
@@ -77,6 +79,13 @@ struct VsOut {
     @location(6) emissive: vec3<f32>,
     @location(7) world_tangent: vec3<f32>,
     @location(8) world_bitangent: vec3<f32>,
+    @location(9) receive_shadows: f32,
+};
+
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal_roughness: vec4<f32>,
+    @location(2) albedo_metallic: vec4<f32>,
 };
 
 const PI: f32 = 3.14159265359;
@@ -232,23 +241,23 @@ fn vs_main(input: VsIn) -> VsOut {
     let world_pos = rotated_position + input.offset;
     out.position = camera.view_projection * vec4<f32>(world_pos, 1.0);
 
-    let rotated_normal = input.normal
-        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, input.normal)
-        + input.rotation.w * input.normal);
+    let scaled_normal = input.normal / max(abs(input.scale), vec3<f32>(0.0001));
+    let rotated_normal = scaled_normal
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_normal)
+        + input.rotation.w * scaled_normal);
     let n = normalize(rotated_normal);
 
-    // Compute tangent and bitangent from UV derivatives (flat plane approximation)
-    // For general meshes, tangents should come from vertex data; this is a fallback.
-    var t = vec3<f32>(1.0, 0.0, 0.0);
-    if (abs(dot(n, t)) > 0.99) {
-        t = vec3<f32>(0.0, 1.0, 0.0);
-    }
-    let b = normalize(cross(n, t));
-    let tt = normalize(cross(b, n));
+    let scaled_tangent = input.tangent.xyz / max(abs(input.scale), vec3<f32>(0.0001));
+    let rotated_tangent = scaled_tangent
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_tangent)
+        + input.rotation.w * scaled_tangent);
+    let tt = normalize(rotated_tangent - n * dot(n, rotated_tangent));
+    let b = normalize(cross(n, tt) * input.tangent.w);
 
     out.world_normal = n;
     out.world_tangent = tt;
     out.world_bitangent = b;
+    out.receive_shadows = input.receive_shadows;
     out.uv = input.uv;
     out.color = input.color;
     out.world_position = world_pos;
@@ -259,7 +268,7 @@ fn vs_main(input: VsIn) -> VsOut {
 }
 
 @fragment
-fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(input: VsOut) -> FsOut {
     // Sample material textures
     let tex_color = textureSample(base_color_tex, mat_sampler, input.uv);
     let normal_sample = textureSample(normal_tex, mat_sampler, input.uv).rgb;
@@ -294,7 +303,10 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
         dot(input.world_position - camera.camera_position.xyz, camera.camera_forward.xyz),
         0.0,
     );
-    let shadow_factor = sample_csm_shadow(input.world_position, view_depth);
+    var shadow_factor = 1.0;
+    if (input.receive_shadows > 0.5) {
+        shadow_factor = sample_csm_shadow(input.world_position, view_depth);
+    }
 
     for (var i: u32 = 0u; i < lighting.params.x; i = i + 1u) {
         let light = lighting.lights[i];
@@ -355,7 +367,11 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     color = apply_fog(color, input.world_position, camera.camera_position.xyz, dist);
 
     let alpha = input.color.a * tex_color.a;
-    return vec4<f32>(color, alpha);
+    var out: FsOut;
+    out.color = vec4<f32>(color, alpha);
+    out.normal_roughness = vec4<f32>(n * 0.5 + 0.5, roughness);
+    out.albedo_metallic = vec4<f32>(base_color, metallic);
+    return out;
 }
 "#;
 
@@ -411,13 +427,15 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) offset: vec3<f32>,
-    @location(4) scale: vec3<f32>,
-    @location(5) color: vec4<f32>,
-    @location(6) rotation: vec4<f32>,
-    @location(7) metallic: f32,
-    @location(8) roughness: f32,
-    @location(9) emissive: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
+    @location(4) offset: vec3<f32>,
+    @location(5) scale: vec3<f32>,
+    @location(6) color: vec4<f32>,
+    @location(7) rotation: vec4<f32>,
+    @location(8) metallic: f32,
+    @location(9) roughness: f32,
+    @location(10) emissive: vec3<f32>,
+    @location(11) receive_shadows: f32,
 };
 
 @vertex
@@ -808,16 +826,141 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-pub(crate) const POST_SHADER: &str = r#"
-struct PostProcessUniform {
+pub(crate) const SSGI_SHADER: &str = r#"
+struct SsgiUniform {
     width: f32,
     height: f32,
     inv_width: f32,
     inv_height: f32,
+    radius: f32,
+    intensity: f32,
+    thickness: f32,
+    sample_count: f32,
+    frame_index: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
+};
+
+@group(0) @binding(0) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var normal_tex: texture_2d<f32>;
+@group(0) @binding(3) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(4) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<uniform> ssgi: SsgiUniform;
+@group(0) @binding(6) var lin_sampler: sampler;
+
+fn hash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn decode_normal(encoded: vec3<f32>) -> vec3<f32> {
+    return normalize(encoded * 2.0 - 1.0);
+}
+
+fn tangent_basis(n: vec3<f32>) -> mat3x3<f32> {
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(n.y) > 0.95) {
+        up = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t = normalize(cross(up, n));
+    let b = cross(n, t);
+    return mat3x3<f32>(t, b, n);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = vec2<u32>(u32(ssgi.width), u32(ssgi.height));
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    let pixel = vec2<i32>(gid.xy);
+    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) * vec2<f32>(ssgi.inv_width, ssgi.inv_height);
+    let center_depth = textureLoad(depth_tex, pixel, 0);
+    if (center_depth >= 0.9999) {
+        textureStore(output_tex, pixel, vec4<f32>(0.0));
+        return;
+    }
+
+    let normal_sample = textureLoad(normal_tex, pixel, 0);
+    let n = decode_normal(normal_sample.rgb);
+    let roughness = clamp(normal_sample.a, 0.05, 1.0);
+    let albedo = textureLoad(albedo_tex, pixel, 0).rgb;
+    let basis = tangent_basis(n);
+    var gi = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+    let samples = max(u32(ssgi.sample_count), 1u);
+
+    for (var i = 0u; i < samples; i = i + 1u) {
+        let fi = f32(i);
+        let r0 = hash12(vec2<f32>(f32(gid.x) + fi * 13.7, f32(gid.y) + ssgi.frame_index));
+        let r1 = hash12(vec2<f32>(f32(gid.y) + fi * 5.1, f32(gid.x) + ssgi.frame_index * 0.37));
+        let phi = 6.28318530718 * (fi + r0) / f32(samples);
+        let cos_theta = sqrt(1.0 - r1);
+        let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+        let hemi = vec3<f32>(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
+        let ray = normalize(basis * hemi);
+        let screen_dir = normalize(ray.xy + vec2<f32>(0.0001));
+        let radius_px = ssgi.radius * mix(18.0, 95.0, 1.0 - center_depth);
+        var hit_color = vec3<f32>(0.0);
+        var hit_weight = 0.0;
+
+        for (var step = 1u; step <= 12u; step = step + 1u) {
+            let t = f32(step) / 12.0;
+            let sample_uv = uv + screen_dir * radius_px * t * vec2<f32>(ssgi.inv_width, ssgi.inv_height);
+            if (sample_uv.x <= 0.0 || sample_uv.x >= 1.0 || sample_uv.y <= 0.0 || sample_uv.y >= 1.0) {
+                break;
+            }
+            let sample_pixel = vec2<i32>(
+                clamp(i32(sample_uv.x * ssgi.width), 0, i32(ssgi.width) - 1),
+                clamp(i32(sample_uv.y * ssgi.height), 0, i32(ssgi.height) - 1),
+            );
+            let sample_depth = textureLoad(depth_tex, sample_pixel, 0);
+            let expected_depth = center_depth - ray.z * 0.015 * t;
+            let depth_delta = abs(sample_depth - expected_depth);
+            if (sample_depth < 0.9999 && depth_delta < ssgi.thickness + t * 0.02) {
+                let sample_normal = decode_normal(textureSampleLevel(normal_tex, lin_sampler, sample_uv, 0.0).rgb);
+                let sample_albedo = textureSampleLevel(albedo_tex, lin_sampler, sample_uv, 0.0).rgb;
+                let sample_radiance = textureSampleLevel(hdr_tex, lin_sampler, sample_uv, 0.0).rgb;
+                let facing = max(dot(n, ray), 0.0) * max(dot(sample_normal, -ray), 0.0);
+                let attenuation = (1.0 - t) * (1.0 - t);
+                hit_color = sample_radiance * sample_albedo * facing * attenuation;
+                hit_weight = facing * attenuation;
+                break;
+            }
+        }
+
+        gi += hit_color;
+        weight_sum += hit_weight;
+    }
+
+    let diffuse_gi = gi / max(weight_sum, 0.001);
+    let color = diffuse_gi * albedo * ssgi.intensity * roughness * roughness;
+    textureStore(output_tex, pixel, vec4<f32>(color, 1.0));
+}
+"#;
+
+pub(crate) const POST_SHADER: &str = r#"
+struct PostProcessUniform {
+    render_width: f32,
+    render_height: f32,
+    inv_render_width: f32,
+    inv_render_height: f32,
+    output_width: f32,
+    output_height: f32,
+    inv_output_width: f32,
+    inv_output_height: f32,
     exposure: f32,
     bloom_intensity: f32,
     ssao_enabled: f32,
-    time: f32,
+    upscale_sharpness: f32,
+    ssgi_enabled: f32,
+    ssgi_intensity: f32,
+    pad0: f32,
+    pad1: f32,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -825,6 +968,7 @@ struct PostProcessUniform {
 @group(0) @binding(2) var ssao_tex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> post: PostProcessUniform;
 @group(0) @binding(4) var lin_sampler: sampler;
+@group(0) @binding(5) var ssgi_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -852,11 +996,66 @@ fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
     return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
 }
 
+fn cubic_weight(distance: f32) -> f32 {
+    let x = abs(distance);
+    if (x <= 1.0) {
+        return 1.5 * x * x * x - 2.5 * x * x + 1.0;
+    }
+    if (x < 2.0) {
+        return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
+    }
+    return 0.0;
+}
+
+fn load_hdr(pixel: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+    return textureLoad(hdr_tex, clamp(pixel, vec2<i32>(0), size - vec2<i32>(1)), 0).rgb;
+}
+
+fn reconstruct_hdr(uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<i32>(i32(post.render_width), i32(post.render_height));
+    let source = uv * vec2<f32>(post.render_width, post.render_height) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(source));
+    let fraction = fract(source);
+    var color = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var y = -1; y <= 2; y = y + 1) {
+        let wy = cubic_weight(f32(y) - fraction.y);
+        for (var x = -1; x <= 2; x = x + 1) {
+            let weight = cubic_weight(f32(x) - fraction.x) * wy;
+            color = color + load_hdr(base + vec2<i32>(x, y), size) * weight;
+            weight_sum = weight_sum + weight;
+        }
+    }
+    return color / max(weight_sum, 0.0001);
+}
+
+fn sharpen_hdr(center: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    if (post.upscale_sharpness <= 0.0) {
+        return center;
+    }
+    let texel = vec2<f32>(post.inv_render_width, post.inv_render_height);
+    let north = textureSampleLevel(hdr_tex, lin_sampler, uv - vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let south = textureSampleLevel(hdr_tex, lin_sampler, uv + vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let west = textureSampleLevel(hdr_tex, lin_sampler, uv - vec2<f32>(texel.x, 0.0), 0.0).rgb;
+    let east = textureSampleLevel(hdr_tex, lin_sampler, uv + vec2<f32>(texel.x, 0.0), 0.0).rgb;
+    let neighborhood_min = min(center, min(min(north, south), min(west, east)));
+    let neighborhood_max = max(center, max(max(north, south), max(west, east)));
+    let detail = center - (north + south + west + east) * 0.25;
+    return clamp(center + detail * post.upscale_sharpness, neighborhood_min, neighborhood_max);
+}
+
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-    let hdr = textureSample(hdr_tex, lin_sampler, input.uv).rgb;
+    let scaling = post.render_width != post.output_width || post.render_height != post.output_height;
+    var hdr = textureSample(hdr_tex, lin_sampler, input.uv).rgb;
+    if (scaling) {
+        hdr = sharpen_hdr(reconstruct_hdr(input.uv), input.uv);
+    }
     let bloom = textureSample(bloom_tex, lin_sampler, input.uv).rgb * post.bloom_intensity;
     var color = hdr + bloom;
+    if (post.ssgi_enabled > 0.5) {
+        color = color + textureSample(ssgi_tex, lin_sampler, input.uv).rgb * post.ssgi_intensity;
+    }
     color = color * post.exposure;
     if (post.ssao_enabled > 0.5) {
         let ao = textureSample(ssao_tex, lin_sampler, input.uv).r;

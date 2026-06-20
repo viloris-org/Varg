@@ -247,6 +247,7 @@ resource_model = "模型"
 resource_skinned_model = "蒙皮模型"
 resource_animation = "動畫"
 resource_script = "腳本"
+resource_prefab = "預製體"
 resource_scene = "場景"
 
 # Hub projects page

@@ -18,8 +18,7 @@ use crate::{
 /// Immutable decoded PCM clip consumed by the real-time renderer.
 #[derive(Clone, Debug)]
 pub struct PcmClip {
-    /// Interleaved floating-point samples.
-    pub samples: Vec<f32>,
+    samples: PcmStorage,
     /// Source channel count.
     pub channels: u16,
     /// Source sample rate.
@@ -32,7 +31,7 @@ impl PcmClip {
     /// Creates a validated PCM clip.
     pub fn new(samples: Arc<[f32]>, channels: u16, sample_rate: u32) -> Option<Self> {
         (channels > 0 && sample_rate > 0).then_some(Self {
-            samples: samples.to_vec(),
+            samples: PcmStorage::Shared(samples),
             channels,
             sample_rate,
             streaming: false,
@@ -43,7 +42,9 @@ impl PcmClip {
     /// Creates an initially empty streaming clip.
     pub fn streaming(channels: u16, sample_rate: u32) -> Option<Self> {
         (channels > 0 && sample_rate > 0).then_some(Self {
-            samples: Vec::with_capacity(sample_rate as usize * channels as usize * 2),
+            samples: PcmStorage::Mutable(Vec::with_capacity(
+                sample_rate as usize * channels as usize * 2,
+            )),
             channels,
             sample_rate,
             streaming: true,
@@ -53,6 +54,52 @@ impl PcmClip {
 
     fn frame_count(&self) -> usize {
         self.samples.len() / usize::from(self.channels)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PcmStorage {
+    Shared(Arc<[f32]>),
+    Mutable(Vec<f32>),
+}
+
+impl PcmStorage {
+    fn len(&self) -> usize {
+        match self {
+            Self::Shared(samples) => samples.len(),
+            Self::Mutable(samples) => samples.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<f32> {
+        match self {
+            Self::Shared(samples) => samples.get(index).copied(),
+            Self::Mutable(samples) => samples.get(index).copied(),
+        }
+    }
+
+    fn extend_from_slice(&mut self, samples: &[f32]) {
+        match self {
+            Self::Shared(existing) => {
+                let mut merged = Vec::with_capacity(existing.len() + samples.len());
+                merged.extend_from_slice(existing);
+                merged.extend_from_slice(samples);
+                *self = Self::Mutable(merged);
+            }
+            Self::Mutable(existing) => existing.extend_from_slice(samples),
+        }
+    }
+
+    fn drain_prefix(&mut self, samples: usize) {
+        match self {
+            Self::Shared(existing) => {
+                let retained = existing.get(samples..).unwrap_or_default().to_vec();
+                *self = Self::Mutable(retained);
+            }
+            Self::Mutable(existing) => {
+                existing.drain(..samples.min(existing.len()));
+            }
+        }
     }
 }
 
@@ -209,6 +256,8 @@ struct RenderVoice {
     fade_target: Option<f32>,
     fade_frames_remaining: u64,
     scheduled_start_frames: u64,
+    low_pass_left: f32,
+    low_pass_right: f32,
 }
 
 /// Device-independent real-time mixer.
@@ -321,6 +370,8 @@ impl AudioRenderer {
                         fade_target: None,
                         fade_frames_remaining: 0,
                         scheduled_start_frames: 0,
+                        low_pass_left: 0.0,
+                        low_pass_right: 0.0,
                     },
                 );
             }
@@ -619,6 +670,18 @@ impl AudioRenderer {
                 let next_frame = (source_frame + 1).min(clip.frame_count().saturating_sub(1));
                 let fraction = (voice.cursor_frames - source_frame as f64) as f32;
                 let (left, right) = sample_stereo(clip, source_frame, next_frame, fraction);
+                let (left, right) = if voice.desc.spatial_mode == SpatialMode::Direct {
+                    (left, right)
+                } else {
+                    low_pass_stereo(
+                        left,
+                        right,
+                        voice.smoothed_propagation.low_pass_hz,
+                        sample_rate,
+                        &mut voice.low_pass_left,
+                        &mut voice.low_pass_right,
+                    )
+                };
                 voice.smoothed_volume +=
                     (target_volume - voice.smoothed_volume) * smoothing.clamp(0.0, 1.0);
                 if is_physical {
@@ -752,7 +815,7 @@ impl AudioRenderer {
                 continue;
             }
             let drop_samples = drop_frames * usize::from(clip.channels);
-            clip.samples.drain(..drop_samples);
+            clip.samples.drain_prefix(drop_samples);
             for voice in self
                 .voices
                 .values_mut()
@@ -762,6 +825,29 @@ impl AudioRenderer {
             }
         }
     }
+}
+
+fn low_pass_stereo(
+    left: f32,
+    right: f32,
+    cutoff_hz: f32,
+    sample_rate: u32,
+    state_left: &mut f32,
+    state_right: &mut f32,
+) -> (f32, f32) {
+    let cutoff_hz = cutoff_hz.clamp(20.0, 20_000.0);
+    if cutoff_hz >= 19_999.0 || sample_rate == 0 {
+        *state_left = left;
+        *state_right = right;
+        return (left, right);
+    }
+
+    let rc = 1.0 / (std::f32::consts::TAU * cutoff_hz);
+    let dt = 1.0 / sample_rate as f32;
+    let alpha = (dt / (rc + dt)).clamp(0.0, 1.0);
+    *state_left += (left - *state_left) * alpha;
+    *state_right += (right - *state_right) * alpha;
+    (*state_left, *state_right)
 }
 
 fn sorted_handles(handles: &HashSet<SourceHandle>) -> Vec<u64> {
@@ -775,7 +861,6 @@ fn sample_stereo(clip: &PcmClip, frame: usize, next_frame: usize, fraction: f32)
     let sample = |frame: usize, channel: usize| {
         clip.samples
             .get(frame * channels + channel.min(channels.saturating_sub(1)))
-            .copied()
             .unwrap_or_default()
     };
     let interpolate = |channel: usize| {
@@ -1042,6 +1127,47 @@ mod tests {
     }
 
     #[test]
+    fn propagation_low_pass_smooths_fast_signal_changes() {
+        let mut renderer = AudioRenderer::new(AudioRendererConfig::default());
+        let samples = (0..4096)
+            .map(|index| if index % 2 == 0 { 1.0_f32 } else { -1.0_f32 })
+            .collect::<Vec<_>>();
+        renderer.apply(AudioCommand::LoadClip {
+            handle: ClipHandle(1),
+            clip: PcmClip::new(Arc::from(samples), 1, 48_000).unwrap(),
+        });
+        let mut desc = source(ClipHandle(1));
+        desc.spatial_mode = SpatialMode::Object;
+        desc.position = Some(Vec3::new(0.0, 0.0, -1.0));
+        renderer.apply(AudioCommand::SpawnSource {
+            handle: SourceHandle(1),
+            desc,
+        });
+        let mut clear = [0.0; 512];
+        renderer.render(&mut clear);
+
+        renderer.apply(AudioCommand::Seek {
+            handle: SourceHandle(1),
+            seconds: 0.0,
+        });
+        renderer.apply(AudioCommand::SetSourcePropagation {
+            handle: SourceHandle(1),
+            propagation: PropagationFrame {
+                direct_gain: 1.0,
+                low_pass_hz: 500.0,
+                reverb_send: 0.0,
+                delay_seconds: 0.0,
+            },
+        });
+        let mut filtered = [0.0; 4096];
+        renderer.render(&mut filtered);
+
+        let clear_jump = average_adjacent_jump(&clear[128..]);
+        let filtered_jump = average_adjacent_jump(&filtered[2048..]);
+        assert!(filtered_jump < clear_jump * 0.5);
+    }
+
+    #[test]
     fn debug_snapshot_reports_hrtf_fallback_sources() {
         let mut renderer = AudioRenderer::new(AudioRendererConfig {
             output_mode: OutputMode::Binaural,
@@ -1069,5 +1195,15 @@ mod tests {
         assert_eq!(snapshot.hrtf_sources.len(), 1);
         assert_eq!(snapshot.stereo_fallback_sources.len(), 1);
         assert_eq!(renderer.diagnostics().hrtf_fallback_objects, 1);
+    }
+
+    fn average_adjacent_jump(samples: &[f32]) -> f32 {
+        let mut total = 0.0_f32;
+        let mut count = 0_u32;
+        for pair in samples.windows(2) {
+            total += (pair[1] - pair[0]).abs();
+            count += 1;
+        }
+        total / count.max(1) as f32
     }
 }

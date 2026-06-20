@@ -2,11 +2,8 @@
 set -e
 cd "$(dirname "$0")/../editor"
 
-# Build frontend then Tauri app bundle
-echo "Building frontend..."
-bun run build
-
-echo "Building Tauri app..."
+# Tauri runs build.beforeBuildCommand, which builds the Vite frontend.
+echo "Building Aster Editor bundle..."
 bun run tauri build
 
 echo "Done: editor built to src-tauri/target/release/"

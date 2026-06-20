@@ -86,8 +86,8 @@ pub struct AcousticSolverConfig {
 impl Default for AcousticSolverConfig {
     fn default() -> Self {
         Self {
-            quality: AcousticQuality::Low,
-            max_blockers_per_source: 8,
+            quality: AcousticQuality::Medium,
+            max_blockers_per_source: 16,
         }
     }
 }
@@ -206,6 +206,37 @@ mod tests {
         let frame = frames[&SourceHandle(1)];
         assert!(frame.direct_gain < 1.0);
         assert!(frame.low_pass_hz < 20_000.0);
+    }
+
+    #[test]
+    fn default_quality_accumulates_multiple_blockers() {
+        let material = AcousticMaterial {
+            transmission: [0.5, 0.5, 0.5],
+            ..AcousticMaterial::default()
+        };
+        let snapshot = AcousticSceneSnapshot {
+            listener_position: Vec3::ZERO,
+            sources: vec![AcousticSourceSample {
+                handle: SourceHandle(1),
+                position: Vec3::new(0.0, 0.0, -10.0),
+            }],
+            blockers: vec![
+                AcousticAabb {
+                    min: Vec3::new(-1.0, -1.0, -7.0),
+                    max: Vec3::new(1.0, 1.0, -6.0),
+                    material,
+                    blocks_direct_path: true,
+                },
+                AcousticAabb {
+                    min: Vec3::new(-1.0, -1.0, -4.0),
+                    max: Vec3::new(1.0, 1.0, -3.0),
+                    material,
+                    blocks_direct_path: true,
+                },
+            ],
+        };
+        let frames = solve_direct_propagation(&snapshot, AcousticSolverConfig::default());
+        assert!(frames[&SourceHandle(1)].direct_gain < 0.3);
     }
 
     #[test]

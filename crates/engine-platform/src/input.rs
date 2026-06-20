@@ -119,23 +119,49 @@ pub struct InputState {
     mouse_delta: (f32, f32),
     wheel_delta: (f32, f32),
     actions: HashMap<String, ActionBinding>,
-    gamepad: Option<GamepadState>,
+    gamepads: Vec<GamepadState>,
 }
 
 impl InputState {
     /// Applies a gamepad state for this frame.
     pub fn apply_gamepad_state(&mut self, state: GamepadState) {
-        self.gamepad = Some(state);
+        self.apply_gamepad_states([state]);
     }
 
-    /// Returns the current gamepad state.
+    /// Applies all connected gamepad states for this frame.
+    pub fn apply_gamepad_states(&mut self, states: impl IntoIterator<Item = GamepadState>) {
+        self.gamepads = states.into_iter().collect();
+    }
+
+    /// Returns the primary gamepad state.
     pub fn gamepad_state(&self) -> Option<&GamepadState> {
-        self.gamepad.as_ref()
+        self.gamepads.first()
+    }
+
+    /// Returns all current gamepad states.
+    pub fn gamepad_states(&self) -> &[GamepadState] {
+        &self.gamepads
     }
 
     /// Returns whether a gamepad button is currently held.
     pub fn gamepad_button_down(&self, button: GamepadButton) -> bool {
-        self.gamepad.as_ref().is_some_and(|g| g.button_down(button))
+        self.gamepads
+            .iter()
+            .any(|gamepad| gamepad.button_down(button))
+    }
+
+    /// Returns whether a gamepad button was pressed this frame.
+    pub fn gamepad_button_pressed(&self, button: GamepadButton) -> bool {
+        self.gamepads
+            .iter()
+            .any(|gamepad| gamepad.button_pressed(button))
+    }
+
+    /// Returns whether a gamepad button was released this frame.
+    pub fn gamepad_button_released(&self, button: GamepadButton) -> bool {
+        self.gamepads
+            .iter()
+            .any(|gamepad| gamepad.button_released(button))
     }
 
     /// Returns all keys pressed this frame.
@@ -228,7 +254,7 @@ impl InputState {
         self.released_mouse_buttons.clear();
         self.mouse_delta = (0.0, 0.0);
         self.wheel_delta = (0.0, 0.0);
-        if let Some(gamepad) = self.gamepad.as_mut() {
+        for gamepad in &mut self.gamepads {
             gamepad.end_frame();
         }
     }

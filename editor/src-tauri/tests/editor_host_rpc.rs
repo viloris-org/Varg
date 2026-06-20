@@ -251,6 +251,113 @@ fn play_mode_starts_from_open_project_snapshot() {
 }
 
 #[test]
+fn project_creates_material_prefab_and_scene_assets() {
+    let mut host = create_host();
+    let tmp = create_project(&mut host);
+    let project_root = open_project(&mut host, &tmp);
+    let asset_root = std::path::Path::new(&project_root).join("assets");
+
+    let material = host
+        .handle(
+            "project/create_material",
+            &serde_json::json!({ "name": "new_material" }),
+        )
+        .expect("create material");
+    assert_eq!(material["path"], "materials/new_material.material.json");
+    let material_text =
+        std::fs::read_to_string(asset_root.join("materials/new_material.material.json")).unwrap();
+    engine_assets::MaterialFormat::from_json(&material_text).expect("material parses");
+
+    let prefab = host
+        .handle(
+            "project/create_prefab",
+            &serde_json::json!({ "name": "new_prefab" }),
+        )
+        .expect("create prefab");
+    assert_eq!(prefab["path"], "prefabs/new_prefab.prefab.json");
+    let prefab_text =
+        std::fs::read_to_string(asset_root.join("prefabs/new_prefab.prefab.json")).unwrap();
+    let parsed_prefab: engine_ecs::PrefabFile =
+        serde_json::from_str(&prefab_text).expect("prefab parses");
+    assert_eq!(parsed_prefab.name, "new_prefab");
+
+    let scene = host
+        .handle(
+            "project/create_scene",
+            &serde_json::json!({ "name": "new_scene" }),
+        )
+        .expect("create scene");
+    assert_eq!(scene["path"], "scenes/new_scene.scene.json");
+    let scene_text =
+        std::fs::read_to_string(asset_root.join("scenes/new_scene.scene.json")).unwrap();
+    engine_ecs::Scene::from_json(&scene_text).expect("scene parses");
+
+    let assets = host
+        .handle("project/list_assets", &serde_json::json!({}))
+        .expect("list assets");
+    let asset_rows = assets["assets"].as_array().unwrap();
+    assert!(asset_rows.iter().any(|asset| asset["source_path"]
+        == "materials/new_material.material.json"
+        && asset["kind"] == "Material"));
+    assert!(asset_rows.iter().any(|asset| asset["source_path"]
+        == "prefabs/new_prefab.prefab.json"
+        && asset["kind"] == "Prefab"));
+    assert!(asset_rows.iter().any(
+        |asset| asset["source_path"] == "scenes/new_scene.scene.json" && asset["kind"] == "Scene"
+    ));
+}
+
+#[test]
+fn project_lists_scene_references_for_script_assets() {
+    let mut host = create_host();
+    let tmp = create_project(&mut host);
+    open_project(&mut host, &tmp);
+
+    let script = host
+        .handle(
+            "project/create_script",
+            &serde_json::json!({ "name": "controller", "backend": "rhai" }),
+        )
+        .expect("create script");
+    let script_path = script["path"].as_str().unwrap();
+
+    let object = host
+        .handle(
+            "shell/create_object",
+            &serde_json::json!({ "name": "Scripted Object" }),
+        )
+        .expect("create object");
+    let object_id = object["id"].as_str().unwrap();
+    host.handle(
+        "shell/add_component",
+        &serde_json::json!({ "id": object_id, "component_type": "Script" }),
+    )
+    .expect("add script component");
+    host.handle(
+        "shell/update_component",
+        &serde_json::json!({
+            "id": object_id,
+            "component_type": "Script",
+            "data": { "script": script_path },
+        }),
+    )
+    .expect("set script component path");
+
+    let references = host
+        .handle(
+            "project/list_asset_references",
+            &serde_json::json!({ "path": script_path }),
+        )
+        .expect("list references");
+    let rows = references["references"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["kind"] == "scene"
+        && row["label"] == "Script component"
+        && row["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Scripted Object"))));
+}
+
+#[test]
 fn console_push_and_retrieve_entries() {
     let mut host = create_host();
 

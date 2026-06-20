@@ -77,6 +77,81 @@ impl WgpuRenderDevice {
         drop(cpass);
     }
 
+    pub(crate) fn ensure_ssgi_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
+        if self.ssgi_cached_bg.is_none() {
+            let bgl = self.ssgi_compute_bgl.as_ref().unwrap();
+            let hdr = self.hdr_target.as_ref().unwrap();
+            let depth_view = hdr.depth_view.as_ref().unwrap();
+            let bg = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aster ssgi compute bg"),
+                layout: bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&hdr.color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_normal_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_albedo_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.ssgi_output_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.ssgi_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom_sampler),
+                    },
+                ],
+            }));
+            self.ssgi_cached_bg = Some(Arc::clone(&bg));
+            bg
+        } else {
+            Arc::clone(self.ssgi_cached_bg.as_ref().unwrap())
+        }
+    }
+
+    pub(crate) fn encode_ssgi_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        res: &FrameResources,
+    ) {
+        let Some(ssgi_bg) = &res.ssgi_bg else { return };
+        let Some(_ssgi_view) = &res.ssgi_view else {
+            return;
+        };
+        let Some(pipeline) = self.ssgi_compute_pipeline.as_ref() else {
+            return;
+        };
+        let w = self.post_target_width.max(1);
+        let h = self.post_target_height.max(1);
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("aster ssgi compute"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(pipeline);
+        cpass.set_bind_group(0, &**ssgi_bg, &[]);
+        cpass.dispatch_workgroups((w + 7) / 8, (h + 7) / 8, 1);
+    }
+
     pub(crate) fn ensure_bloom_bind_groups(
         &mut self,
     ) -> (Vec<Arc<wgpu::BindGroup>>, Vec<Arc<wgpu::BindGroup>>) {
@@ -192,6 +267,11 @@ impl WgpuRenderDevice {
                 .map(|v| v as &wgpu::TextureView)
                 .unwrap_or(&self.ssao_noise_view);
             let bloom_view = &self.bloom_mip_views[0];
+            let ssgi_view = self
+                .ssgi_output_view
+                .as_ref()
+                .map(|v| v as &wgpu::TextureView)
+                .unwrap_or(&self.ssao_noise_view);
             let bg = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("aster post bind group frame"),
                 layout: &self.post_bind_group_layout,
@@ -215,6 +295,10 @@ impl WgpuRenderDevice {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::Sampler(&self.bloom_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(ssgi_view),
                     },
                 ],
             }));
@@ -298,6 +382,7 @@ impl WgpuRenderDevice {
         self.bloom_cached_down_bgs.clear();
         self.bloom_cached_up_bgs.clear();
         self.post_cached_bg = None;
+        self.ssgi_cached_bg = None;
     }
 
     pub(crate) fn ensure_ssao_output(&mut self) {
@@ -328,6 +413,38 @@ impl WgpuRenderDevice {
             self.ssao_output_texture = Some(tex);
             self.ssao_output_view = Some(view);
             self.ssao_cached_bg = None;
+            self.post_cached_bg = None;
+        }
+    }
+
+    pub(crate) fn ensure_ssgi_output(&mut self) {
+        let w = self.post_target_width.max(1);
+        let h = self.post_target_height.max(1);
+        let need_create = match &self.ssgi_output_texture {
+            None => true,
+            Some(t) => t.width() != w || t.height() != h,
+        };
+        if need_create {
+            self.ssgi_output_view = None;
+            self.ssgi_output_texture = None;
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("aster ssgi output"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.ssgi_output_texture = Some(tex);
+            self.ssgi_output_view = Some(view);
+            self.ssgi_cached_bg = None;
             self.post_cached_bg = None;
         }
     }

@@ -1,8 +1,5 @@
-use crate::{
-    batches::*, device::*, meshes::*, post::*, render::*, scene_uniforms::*, shaders::*,
-    uniforms::*,
-};
-use engine_render::{RenderLight, RenderLightKind, RenderObject, RenderWorld};
+use crate::{device::*, meshes::*, post::*, render::*, scene_uniforms::*, shaders::*, uniforms::*};
+use engine_render::{RenderLight, RenderLightKind, RenderWorld};
 
 #[test]
 fn bloom_mips_are_recreated_when_either_dimension_changes() {
@@ -85,6 +82,15 @@ fn compute_ibl_sampling_uses_explicit_lod_and_dynamic_mip_resolution() {
 fn post_shader_leaves_srgb_encoding_to_the_output_attachment() {
     assert!(!POST_SHADER.contains("gamma_correct"));
     assert!(!POST_SHADER.contains("1.0 / 2.2"));
+}
+
+#[test]
+fn post_shader_uses_cubic_reconstruction_and_bounded_sharpening() {
+    assert!(POST_SHADER.contains("fn reconstruct_hdr"));
+    assert!(POST_SHADER.contains("fn cubic_weight"));
+    assert!(POST_SHADER.contains("fn sharpen_hdr"));
+    assert!(POST_SHADER.contains("textureLoad(hdr_tex"));
+    assert!(POST_SHADER.contains("clamp(center + detail"));
 }
 
 #[test]
@@ -302,6 +308,7 @@ fn test_mesh_batches(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
             metallic,
             roughness,
             emissive,
+            receive_shadows: 1.0,
         });
     }
     if !world.sprites.is_empty() {
@@ -327,6 +334,7 @@ fn test_mesh_batches(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
                 metallic: 0.0,
                 roughness: 0.5,
                 emissive: [0.0; 3],
+                receive_shadows: 1.0,
             }
         });
         batches
@@ -352,6 +360,7 @@ fn test_mesh_batches(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
                     metallic: 0.0,
                     roughness: 0.5,
                     emissive: [0.0; 3],
+                    receive_shadows: 1.0,
                 }
             })
             .collect();
@@ -382,6 +391,8 @@ fn test_render_object(id: u128, mesh: &str) -> engine_render::RenderObject {
         transform: engine_core::math::Transform::IDENTITY,
         mesh: mesh.to_owned(),
         material: "debug/material".to_owned(),
+        casts_shadows: true,
+        receive_shadows: true,
     }
 }
 

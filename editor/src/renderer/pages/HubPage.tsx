@@ -3,7 +3,7 @@ import { rpc, selectProjectLocation } from '../api';
 import { useTranslation } from '../i18n';
 import {
   IconProjects, IconInstalls, IconSettings, IconFolder, IconPlus, IconTrash, IconPlay,
-  IconSun, IconMoon, IconMonitor, IconPackage, IconAlertTriangle, IconX, IconEmpty,
+  IconSun, IconMoon, IconMonitor, IconPackage, IconAlertTriangle, IconX, IconEmpty, IconSparkles,
   AsterLogo,
 } from '../icons';
 
@@ -39,6 +39,7 @@ interface Props {
   onSetTheme: (theme: string) => void;
   onSetLocale: (locale: string) => void;
   onRefresh: () => Promise<void>;
+  onOpenQuests: () => void;
 }
 
 // ─── Avatar helper ──────────────────────────────────────────────────────────
@@ -69,11 +70,13 @@ function Sidebar({
   theme,
   onNavigate,
   onSetTheme,
+  onOpenQuests,
 }: {
   page: string;
   theme: string;
   onNavigate: (p: string) => void;
   onSetTheme: (t: string) => void;
+  onOpenQuests: () => void;
 }) {
   const { t } = useTranslation();
   const navItems = [
@@ -101,6 +104,10 @@ function Sidebar({
 
       {/* Navigation */}
       <nav className="hub-nav">
+        <button className="hub-nav-item" onClick={onOpenQuests}>
+          <IconSparkles />
+          Quests
+        </button>
         {navItems.map(item => (
           <button
             key={item.id}
@@ -997,7 +1004,7 @@ function SettingsPage({
 
 // ─── HubPage (Root) ─────────────────────────────────────────────────────────
 
-export default function HubPage({ state, onOpenProject, onNavigate, onSetTheme, onSetLocale, onRefresh }: Props) {
+export default function HubPage({ state, onOpenProject, onNavigate, onSetTheme, onSetLocale, onRefresh, onOpenQuests }: Props) {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -1075,6 +1082,7 @@ export default function HubPage({ state, onOpenProject, onNavigate, onSetTheme, 
         theme={state.theme}
         onNavigate={onNavigate}
         onSetTheme={onSetTheme}
+        onOpenQuests={onOpenQuests}
       />
 
       <main className="hub-main">

@@ -1,4 +1,5 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useMemo } from 'react';
+import { cameraBasisVectors, vec3Dot, type Vec3 } from './gizmoMath';
 
 // ─── Viewport Grid Overlay ─────────────────────────────────────────────────
 // A simple reference grid that renders as a CSS pattern on the viewport.
@@ -18,10 +19,33 @@ export function ViewportGrid({ show = true }: ViewportGridProps) {
 // Click on an axis label to snap the view to that axis.
 
 interface OrientationGizmoProps {
+  camera?: {
+    yaw: number;
+    pitch: number;
+  };
   onSnapToAxis?: (axis: 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom') => void;
 }
 
-export function OrientationGizmo({ onSnapToAxis }: OrientationGizmoProps) {
+type AxisName = 'x' | 'y' | 'z' | '-x' | '-y' | '-z';
+
+interface GizmoAxis {
+  name: AxisName;
+  label: string;
+  color: string;
+  end: { x: number; y: number };
+  depth: number;
+}
+
+const AXIS_DEFS: Array<{ name: AxisName; label: string; color: string; dir: Vec3 }> = [
+  { name: 'x', label: 'X', color: '#FF4444', dir: [1, 0, 0] },
+  { name: '-x', label: '-X', color: '#B91C1C', dir: [-1, 0, 0] },
+  { name: 'y', label: 'Y', color: '#44CC44', dir: [0, 1, 0] },
+  { name: '-y', label: '-Y', color: '#15803D', dir: [0, -1, 0] },
+  { name: 'z', label: 'Z', color: '#4488FF', dir: [0, 0, 1] },
+  { name: '-z', label: '-Z', color: '#1D4ED8', dir: [0, 0, -1] },
+];
+
+export function OrientationGizmo({ camera = { yaw: -0.5, pitch: 0.3 }, onSnapToAxis }: OrientationGizmoProps) {
   const handleClick = useCallback((axis: string) => {
     if (!onSnapToAxis) return;
     // Map arrow clicks to view presets
@@ -40,31 +64,50 @@ export function OrientationGizmo({ onSnapToAxis }: OrientationGizmoProps) {
     }
   }, [onSnapToAxis]);
 
+  const axes = useMemo<GizmoAxis[]>(() => {
+    const basis = cameraBasisVectors(camera.yaw, camera.pitch);
+    return AXIS_DEFS.map((axis) => ({
+      name: axis.name,
+      label: axis.label,
+      color: axis.color,
+      end: {
+        x: vec3Dot(axis.dir, basis.right),
+        y: -vec3Dot(axis.dir, basis.up),
+      },
+      depth: vec3Dot(axis.dir, basis.forward),
+    })).sort((a, b) => a.depth - b.depth);
+  }, [camera.pitch, camera.yaw]);
+
   return (
     <div className="orientation-gizmo">
       <svg viewBox="-1.2 -1.2 2.4 2.4" width="80" height="80">
-        {/* X axis: Red */}
-        <line x1="0" y1="0" x2="1" y2="0" stroke="#FF4444" strokeWidth="0.08" />
-        <polygon points="1,0 0.85,-0.08 0.85,0.08" fill="#FF4444" cursor="pointer"
-          onClick={() => handleClick('x')} />
-        <text x="0.9" y="-0.12" fill="#FF4444" fontSize="0.15" fontWeight="bold" textAnchor="middle"
-          cursor="pointer" onClick={() => handleClick('x')}>X</text>
-
-        {/* Y axis: Green */}
-        <line x1="0" y1="0" x2="0" y2="1" stroke="#44CC44" strokeWidth="0.08" />
-        <polygon points="0,1 -0.08,0.85 0.08,0.85" fill="#44CC44" cursor="pointer"
-          onClick={() => handleClick('y')} />
-        <text x="-0.12" y="0.9" fill="#44CC44" fontSize="0.15" fontWeight="bold" textAnchor="middle"
-          cursor="pointer" onClick={() => handleClick('y')}>Y</text>
-
-        {/* Z axis: Blue */}
-        <line x1="0" y1="0" x2="-0.7" y2="0.7" stroke="#4488FF" strokeWidth="0.08" />
-        <polygon points="-0.7,0.7 -0.6,0.58 -0.55,0.68" fill="#4488FF" cursor="pointer"
-          onClick={() => handleClick('z')} />
-        <text x="-0.78" y="0.82" fill="#4488FF" fontSize="0.15" fontWeight="bold" textAnchor="middle"
-          cursor="pointer" onClick={() => handleClick('z')}>Z</text>
-
-        {/* Center sphere */}
+        {axes.map((axis) => {
+          const x = axis.end.x * 0.82;
+          const y = axis.end.y * 0.82;
+          const isFacing = axis.depth < 0;
+          return (
+            <g
+              key={axis.name}
+              className="orientation-gizmo-axis"
+              opacity={isFacing ? 1 : 0.56}
+              onClick={() => handleClick(axis.name)}
+            >
+              <line x1="0" y1="0" x2={x} y2={y} stroke={axis.color} strokeWidth={isFacing ? 0.08 : 0.055} />
+              <circle cx={x} cy={y} r={isFacing ? 0.18 : 0.14} fill={axis.color} />
+              <text
+                x={x}
+                y={y + 0.045}
+                fill="white"
+                fontSize={axis.label.length > 1 ? 0.13 : 0.16}
+                fontWeight="bold"
+                textAnchor="middle"
+                dominantBaseline="middle"
+              >
+                {axis.label}
+              </text>
+            </g>
+          );
+        })}
         <circle cx="0" cy="0" r="0.15" fill="#555" stroke="#888" strokeWidth="0.02" />
       </svg>
     </div>

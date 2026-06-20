@@ -1203,6 +1203,7 @@ pub fn resource_kind_label(kind: ResourceKind, tr: &Translations) -> &str {
         ResourceKind::SkinnedModel => tr.tr("resource_skinned_model"),
         ResourceKind::Scene => tr.tr("resource_scene"),
         ResourceKind::Script => tr.tr("resource_script"),
+        ResourceKind::Prefab => tr.tr("resource_prefab"),
         ResourceKind::Animation => tr.tr("resource_animation"),
     }
 }

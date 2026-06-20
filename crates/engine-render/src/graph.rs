@@ -9,6 +9,20 @@ use engine_core::{EngineError, EngineResult};
 
 use crate::resource::{BufferHandle, ImageHandle};
 
+/// Logical stage of a frame relative to upscaling and UI composition.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum RenderStage {
+    /// Rendering at internal resolution before upscaling.
+    #[default]
+    PreUpscale,
+    /// Resolution reconstruction or spatial scaling.
+    Upscale,
+    /// Full-resolution post-processing.
+    PostUpscale,
+    /// UI/HUD composition at UI resolution.
+    UiComposition,
+}
+
 /// Stable pass identifier.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PassId(u32);
@@ -38,6 +52,8 @@ pub struct RenderPass {
     pub id: PassId,
     /// Human-readable name.
     pub name: String,
+    /// Logical frame stage.
+    pub stage: RenderStage,
     /// Image resources accessed by this pass.
     pub image_accesses: Vec<(ImageHandle, ResourceAccess)>,
     /// Buffer resources accessed by this pass.
@@ -75,11 +91,17 @@ impl RenderGraphBuilder {
 
     /// Adds a pass and returns its id.
     pub fn add_pass(&mut self, name: impl Into<String>) -> PassId {
+        self.add_pass_at_stage(name, RenderStage::PreUpscale)
+    }
+
+    /// Adds a pass at a logical scaling stage and returns its id.
+    pub fn add_pass_at_stage(&mut self, name: impl Into<String>, stage: RenderStage) -> PassId {
         let id = PassId(self.next_id);
         self.next_id += 1;
         self.passes.push(RenderPass {
             id,
             name: name.into(),
+            stage,
             image_accesses: Vec::new(),
             buffer_accesses: Vec::new(),
         });
@@ -254,5 +276,13 @@ mod tests {
         builder.order_before(b, a);
 
         assert!(builder.try_build().is_err());
+    }
+
+    #[test]
+    fn passes_retain_scaling_stage_metadata() {
+        let mut builder = RenderGraphBuilder::new();
+        builder.add_pass_at_stage("upscale", RenderStage::Upscale);
+        let graph = builder.build();
+        assert_eq!(graph.passes[0].stage, RenderStage::Upscale);
     }
 }

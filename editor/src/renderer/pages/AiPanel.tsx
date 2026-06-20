@@ -4,6 +4,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
+import { listKnowledge, type KnowledgeEntry } from '../quest';
 import {
   IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
   IconChevronDown, IconChevronRight, IconInfo, IconLoader,
@@ -27,6 +28,7 @@ export interface CopilotPlan {
   operations: CopilotOperation[];
   read_only: boolean;
   requires_write: boolean;
+  knowledge_entries_used?: number;
 }
 
 export interface TraceEntry {
@@ -47,17 +49,28 @@ interface ApplyResult {
   summary: string | null;
   trace_entries: TraceEntry[];
   console_entries: ConsoleEntry[];
+  undo_available?: boolean;
+  undo_label?: string | null;
   needs_continuation?: boolean;
+}
+
+interface UndoResult {
+  applied: boolean;
+  summary: string;
+  trace_entries: TraceEntry[];
 }
 
 export interface CompletedChangeBundle {
   summary: string;
   operationsPerformed: number;
   traceEntries: TraceEntry[];
+  consoleEntries: ConsoleEntry[];
+  undoAvailable: boolean;
+  undoLabel: string | null;
 }
 
 export type AiStatus = 'idle' | 'thinking' | 'ready' | 'executing' | 'complete' | 'error';
-type AiWorkspaceView = 'chat' | 'tasks' | 'changes';
+type AiWorkspaceView = 'chat' | 'changes';
 type ThinkingEffort = 'off' | 'low' | 'medium' | 'high';
 
 interface AiMessage {
@@ -80,7 +93,7 @@ interface QueuedPrompt {
 }
 
 interface AiCard {
-  type: 'plan' | 'trace' | 'graph' | 'entity-list' | 'error';
+  type: 'plan' | 'trace' | 'console' | 'graph' | 'entity-list' | 'error';
   data: any;
 }
 
@@ -215,13 +228,14 @@ function ModelSelector() {
 
 // ─── Context Bar ────────────────────────────────────────────────────────────
 
-function ContextBar({ projectName, selectedEntity, sceneObjectCount, onSettingsClick, onNewChat, conversationTurns }: {
+function ContextBar({ projectName, selectedEntity, sceneObjectCount, onSettingsClick, onNewChat, conversationTurns, attachedKnowledgeCount }: {
   projectName?: string;
   selectedEntity?: string | null;
   sceneObjectCount: number;
   onSettingsClick?: () => void;
   onNewChat?: () => void;
   conversationTurns: number;
+  attachedKnowledgeCount: number;
 }) {
   const { t } = useTranslation();
   return (
@@ -230,6 +244,9 @@ function ContextBar({ projectName, selectedEntity, sceneObjectCount, onSettingsC
       <span className="ai-context-tag">{sceneObjectCount} {t('label_objects')}</span>
       {selectedEntity && (
         <span className="ai-context-tag ai-context-selected">@ {selectedEntity}</span>
+      )}
+      {attachedKnowledgeCount > 0 && (
+        <span className="ai-context-tag ai-context-knowledge">{attachedKnowledgeCount} Knowledge</span>
       )}
       {conversationTurns > 0 && (
         <span className="ai-context-tag ai-context-turns">{conversationTurns} {conversationTurns !== 1 ? t('label_turns') : t('label_turn')}</span>
@@ -285,9 +302,15 @@ function EntityContextCard({ entity }: { entity: EntityDetails }) {
 
 function ToolCallIndicator({ toolCalls }: { toolCalls: ActiveToolCall[] }) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const pending = toolCalls.some(tc => !tc.complete);
   return (
     <div className="ai-tool-calls">
-      {toolCalls.map((tc, i) => (
+      <button className="ai-evidence-toggle" onClick={() => setExpanded(open => !open)}>
+        {expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+        <span>{pending ? t('queue_responding') : 'Evidence'}</span>
+      </button>
+      {expanded && toolCalls.map((tc, i) => (
         <div key={i} className={`ai-tool-call ${tc.complete ? 'complete' : 'pending'}`}>
           <span className="ai-tool-call-icon">{tc.complete ? '✓' : '⟳'}</span>
           <span className="ai-tool-call-name">{tc.name}</span>
@@ -409,17 +432,19 @@ const PlanApprovalContext = createContext<PlanApprovalCtx | null>(null);
 
 function InlineCard({ card }: { card: AiCard }) {
   const [expanded, setExpanded] = useState(card.type === 'plan');
+  const label = card.type === 'trace' || card.type === 'console' ? 'Evidence' : card.type;
 
   return (
     <div className={`ai-card ai-card-${card.type}`}>
       <button className="ai-card-header" onClick={() => setExpanded(!expanded)}>
         {expanded ? <IconChevronDown /> : <IconChevronRight />}
-        <span className="ai-card-type">{card.type}</span>
+        <span className="ai-card-type">{label}</span>
       </button>
       {expanded && (
         <div className="ai-card-body">
           {card.type === 'plan' && <PlanCard data={card.data} />}
           {card.type === 'trace' && <TraceCard data={card.data} />}
+          {card.type === 'console' && <ConsoleCard data={card.data} />}
           {card.type === 'error' && <ErrorCard data={card.data} />}
           {card.type === 'entity-list' && <EntityListCard data={card.data} />}
         </div>
@@ -489,6 +514,20 @@ function TraceCard({ data }: { data: TraceEntry[] }) {
         <div key={i} className={`ai-trace-item ${entry.result === 'applied' ? 'success' : 'fail'}`}>
           <span className="ai-trace-tool">{entry.tool}</span>
           <span className="ai-trace-result">{entry.result}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConsoleCard({ data }: { data: ConsoleEntry[] }) {
+  return (
+    <div className="ai-console-card">
+      {data.map((entry, i) => (
+        <div key={i} className={`ai-console-item level-${entry.level}`}>
+          <span className="ai-console-level">{entry.level}</span>
+          <span className="ai-console-subsystem">{entry.subsystem}</span>
+          <span className="ai-console-message">{entry.message}</span>
         </div>
       ))}
     </div>
@@ -604,6 +643,9 @@ export default function AiPanel({
   const [interruptRequested, setInterruptRequested] = useState(false);
   const [requestActive, setRequestActive] = useState(false);
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffort>('medium');
+  const [knowledgeEntries, setKnowledgeEntries] = useState<KnowledgeEntry[]>([]);
+  const [selectedKnowledgeIds, setSelectedKnowledgeIds] = useState<Set<string>>(new Set());
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const continuationDepthRef = useRef(0);
   const activeRequestRef = useRef(false);
   const interruptRequestedRef = useRef(false);
@@ -649,6 +691,22 @@ export default function AiPanel({
   }, []);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+
+  useEffect(() => {
+    listKnowledge()
+      .then(result => {
+        const approvedEntries = result.entries.filter(entry => entry.status === 'approved');
+        setKnowledgeEntries(approvedEntries);
+        setSelectedKnowledgeIds(current => {
+          const approvedIds = new Set(approvedEntries.map(entry => entry.id));
+          return new Set([...current].filter(id => approvedIds.has(id)));
+        });
+      })
+      .catch(() => {
+        setKnowledgeEntries([]);
+        setSelectedKnowledgeIds(new Set());
+      });
+  }, []);
 
   // Fetch entity details when selection changes
   useEffect(() => {
@@ -749,6 +807,9 @@ export default function AiPanel({
       }
       if (thinkingEffort !== 'off') {
         planParams.thinking_effort = thinkingEffort;
+      }
+      if (selectedKnowledgeIds.size > 0) {
+        planParams.knowledge_ids = Array.from(selectedKnowledgeIds);
       }
 
       const streamHandle = streamCopilotPlan<CopilotPlan>(planParams, (delta, kind) => {
@@ -867,7 +928,7 @@ export default function AiPanel({
       setInterruptRequested(false);
       cancelRef.current = null;
     }
-  }, [entityDetails, addMessage, sessionWritesAllowed, thinkingEffort]);
+  }, [entityDetails, addMessage, sessionWritesAllowed, thinkingEffort, selectedKnowledgeIds]);
 
   const queueOrSubmitPrompt = useCallback((prompt: string) => {
     const trimmed = prompt.trim();
@@ -912,7 +973,7 @@ export default function AiPanel({
     if (indices.length === 0) return;
 
     setStatus('executing');
-    setWorkspaceView('tasks');
+    setWorkspaceView('chat');
 
     try {
       const result = await rpc<ApplyResult>('copilot/apply', {
@@ -927,12 +988,11 @@ export default function AiPanel({
         summary,
         operationsPerformed: result.operations_performed,
         traceEntries: result.trace_entries,
+        consoleEntries: result.console_entries,
+        undoAvailable: Boolean(result.undo_available),
+        undoLabel: result.undo_label ?? null,
       });
-      const cards: AiCard[] = [];
-      if (result.trace_entries.length > 0) {
-        cards.push({ type: 'trace', data: result.trace_entries });
-      }
-      addMessage('assistant', `✅ ${summary}`, cards.length > 0 ? cards : undefined);
+      addMessage('assistant', summary);
       if (result.needs_continuation && continuationDepthRef.current < 4) {
         continuationDepthRef.current += 1;
         setPendingContinuation(true);
@@ -949,6 +1009,28 @@ export default function AiPanel({
       addMessage('assistant', t('ai_execution_failed'), [{ type: 'error', data: msg }]);
     }
   }, [approved, addMessage, onSceneChanged]);
+
+  const undoLastAiEdit = useCallback(async () => {
+    setStatus('executing');
+    try {
+      const result = await rpc<UndoResult>('copilot/undo_last');
+      setCompletedBundle(current => current ? {
+        ...current,
+        undoAvailable: false,
+        traceEntries: [...current.traceEntries, ...result.trace_entries],
+        consoleEntries: current.consoleEntries,
+      } : current);
+      if (result.applied) {
+        onSceneChanged?.();
+      }
+      addMessage('assistant', result.summary);
+      setStatus('complete');
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
+      setStatus('error');
+      addMessage('assistant', t('ai_execution_failed'), [{ type: 'error', data: msg }]);
+    }
+  }, [addMessage, onSceneChanged, t]);
 
   const decideOperation = useCallback(async (
     operation: CopilotOperation,
@@ -1123,6 +1205,21 @@ export default function AiPanel({
   const approvedWriteCount = plan?.operations.filter(operation => (
     operation.requires_write && approved.has(operation.index)
   )).length ?? 0;
+  const attachedKnowledge = useMemo(
+    () => knowledgeEntries.filter(entry => selectedKnowledgeIds.has(entry.id)),
+    [knowledgeEntries, selectedKnowledgeIds],
+  );
+  const toggleKnowledge = useCallback((id: string) => {
+    setSelectedKnowledgeIds(current => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
 
   // Context value for inline plan card approval buttons
   const planApprovalCtx = useMemo<PlanApprovalCtx>(() => ({
@@ -1161,10 +1258,11 @@ export default function AiPanel({
         onSettingsClick={onOpenSettings}
         onNewChat={handleNewChat}
         conversationTurns={conversationTurns}
+        attachedKnowledgeCount={attachedKnowledge.length}
       />
 
-      {!chatOnly && <div className="ai-workspace-tabs" role="tablist" aria-label="AI workspace">
-        {(['chat', 'tasks', 'changes'] as AiWorkspaceView[]).map(view => (
+      {!chatOnly && (plan || completedBundle) && <div className="ai-workspace-tabs" role="tablist" aria-label="AI workspace">
+        {(['chat', 'changes'] as AiWorkspaceView[]).map(view => (
           <button
             key={view}
             className={workspaceView === view ? 'active' : ''}
@@ -1172,7 +1270,7 @@ export default function AiPanel({
             role="tab"
             aria-selected={workspaceView === view}
           >
-            {view === 'chat' ? t('tab_chat') : view === 'tasks' ? t('tab_tasks') : t('tab_changes')}
+            {view === 'chat' ? t('tab_chat') : t('tab_changes')}
             {view === 'changes' && plan && plan.operations.length > 0 && (
               <span>{plan.operations.length}</span>
             )}
@@ -1190,34 +1288,6 @@ export default function AiPanel({
         className={`ai-messages ${!chatOnly && workspaceView !== 'chat' ? 'ai-workspace-detail' : ''}`}
         aria-live="polite"
       >
-        {!chatOnly && workspaceView === 'tasks' && (
-          <div className="ai-task-workspace">
-            <div className={`ai-task-state state-${status}`}>
-              <span className="ai-task-state-dot" />
-              <div>
-                <strong>{statusLabel[status]}</strong>
-                <span>{projectName || t('ai_current_project')} · {sceneObjectCount} scene objects</span>
-              </div>
-            </div>
-            <div className="ai-task-section">
-              <div className="ai-task-section-title">{t('ai_current_workflow')}</div>
-              <ol className="ai-task-timeline">
-                <li className={status !== 'idle' ? 'complete' : 'active'}>{t('workflow_describe')}</li>
-                <li className={status === 'thinking' ? 'active' : ['ready', 'executing', 'complete'].includes(status) ? 'complete' : ''}>{t('workflow_inspect')}</li>
-                <li className={status === 'ready' ? 'active' : ['executing', 'complete'].includes(status) ? 'complete' : ''}>{t('workflow_review')}</li>
-                <li className={status === 'executing' ? 'active' : status === 'complete' ? 'complete' : ''}>{t('workflow_apply')}</li>
-              </ol>
-            </div>
-            <div className="ai-task-section">
-              <div className="ai-task-section-title">{t('ai_context_scope')}</div>
-              <div className="ai-scope-list">
-                <span>{t('scope_scene_snapshot')} <strong>{sceneObjectCount} objects</strong></span>
-                <span>Selection <strong>{selectedEntityName || t('scope_no_entity')}</strong></span>
-                <span>Write policy <strong>{sessionWritesAllowed ? t('policy_session_allow') : t('policy_ask_write')}</strong></span>
-              </div>
-            </div>
-          </div>
-        )}
         {!chatOnly && workspaceView === 'changes' && (
           <div className="ai-changes-workspace">
             <div className="ai-task-section-title">{t('changes_bundle_title')}</div>
@@ -1234,8 +1304,15 @@ export default function AiPanel({
                   <div className="ai-completed-stats">
                     <span><strong>{completedBundle.operationsPerformed}</strong> {t('label_operations')}</span>
                     <span><strong>{completedBundle.traceEntries.length}</strong> {t('label_trace_entries')}</span>
+                    <span><strong>{completedBundle.consoleEntries.length}</strong> console</span>
                   </div>
-                  {completedBundle.traceEntries.length > 0 && <TraceCard data={completedBundle.traceEntries} />}
+                  {completedBundle.undoAvailable && (
+                    <button className="ai-undo-bundle-btn" onClick={undoLastAiEdit}>
+                      <IconUndo /> Undo {completedBundle.undoLabel ?? 'AI edit'}
+                    </button>
+                  )}
+                  {completedBundle.traceEntries.length > 0 && <InlineCard card={{ type: 'trace', data: completedBundle.traceEntries }} />}
+                  {completedBundle.consoleEntries.length > 0 && <InlineCard card={{ type: 'console', data: completedBundle.consoleEntries }} />}
                 </div>
               ) : (
                 <div className="ai-workspace-empty">
@@ -1406,6 +1483,38 @@ export default function AiPanel({
       {/* Quick Actions + Input */}
       <div className="ai-input-area">
         <QuickActions onAction={onQuickAction} />
+
+        {knowledgeEntries.length > 0 && (
+          <div className={`ai-knowledge-picker ${knowledgeOpen ? 'open' : ''}`}>
+            <button
+              className="ai-knowledge-picker-toggle"
+              onClick={() => setKnowledgeOpen(open => !open)}
+              type="button"
+            >
+              {knowledgeOpen ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+              <IconSparkles size={12} />
+              <span>Knowledge</span>
+              <b>{attachedKnowledge.length}</b>
+            </button>
+            {knowledgeOpen && (
+              <div className="ai-knowledge-list">
+                {knowledgeEntries.map(entry => (
+                  <label key={entry.id} className="ai-knowledge-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedKnowledgeIds.has(entry.id)}
+                      onChange={() => toggleKnowledge(entry.id)}
+                    />
+                    <span>
+                      <strong>{entry.category}</strong>
+                      <small>{entry.content}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {(requestActive || status === 'executing' || queuedPrompts.length > 0) && (
           <div className="ai-queue-status" role="status">

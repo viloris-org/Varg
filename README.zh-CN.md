@@ -22,7 +22,7 @@ cd Aster
 # 启动编辑器
 cd editor
 bun install
-bun tauri dev
+bun run dev:tauri
 ```
 
 > **前提条件：** [Rust ≥ 1.78](https://rustup.rs/)、[Bun ≥ 1.0](https://bun.sh/)、
@@ -100,10 +100,10 @@ cd editor
 bun install
 
 # 开发模式（前端 + Rust 后端热重载）
-bun tauri dev
+bun run dev:tauri
 
 # 分发包
-bun tauri build
+bun run tauri build
 # → editor/src-tauri/target/release/bundle/
 ```
 

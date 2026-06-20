@@ -102,14 +102,14 @@ export function viewportReadback(params: {
     yaw: params.yaw ?? -0.5,
     pitch: params.pitch ?? 0.3,
     distance: params.distance ?? 6.0,
-    target_x: params.targetX ?? 0,
-    target_y: params.targetY ?? 0,
-    target_z: params.targetZ ?? 0,
-    last_version: params.lastVersion ?? null,
-    play_mode: params.playMode ?? false,
-    editor_camera: params.editorCamera ?? false,
-    view_mode: params.viewMode ?? '3d',
-    entity_id: params.entityId ?? null,
+    targetX: params.targetX ?? 0,
+    targetY: params.targetY ?? 0,
+    targetZ: params.targetZ ?? 0,
+    lastVersion: params.lastVersion ?? null,
+    playMode: params.playMode ?? false,
+    editorCamera: params.editorCamera ?? false,
+    viewMode: params.viewMode ?? '3d',
+    entityId: params.entityId ?? null,
   });
 }
 
@@ -129,6 +129,24 @@ export function onHostEvent(callback: (event: unknown) => void): Promise<Unliste
  */
 export async function openGameView(): Promise<void> {
   await invoke('open_game_view');
+}
+
+export async function openNativeSceneView(params: {
+  yaw: number;
+  pitch: number;
+  distance: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+}): Promise<void> {
+  await invoke('open_native_scene_view', {
+    yaw: params.yaw,
+    pitch: params.pitch,
+    distance: params.distance,
+    targetX: params.targetX,
+    targetY: params.targetY,
+    targetZ: params.targetZ,
+  });
 }
 
 export function selectProjectLocation(): Promise<string | null> {

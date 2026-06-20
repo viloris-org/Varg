@@ -19,3 +19,7 @@ dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "engine-co
 [dependencies]
 engine-core.workspace = true
 engine-ecs.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

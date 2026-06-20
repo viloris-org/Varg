@@ -44,12 +44,15 @@ impl Default for AttenuationModel {
 
 /// Computes the volume attenuation for a given distance.
 pub fn compute_attenuation(model: AttenuationModel, distance: f32) -> f32 {
+    let distance = finite_or(distance, 0.0).max(0.0);
     match model {
         AttenuationModel::None => 1.0,
         AttenuationModel::InverseDistance {
             min_distance,
             max_distance,
         } => {
+            let min_distance = finite_or(min_distance, 1.0).max(0.001);
+            let max_distance = finite_or(max_distance, min_distance).max(min_distance);
             let clamped = distance.max(min_distance).min(max_distance);
             min_distance / (min_distance + clamped - min_distance)
         }
@@ -57,6 +60,11 @@ pub fn compute_attenuation(model: AttenuationModel, distance: f32) -> f32 {
             min_distance,
             max_distance,
         } => {
+            let min_distance = finite_or(min_distance, 1.0).max(0.0);
+            let max_distance = finite_or(max_distance, min_distance + 1.0);
+            if max_distance <= min_distance {
+                return if distance <= min_distance { 1.0 } else { 0.0 };
+            }
             if distance <= min_distance {
                 1.0
             } else if distance >= max_distance {
@@ -69,6 +77,8 @@ pub fn compute_attenuation(model: AttenuationModel, distance: f32) -> f32 {
             min_distance,
             max_distance,
         } => {
+            let min_distance = finite_or(min_distance, 1.0).max(0.001);
+            let max_distance = finite_or(max_distance, min_distance + 1.0);
             if distance <= min_distance {
                 1.0
             } else if distance >= max_distance {
@@ -104,6 +114,9 @@ pub fn compute_pan(
 
 /// Smooth Hermite interpolation between `edge0` and `edge1`.
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() <= f32::EPSILON {
+        return if x < edge0 { 0.0 } else { 1.0 };
+    }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -123,13 +136,25 @@ pub fn compute_directivity(
             outer_angle_degrees,
             outer_gain,
         } => {
+            let inner_angle_degrees = finite_or(inner_angle_degrees, 360.0).clamp(0.0, 360.0);
+            let outer_angle_degrees =
+                finite_or(outer_angle_degrees, inner_angle_degrees).clamp(0.0, 360.0);
+            let (inner_angle_degrees, outer_angle_degrees) =
+                if outer_angle_degrees < inner_angle_degrees {
+                    (outer_angle_degrees, inner_angle_degrees)
+                } else {
+                    (inner_angle_degrees, outer_angle_degrees)
+                };
             let distance = source_to_listener.length();
             if distance <= f32::EPSILON {
                 return 1.0;
             }
             let direction = source_to_listener / distance;
             let source_forward = source_forward.normalized();
-            let cos_angle = source_forward.dot(direction);
+            if source_forward.length_squared() <= f32::EPSILON {
+                return 1.0;
+            }
+            let cos_angle = source_forward.dot(direction).clamp(-1.0, 1.0);
             let angle = cos_angle.acos().to_degrees();
             if angle <= inner_angle_degrees {
                 1.0
@@ -149,8 +174,11 @@ pub fn compute_directivity(
 /// Spherical sources start attenuating from their surface; point sources use
 /// the raw distance.
 pub fn compute_effective_distance(shape: AudioSourceShape, distance: f32) -> f32 {
+    let distance = finite_or(distance, 0.0);
     match shape {
-        AudioSourceShape::Sphere { radius } => (distance - radius.max(0.0)).max(0.0),
+        AudioSourceShape::Sphere { radius } => {
+            (distance - finite_or(radius, 0.0).max(0.0)).max(0.0)
+        }
         _ => distance.max(0.0),
     }
 }
@@ -171,7 +199,9 @@ pub fn compute_doppler_rate(
     }
     let direction = source_to_listener / distance;
     let relative_speed = (source_velocity - listener_velocity).dot(direction);
-    let rate = 1.0 + relative_speed * doppler_scale.max(0.0) / speed_of_sound;
+    let rate = 1.0
+        + finite_or(relative_speed, 0.0) * finite_or(doppler_scale, 0.0).max(0.0)
+            / finite_or(speed_of_sound, 343.0).max(f32::EPSILON);
     rate.clamp(0.5, 2.0)
 }
 
@@ -190,4 +220,55 @@ pub fn compute_spread_pan(
     let spread = spread.clamp(0.0, 1.0).max(0.01);
     let p = base_pan.powf(spread);
     ((1.0 - p).sqrt(), p.sqrt())
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attenuation_sanitizes_invalid_distance_parameters() {
+        let gain = compute_attenuation(
+            AttenuationModel::LinearDistance {
+                min_distance: 10.0,
+                max_distance: 1.0,
+            },
+            5.0,
+        );
+        assert!(gain.is_finite());
+        assert!((0.0..=1.0).contains(&gain));
+
+        let logarithmic = compute_attenuation(
+            AttenuationModel::LogarithmicDistance {
+                min_distance: 0.0,
+                max_distance: f32::NAN,
+            },
+            2.0,
+        );
+        assert!(logarithmic.is_finite());
+        assert!((0.0..=1.0).contains(&logarithmic));
+    }
+
+    #[test]
+    fn cone_directivity_sanitizes_angles_and_vectors() {
+        let gain = compute_directivity(
+            AudioSourceShape::Cone {
+                inner_angle_degrees: 90.0,
+                outer_angle_degrees: 30.0,
+                outer_gain: f32::NAN,
+            },
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+        assert!(gain.is_finite());
+        assert!((0.0..=1.0).contains(&gain));
+    }
 }
