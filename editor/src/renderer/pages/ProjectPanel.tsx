@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { rpc } from '../api';
 import { useTranslation } from '../i18n';
 import { IconFolder, IconFile, IconPlus, IconRefresh, IconEdit, IconCopy, IconTrash, assetIcon } from '../icons';
+import { projectPanelIconButtonClass, projectPanelSearchInputClass } from '../uiClasses';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -337,7 +338,7 @@ export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {
       <div className="project-toolbar">
         <div className="project-toolbar-left">
           <button
-            className="project-btn-icon"
+            className={projectPanelIconButtonClass}
             onClick={loadAssets}
             title={t('project_refresh')}
           >
@@ -345,7 +346,7 @@ export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {
           </button>
           <div style={{ position: 'relative' }}>
             <button
-              className="project-btn-icon"
+              className={projectPanelIconButtonClass}
               onClick={() => setCreateMenuOpen(!createMenuOpen)}
               title={t('project_create')}
             >
@@ -390,7 +391,7 @@ export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {
       {/* Search */}
       <div className="project-search-row">
         <input
-          className="project-search"
+          className={projectPanelSearchInputClass}
           type="text"
           placeholder={t('project_search')}
           value={search}

@@ -1,0 +1,22 @@
+/* ===================================================================
+   CAMERA PREVIEW
+   =================================================================== */
+
+.camera-preview-container {
+  padding: 8px 0;
+  text-align: center;
+}
+
+.camera-preview-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.camera-preview-canvas {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+}

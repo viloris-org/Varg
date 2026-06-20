@@ -2,6 +2,52 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { rpc, selectProjectLocation } from '../api';
 import { useTranslation } from '../i18n';
 import {
+  buttonClass,
+  badgeClass,
+  formErrorClass,
+  formGroupClass,
+  formInputClass,
+  formLabelClass,
+  formSelectClass,
+  hubEmptyClass,
+  hubEmptyIconClass,
+  hubEmptyTextClass,
+  hubEmptyTitleClass,
+  installBadgesClass,
+  installCardClass,
+  installIconClass,
+  installInfoClass,
+  installPathClass,
+  installVersionClass,
+  modalBodyClass,
+  modalClass,
+  modalCloseButtonClass,
+  modalFooterClass,
+  modalHeaderClass,
+  modalOverlayClass,
+  modalTitleClass,
+  projectAvatarClass,
+  projectCardClass,
+  projectFolderButtonClass,
+  projectInfoClass,
+  projectMetaClass,
+  projectMetaDotClass,
+  projectNameClass,
+  projectPathClass,
+  settingsDescClass,
+  settingsInputClass,
+  settingsLabelClass,
+  settingsSectionTitleClass,
+  settingsSelectClass,
+  settingsSelectOptionClass,
+  templateCardClass,
+  templateCardDescClass,
+  templateCardIconClass,
+  templateCardTitleClass,
+  templateGridClass,
+  themeOptionClass,
+} from '../uiClasses';
+import {
   IconProjects, IconInstalls, IconSettings, IconFolder, IconPlus, IconTrash, IconPlay,
   IconSun, IconMoon, IconMonitor, IconPackage, IconAlertTriangle, IconX, IconEmpty, IconSparkles,
   AsterLogo,
@@ -195,24 +241,24 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
   }, [onClose, handleCreate, creating]);
 
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick} onKeyDown={handleKeyDown}>
-      <div className="modal">
-        <div className="modal-header">
-          <h3>{t('dialog_new_project')}</h3>
-          <button className="modal-close-btn" onClick={onClose}><IconX /></button>
+    <div className={modalOverlayClass} onClick={handleOverlayClick} onKeyDown={handleKeyDown}>
+      <div className={modalClass()}>
+        <div className={modalHeaderClass}>
+          <h3 className={modalTitleClass}>{t('dialog_new_project')}</h3>
+          <button className={modalCloseButtonClass} onClick={onClose}><IconX /></button>
         </div>
-        <div className="modal-body">
+        <div className={modalBodyClass}>
           {/* Template */}
-          <div className="form-group">
-            <label className="form-label">{t('dialog_template')}</label>
-            <div className="template-grid">
+          <div className={formGroupClass}>
+            <label className={formLabelClass}>{t('dialog_template')}</label>
+            <div className={templateGridClass}>
               {templates.map((tmpl, i) => (
                 <div
                   key={tmpl.id}
-                  className={`template-card ${templateIdx === i ? 'selected' : ''}`}
+                  className={templateCardClass(templateIdx === i)}
                   onClick={() => setTemplateIdx(i)}
                 >
-                  <span className="template-card-icon">
+                  <span className={templateCardIconClass}>
                     {i === 0 ? (
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="24" height="24">
                         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
@@ -227,18 +273,18 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
                       </svg>
                     )}
                   </span>
-                  <div className="template-card-title">{t('template_' + tmpl.id)}</div>
-                  <div className="template-card-desc">{t('template_' + tmpl.id + '_desc')}</div>
+                  <div className={templateCardTitleClass}>{t('template_' + tmpl.id)}</div>
+                  <div className={templateCardDescClass}>{t('template_' + tmpl.id + '_desc')}</div>
                 </div>
               ))}
             </div>
           </div>
 
           {/* Project Name */}
-          <div className="form-group">
-            <label className="form-label">{t('dialog_project_name')}</label>
+          <div className={formGroupClass}>
+            <label className={formLabelClass}>{t('dialog_project_name')}</label>
             <input
-              className="form-input"
+              className={formInputClass}
               type="text"
               placeholder={t('dialog_name_hint')}
               value={name}
@@ -248,18 +294,18 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
           </div>
 
           {/* Location */}
-          <div className="form-group">
-            <label className="form-label">{t('dialog_location')}</label>
+          <div className={formGroupClass}>
+            <label className={formLabelClass}>{t('dialog_location')}</label>
             <div className="location-input-row">
               <input
-                className="form-input"
+                className={`${formInputClass} flex-1`}
                 type="text"
                 placeholder={t('dialog_location_placeholder')}
                 value={location}
                 onChange={e => setLocation(e.target.value)}
               />
               <button
-                className="btn btn-secondary btn-sm btn-browse"
+                className={buttonClass('secondary', 'sm', 'h-[34px] flex-shrink-0 whitespace-nowrap')}
                 onClick={async () => {
                   setError(null);
                   try {
@@ -278,10 +324,10 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
 
           {/* Toolchain Version */}
           {installs.length > 0 && (
-            <div className="form-group">
-              <label className="form-label">{t('dialog_engine_version')}</label>
+            <div className={formGroupClass}>
+              <label className={formLabelClass}>{t('dialog_engine_version')}</label>
               <select
-                className="form-select"
+                className={formSelectClass}
                 value={versionIdx}
                 onChange={e => setVersionIdx(Number(e.target.value))}
               >
@@ -293,12 +339,12 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
           )}
 
           {/* Error */}
-          {error && <p className="form-error">{error}</p>}
+          {error && <p className={formErrorClass}>{error}</p>}
         </div>
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>{t('dialog_cancel')}</button>
+        <div className={modalFooterClass}>
+          <button className={buttonClass('secondary')} onClick={onClose}>{t('dialog_cancel')}</button>
           <button
-            className="btn btn-primary"
+            className={buttonClass('primary')}
             onClick={handleCreate}
             disabled={creating}
           >
@@ -325,13 +371,13 @@ function ConfirmDeleteDialog({ path, onClose, onRemoveRecent }: ConfirmDeletePro
   }, [onClose]);
 
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal" style={{ width: 440 }}>
-        <div className="modal-header">
-          <h3>{t('dialog_confirm_delete')}</h3>
-          <button className="modal-close-btn" onClick={onClose}><IconX /></button>
+    <div className={modalOverlayClass} onClick={handleOverlayClick}>
+      <div className={modalClass('w-[440px]')}>
+        <div className={modalHeaderClass}>
+          <h3 className={modalTitleClass}>{t('dialog_confirm_delete')}</h3>
+          <button className={modalCloseButtonClass} onClick={onClose}><IconX /></button>
         </div>
-        <div className="modal-body">
+        <div className={modalBodyClass}>
           <div className="delete-warning">
             <IconAlertTriangle />
             <div className="delete-warning-text">
@@ -339,9 +385,9 @@ function ConfirmDeleteDialog({ path, onClose, onRemoveRecent }: ConfirmDeletePro
             </div>
           </div>
         </div>
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>{t('dialog_cancel')}</button>
-          <button className="btn btn-danger" onClick={onRemoveRecent}>
+        <div className={modalFooterClass}>
+          <button className={buttonClass('secondary')} onClick={onClose}>{t('dialog_cancel')}</button>
+          <button className={buttonClass('danger')} onClick={onRemoveRecent}>
             {t('dialog_remove_recents')}
           </button>
         </div>
@@ -403,7 +449,7 @@ function ProjectsPage({
       <div className="hub-page-header">
         <h2>{t('hub_projects_title')}</h2>
         <div className="hub-page-actions">
-          <button className="btn btn-primary btn-sm" onClick={onNewProject}>
+          <button className={buttonClass('primary', 'sm')} onClick={onNewProject}>
             <IconPlus /> {t('hub_new_project')}
           </button>
         </div>
@@ -427,10 +473,10 @@ function ProjectsPage({
             <span className="hub-action-bar-label">
               {selectedProject.name}
             </span>
-            <button className="btn btn-sm btn-primary" onClick={() => onOpen(selectedProject.path)}>
+            <button className={buttonClass('primary', 'sm')} onClick={() => onOpen(selectedProject.path)}>
               <IconPlay /> {t('hub_launch')}
             </button>
-            <button className="btn btn-sm btn-danger" onClick={() => onDeleteRequest(selectedProject.path)}>
+            <button className={buttonClass('danger', 'sm')} onClick={() => onDeleteRequest(selectedProject.path)}>
               <IconTrash /> {t('hub_delete')}
             </button>
           </>
@@ -440,17 +486,17 @@ function ProjectsPage({
       {/* Project Cards */}
       <div className="hub-scroll">
         {filtered.length === 0 ? (
-          <div className="hub-empty">
-            <div className="hub-empty-icon"><IconEmpty /></div>
+          <div className={hubEmptyClass}>
+            <div className={hubEmptyIconClass}><IconEmpty /></div>
             {search ? (
               <>
-                <h3>{t('hub_search_no_matches')}</h3>
-                <p>{t('hub_search_no_matches_desc')}</p>
+                <h3 className={hubEmptyTitleClass}>{t('hub_search_no_matches')}</h3>
+                <p className={hubEmptyTextClass}>{t('hub_search_no_matches_desc')}</p>
               </>
             ) : (
               <>
-                <h3>{t('hub_no_projects')}</h3>
-                <p>{t('hub_no_projects_desc')}</p>
+                <h3 className={hubEmptyTitleClass}>{t('hub_no_projects')}</h3>
+                <p className={hubEmptyTextClass}>{t('hub_no_projects_desc')}</p>
               </>
             )}
           </div>
@@ -459,24 +505,24 @@ function ProjectsPage({
             {filtered.map(project => (
               <div
                 key={project.path}
-                className={`project-card ${selectedPath === project.path ? 'selected' : ''}`}
+                className={projectCardClass(selectedPath === project.path)}
                 onClick={() => handleCardClick(project.path)}
                 onDoubleClick={() => handleCardDoubleClick(project.path)}
               >
-                <div className={`project-avatar ${getAvatarClass(project.name)}`}>
+                <div className={`${projectAvatarClass} ${getAvatarClass(project.name)}`}>
                   {getInitials(project.name)}
                 </div>
-                <div className="project-info">
-                  <div className="project-name">{project.name}</div>
-                  <div className="project-path">{project.path}</div>
-                  <div className="project-meta">
+                <div className={projectInfoClass}>
+                  <div className={projectNameClass}>{project.name}</div>
+                  <div className={projectPathClass}>{project.path}</div>
+                  <div className={projectMetaClass}>
                     <span>{project.toolchain_version}</span>
-                    <span className="project-meta-dot" />
+                    <span className={projectMetaDotClass} />
                     <span>{project.last_touched.slice(0, 10)}</span>
                   </div>
                 </div>
                 <button
-                  className="project-folder-btn"
+                  className={projectFolderButtonClass}
                   onClick={e => handleOpenFolder(e, project.path)}
                   title={t('hub_open_folder')}
                 >
@@ -502,25 +548,25 @@ function InstallsPage({ installs }: { installs: InstallInfo[] }) {
       </div>
       <div className="hub-scroll">
         {installs.length === 0 ? (
-          <div className="hub-empty">
-            <div className="hub-empty-icon"><IconPackage /></div>
-            <h3>{t('hub_installs_empty')}</h3>
-            <p>{t('hub_installs_empty_desc')}</p>
+          <div className={hubEmptyClass}>
+            <div className={hubEmptyIconClass}><IconPackage /></div>
+            <h3 className={hubEmptyTitleClass}>{t('hub_installs_empty')}</h3>
+            <p className={hubEmptyTextClass}>{t('hub_installs_empty_desc')}</p>
           </div>
         ) : (
           <div className="install-list">
             {installs.map((inst, i) => (
-              <div key={i} className="install-card">
-                <div className="install-icon"><IconPackage /></div>
-                <div className="install-info">
-                  <div className="install-version">{inst.version}</div>
-                  <div className="install-path">{inst.path}</div>
+              <div key={i} className={installCardClass}>
+                <div className={installIconClass}><IconPackage /></div>
+                <div className={installInfoClass}>
+                  <div className={installVersionClass}>{inst.version}</div>
+                  <div className={installPathClass}>{inst.path}</div>
                 </div>
-                <div className="install-badges">
-                  {inst.editor_available && <span className="badge badge-green">{t('hub_installs_badge_editor')}</span>}
-                  {!inst.editor_available && <span className="badge badge-gray">{t('hub_installs_badge_no_editor')}</span>}
-                  {inst.runtime_available && <span className="badge badge-green">{t('hub_installs_badge_runtime')}</span>}
-                  {!inst.runtime_available && <span className="badge badge-gray">{t('hub_installs_badge_no_runtime')}</span>}
+                <div className={installBadgesClass}>
+                  {inst.editor_available && <span className={badgeClass('green')}>{t('hub_installs_badge_editor')}</span>}
+                  {!inst.editor_available && <span className={badgeClass('gray')}>{t('hub_installs_badge_no_editor')}</span>}
+                  {inst.runtime_available && <span className={badgeClass('green')}>{t('hub_installs_badge_runtime')}</span>}
+                  {!inst.runtime_available && <span className={badgeClass('gray')}>{t('hub_installs_badge_no_runtime')}</span>}
                 </div>
               </div>
             ))}
@@ -691,21 +737,22 @@ function CopilotSettingsSection() {
 
   return (
     <div className="settings-section">
-      <div className="settings-section-title">{t('settings_ai_provider')}</div>
+      <div className={settingsSectionTitleClass}>{t('settings_ai_provider')}</div>
 
       {/* Provider */}
       <div className="settings-row">
         <div>
-          <div className="settings-label">{t('settings_provider')}</div>
-          <div className="settings-desc">{t('settings_provider_desc')}</div>
+          <div className={settingsLabelClass}>{t('settings_provider')}</div>
+          <div className={settingsDescClass}>{t('settings_provider_desc')}</div>
         </div>
         <div className="settings-control settings-control-compact">
           <select
+            className={settingsSelectClass}
             value={settings.provider}
             onChange={(e) => handleProviderChange(e.target.value as CopilotSettingsData['provider'])}
           >
             {providerOptions.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
+              <option key={opt.value} className={settingsSelectOptionClass} value={opt.value}>{opt.label}</option>
             ))}
           </select>
         </div>
@@ -715,11 +762,12 @@ function CopilotSettingsSection() {
       {showApiKey && (
         <div className="settings-row">
           <div>
-            <div className="settings-label">{t('settings_api_key')}</div>
-            <div className="settings-desc">{t('settings_api_key_desc')}</div>
+            <div className={settingsLabelClass}>{t('settings_api_key')}</div>
+            <div className={settingsDescClass}>{t('settings_api_key_desc')}</div>
           </div>
           <div className="settings-control">
             <input
+              className={settingsInputClass}
               type="password"
               value={settings.api_key ?? ''}
               placeholder={settings.has_api_key ? '••••••••••••' : 'sk-...'}
@@ -736,12 +784,12 @@ function CopilotSettingsSection() {
       {settings.provider === 'codex_oauth' && (
         <div className="settings-row">
           <div>
-            <div className="settings-label">{t('settings_chatgpt_account')}</div>
-            <div className="settings-desc">{t('settings_chatgpt_desc')}</div>
+            <div className={settingsLabelClass}>{t('settings_chatgpt_account')}</div>
+            <div className={settingsDescClass}>{t('settings_chatgpt_desc')}</div>
           </div>
           <div className="settings-control" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
             <button
-              className="btn btn-primary btn-sm"
+              className={buttonClass('primary', 'sm')}
               onClick={codexConnected ? handleCodexLogout : handleCodexLogin}
               disabled={codexAuthBusy}
             >
@@ -758,13 +806,14 @@ function CopilotSettingsSection() {
       {showEndpoint && (
         <div className="settings-row">
           <div>
-            <div className="settings-label">
+            <div className={settingsLabelClass}>
               {t('settings_endpoint')} {endpointRequired ? '' : <small style={{ opacity: 0.6 }}>{t('settings_endpoint_optional')}</small>}
             </div>
-            <div className="settings-desc">{t('settings_endpoint_desc')}</div>
+            <div className={settingsDescClass}>{t('settings_endpoint_desc')}</div>
           </div>
           <div className="settings-control">
             <input
+              className={settingsInputClass}
               type="text"
               value={settings.api_endpoint ?? ''}
               placeholder={currentMeta?.default_endpoint ?? 'https://api.example.com/v1'}
@@ -779,11 +828,12 @@ function CopilotSettingsSection() {
         <>
           <div className="settings-row">
             <div>
-              <div className="settings-label">{t('settings_billing_mode')}</div>
-              <div className="settings-desc">{t('settings_mimo_billing_desc')}</div>
+              <div className={settingsLabelClass}>{t('settings_billing_mode')}</div>
+              <div className={settingsDescClass}>{t('settings_mimo_billing_desc')}</div>
             </div>
             <div className="settings-control settings-control-compact">
               <select
+                className={settingsSelectClass}
                 value={settings.mimo_config?.billing ?? 'subscription'}
                 onChange={(e) => setSettings(s => ({
                   ...s,
@@ -794,19 +844,20 @@ function CopilotSettingsSection() {
                   }
                 }))}
               >
-                <option value="subscription">{t('settings_token_plan')}</option>
-                <option value="api">{t('settings_pay_as_you_go')}</option>
+                <option className={settingsSelectOptionClass} value="subscription">{t('settings_token_plan')}</option>
+                <option className={settingsSelectOptionClass} value="api">{t('settings_pay_as_you_go')}</option>
               </select>
             </div>
           </div>
           {(settings.mimo_config?.billing ?? 'subscription') === 'subscription' && (
             <div className="settings-row">
               <div>
-                <div className="settings-label">{t('settings_region')}</div>
-                <div className="settings-desc">{t('settings_region_desc')}</div>
+                <div className={settingsLabelClass}>{t('settings_region')}</div>
+                <div className={settingsDescClass}>{t('settings_region_desc')}</div>
               </div>
               <div className="settings-control settings-control-compact">
                 <select
+                  className={settingsSelectClass}
                   value={settings.mimo_config?.region ?? 'china'}
                   onChange={(e) => setSettings(s => ({
                     ...s,
@@ -817,9 +868,9 @@ function CopilotSettingsSection() {
                     }
                   }))}
                 >
-                  <option value="china">{t('settings_region_china')}</option>
-                  <option value="singapore">{t('settings_region_singapore')}</option>
-                  <option value="europe">{t('settings_region_europe')}</option>
+                  <option className={settingsSelectOptionClass} value="china">{t('settings_region_china')}</option>
+                  <option className={settingsSelectOptionClass} value="singapore">{t('settings_region_singapore')}</option>
+                  <option className={settingsSelectOptionClass} value="europe">{t('settings_region_europe')}</option>
                 </select>
               </div>
             </div>
@@ -832,11 +883,12 @@ function CopilotSettingsSection() {
         <>
           <div className="settings-row">
             <div>
-              <div className="settings-label">{t('settings_billing_mode')}</div>
-              <div className="settings-desc">{t('settings_glm_billing_desc')}</div>
+              <div className={settingsLabelClass}>{t('settings_billing_mode')}</div>
+              <div className={settingsDescClass}>{t('settings_glm_billing_desc')}</div>
             </div>
             <div className="settings-control settings-control-compact">
               <select
+                className={settingsSelectClass}
                 value={settings.glm_config?.billing ?? 'subscription'}
                 onChange={(e) => setSettings(s => ({
                   ...s,
@@ -847,18 +899,19 @@ function CopilotSettingsSection() {
                   }
                 }))}
               >
-                <option value="subscription">{t('settings_subscription')}</option>
-                <option value="api">{t('settings_pay_as_you_go')}</option>
+                <option className={settingsSelectOptionClass} value="subscription">{t('settings_subscription')}</option>
+                <option className={settingsSelectOptionClass} value="api">{t('settings_pay_as_you_go')}</option>
               </select>
             </div>
           </div>
           <div className="settings-row">
             <div>
-              <div className="settings-label">{t('settings_region')}</div>
-              <div className="settings-desc">{t('settings_glm_region_desc')}</div>
+              <div className={settingsLabelClass}>{t('settings_region')}</div>
+              <div className={settingsDescClass}>{t('settings_glm_region_desc')}</div>
             </div>
             <div className="settings-control settings-control-compact">
               <select
+                className={settingsSelectClass}
                 value={settings.glm_config?.region ?? 'bigmodel'}
                 onChange={(e) => setSettings(s => ({
                   ...s,
@@ -869,8 +922,8 @@ function CopilotSettingsSection() {
                   }
                 }))}
               >
-                <option value="bigmodel">{t('settings_bigmodel_china')}</option>
-                <option value="zai">{t('settings_zai_international')}</option>
+                <option className={settingsSelectOptionClass} value="bigmodel">{t('settings_bigmodel_china')}</option>
+                <option className={settingsSelectOptionClass} value="zai">{t('settings_zai_international')}</option>
               </select>
             </div>
           </div>
@@ -881,11 +934,12 @@ function CopilotSettingsSection() {
       {settings.provider !== 'stub' && (
         <div className="settings-row">
           <div>
-            <div className="settings-label">{t('settings_max_tokens')}</div>
-            <div className="settings-desc">{t('settings_max_tokens_desc')}</div>
+            <div className={settingsLabelClass}>{t('settings_max_tokens')}</div>
+            <div className={settingsDescClass}>{t('settings_max_tokens_desc')}</div>
           </div>
           <div className="settings-control settings-control-compact">
             <input
+              className={settingsInputClass}
               type="number"
               value={settings.max_tokens}
               min={256}
@@ -900,7 +954,7 @@ function CopilotSettingsSection() {
       <div className="settings-row settings-actions">
         <div />
         <div className="settings-control">
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+          <button className={buttonClass('primary', 'sm')} onClick={handleSave} disabled={saving}>
             {saving ? t('settings_saving') : saved ? t('settings_saved') : t('settings_save_ai')}
           </button>
         </div>
@@ -932,11 +986,11 @@ function SettingsPage({
         <div className="settings-content">
           {/* Theme */}
           <div className="settings-section">
-            <div className="settings-section-title">{t('settings_appearance')}</div>
+            <div className={settingsSectionTitleClass}>{t('settings_appearance')}</div>
             <div className="settings-row">
               <div>
-                <div className="settings-label">{t('settings_theme')}</div>
-                <div className="settings-desc">{t('settings_theme_desc')}</div>
+                <div className={settingsLabelClass}>{t('settings_theme')}</div>
+                <div className={settingsDescClass}>{t('settings_theme_desc')}</div>
               </div>
               <div className="settings-control settings-control-compact">
                 <div className="theme-selector">
@@ -947,7 +1001,7 @@ function SettingsPage({
                   ].map(opt => (
                     <button
                       key={opt.id}
-                      className={`theme-option ${theme === opt.id ? 'active' : ''}`}
+                      className={themeOptionClass(theme === opt.id)}
                       onClick={() => onSetTheme(opt.id)}
                     >
                       {opt.label}
@@ -960,14 +1014,14 @@ function SettingsPage({
 
           {/* Language */}
           <div className="settings-section">
-            <div className="settings-section-title">{t('settings_language')}</div>
+            <div className={settingsSectionTitleClass}>{t('settings_language')}</div>
             <div className="settings-row">
               <div>
-                <div className="settings-label">{t('settings_editor_language')}</div>
-                <div className="settings-desc">{t('settings_language_desc')}</div>
+                <div className={settingsLabelClass}>{t('settings_editor_language')}</div>
+                <div className={settingsDescClass}>{t('settings_language_desc')}</div>
               </div>
               <div className="settings-control settings-control-compact">
-                <select value={locale} onChange={(e) => onSetLocale(e.target.value)}>
+                <select className={settingsSelectClass} value={locale} onChange={(e) => onSetLocale(e.target.value)}>
                   {[
                     { id: 'en', label: t('settings_language_en') },
                     { id: 'zh', label: t('settings_language_zh') },
@@ -976,7 +1030,7 @@ function SettingsPage({
                     { id: 'es', label: t('settings_language_es') },
                     { id: 'zh_hant', label: t('settings_language_zh_hant') },
                   ].map(opt => (
-                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                    <option key={opt.id} className={settingsSelectOptionClass} value={opt.id}>{opt.label}</option>
                   ))}
                 </select>
               </div>
@@ -988,11 +1042,11 @@ function SettingsPage({
 
           {/* About */}
           <div className="settings-section">
-            <div className="settings-section-title">{t('settings_about')}</div>
+            <div className={settingsSectionTitleClass}>{t('settings_about')}</div>
             <div className="settings-row">
               <div>
-                <div className="settings-label">{t('settings_about_name')}</div>
-                <div className="settings-desc">{t_fmt('settings_about_version', { version: '0.1.0' })}</div>
+                <div className={settingsLabelClass}>{t('settings_about_name')}</div>
+                <div className={settingsDescClass}>{t_fmt('settings_about_version', { version: '0.1.0' })}</div>
               </div>
             </div>
           </div>

@@ -1,0 +1,153 @@
+/* ===================================================================
+   CONSOLE (with filter, clear, count)
+   =================================================================== */
+
+.console-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  min-height: 26px;
+  flex-shrink: 0;
+}
+
+.console-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  max-width: 260px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  transition: border-color var(--transition-fast);
+}
+
+.console-search-wrap:focus-within {
+  border-color: var(--accent);
+}
+
+.console-search-wrap svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.console-search {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: var(--font-sans);
+  outline: none;
+  min-width: 0;
+}
+
+.console-search::placeholder {
+  color: var(--text-muted);
+}
+
+.console-search-clear {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  transition: color var(--transition-fast);
+}
+
+.console-search-clear:hover {
+  color: var(--text-primary);
+}
+
+.console-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.console-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.console-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.console-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+.console-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.console-scroll {
+  flex: 1;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.console-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.console-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+/* ── Console entries inside scroll container ── */
+
+.console-scroll .console-entry {
+  padding: 1px 0;
+  display: flex;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+.console-scroll .console-level {
+  font-weight: 600;
+  min-width: 36px;
+  flex-shrink: 0;
+}
+
+.console-scroll .console-subsystem {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.console-scroll .console-message {
+  flex: 1;
+  word-break: break-all;
+}

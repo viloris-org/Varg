@@ -1,0 +1,49 @@
+/* ===================================================================
+   QUALITY & ACCESSIBILITY FIXES
+   =================================================================== */
+
+/* Consistent focus-visible for keyboard navigation */
+*:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Cursor pointer for all interactive panels */
+.panel-header,
+.panel-tab,
+.hierarchy-item,
+.project-tree-item,
+.context-menu-item,
+.inspector-add-option,
+.copilot-plan-item {
+  cursor: pointer;
+}
+
+/* Ensure text inputs and textareas always have text cursor */
+input[type="text"],
+input[type="search"],
+input[type="url"],
+input[type="number"],
+textarea,
+select {
+  cursor: text;
+}
+
+input[type="checkbox"],
+input[type="radio"],
+select {
+  cursor: pointer;
+}
+
+/* Button consistency */
+button {
+  font-family: var(--font-sans);
+}
+
+/* Fix control font-family explicitly */
+.console-btn,
+.menubar-trigger,
+.menubar-item,
+.context-menu-item {
+  font-family: var(--font-sans);
+}

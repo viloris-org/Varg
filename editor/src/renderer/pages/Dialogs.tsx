@@ -1,6 +1,15 @@
 import React, { useCallback } from 'react';
 import { useTranslation } from '../i18n';
 import { IconAlertTriangle } from '../icons';
+import {
+  buttonClass,
+  modalBodyClass,
+  modalClass,
+  modalFooterClass,
+  modalHeaderClass,
+  modalOverlayClass,
+  modalTitleClass,
+} from '../uiClasses';
 
 // ─── Close Project Dialog (Save/Discard/Cancel) ────────────────────────────
 
@@ -19,12 +28,12 @@ export function CloseProjectDialog({ projectName, onSave, onDiscard, onCancel }:
   }, [onCancel]);
 
   return (
-    <div className="modal-overlay" onClick={handleOverlayClick}>
-      <div className="modal" style={{ width: 420 }}>
-        <div className="modal-header">
-          <h3>{t('dialog_unsaved_title')}</h3>
+    <div className={modalOverlayClass} onClick={handleOverlayClick}>
+      <div className={modalClass('w-[420px]')}>
+        <div className={modalHeaderClass}>
+          <h3 className={modalTitleClass}>{t('dialog_unsaved_title')}</h3>
         </div>
-        <div className="modal-body">
+        <div className={modalBodyClass}>
           <div className="delete-warning">
             <IconAlertTriangle />
             <div className="delete-warning-text">
@@ -32,14 +41,14 @@ export function CloseProjectDialog({ projectName, onSave, onDiscard, onCancel }:
             </div>
           </div>
         </div>
-        <div className="modal-footer" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button className="btn btn-secondary" onClick={onCancel}>
+        <div className={modalFooterClass}>
+          <button className={buttonClass('secondary')} onClick={onCancel}>
             {t('dialog_cancel')}
           </button>
-          <button className="btn btn-danger" onClick={onDiscard}>
+          <button className={buttonClass('danger')} onClick={onDiscard}>
             {t('dialog_discard')}
           </button>
-          <button className="btn btn-primary" onClick={onSave}>
+          <button className={buttonClass('primary')} onClick={onSave}>
             {t('dialog_save')}
           </button>
         </div>

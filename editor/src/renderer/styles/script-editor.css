@@ -1,0 +1,161 @@
+/* ===================================================================
+   SCRIPT EDITOR
+   =================================================================== */
+
+.script-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-base);
+}
+
+.script-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.script-editor-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.script-editor-lang {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.script-editor-dirty {
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.script-editor-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.script-editor-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.script-editor-find-input {
+  flex: 1;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  font-family: var(--font-mono);
+}
+
+.script-editor-find-input:focus {
+  border-color: var(--accent);
+}
+
+.script-editor-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.script-editor-gutter {
+  flex-shrink: 0;
+  width: 40px;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  padding-top: 2px;
+  user-select: none;
+}
+
+.script-editor-gutter-line {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-align: right;
+  padding-right: 8px;
+  line-height: 1.6;
+  height: 1.6em;
+}
+
+.script-editor-code-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.script-editor-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre;
+  pointer-events: none;
+  tab-size: 2;
+}
+
+.script-editor-highlight code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.script-editor-textarea {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: transparent;
+  caret-color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.script-editor-textarea::selection {
+  background: var(--accent-dim);
+}
+
+/* ── Syntax Tokens ── */
+
+.token-keyword { color: #C792EA; font-weight: 500; }
+.token-string   { color: #C3E88D; }
+.token-number   { color: #F78C6C; }
+.token-comment  { color: #546E7A; font-style: italic; }
+.token-operator { color: #89DDFF; }

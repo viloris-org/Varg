@@ -1,0 +1,16 @@
+/* ===================================================================
+   PROJECT TREE RENAME INPUT
+   =================================================================== */
+
+.project-tree-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+  padding: 1px 4px;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  outline: none;
+  border-radius: 2px;
+}

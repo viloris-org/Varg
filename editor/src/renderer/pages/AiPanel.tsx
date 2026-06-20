@@ -7,6 +7,12 @@ import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
 import { listKnowledge, type KnowledgeEntry } from '../quest';
 import {
+  aiEntityContextCompBadgeClass,
+  aiPlanBadgeClass,
+  aiPlanItemButtonClass,
+  buttonClass,
+} from '../uiClasses';
+import {
   IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
   IconChevronDown, IconChevronRight, IconInfo, IconLoader,
   IconSave, IconUndo, IconPlay, IconSettings, IconSparkles, IconRefresh,
@@ -290,7 +296,7 @@ function EntityContextCard({ entity }: { entity: EntityDetails }) {
           </div>
           {comps.map((c, i) => (
             <div key={i} className="ai-entity-context-row">
-              <span className="ai-entity-context-comp-badge">{c.type}</span>
+              <span className={aiEntityContextCompBadgeClass}>{c.type}</span>
             </div>
           ))}
         </div>
@@ -469,7 +475,7 @@ function PlanCard({ data }: { data: CopilotPlan }) {
 
         return (
           <div key={op.index} className="ai-plan-item">
-            <span className={`ai-plan-badge ${op.requires_write ? 'write' : 'read'}`}>
+            <span className={aiPlanBadgeClass(op.requires_write ? 'write' : 'read')}>
               {op.permission_kind === 'read' ? 'R' : op.permission_kind === 'command' ? 'CMD' : 'W'}
             </span>
             <span className="ai-plan-item-preview">{op.preview}</span>
@@ -482,14 +488,14 @@ function PlanCard({ data }: { data: CopilotPlan }) {
                 ) : (
                   <>
                     <button
-                      className="ai-plan-item-btn allow"
+                      className={aiPlanItemButtonClass('allow')}
                       onClick={() => ctx.decideOperation(op, 'once')}
                       title="Allow this operation once"
                     >
                       {t('btn_allow')}
                     </button>
                     <button
-                      className="ai-plan-item-btn deny"
+                      className={aiPlanItemButtonClass('deny')}
                       onClick={() => ctx.decideOperation(op, 'deny')}
                       title="Deny this operation"
                     >
@@ -1412,7 +1418,7 @@ export default function AiPanel({
         {status === 'error' && lastPromptRef.current && (
           <div className="ai-retry-bar">
             <button
-              className="btn btn-secondary btn-sm"
+              className={buttonClass('secondary', 'sm')}
               onClick={() => {
                 const p = lastPromptRef.current;
                 if (p) {
@@ -1455,7 +1461,7 @@ export default function AiPanel({
         return (
           <div className="ai-plan-bar">
             <button
-              className="btn btn-primary btn-sm"
+              className={buttonClass('primary', 'sm')}
               onClick={() => executeApproved()}
               disabled={approved.size === 0}
               title={approved.size === 0 ? 'Approve at least one operation below, or click \"Approve all\" to continue' : undefined}
@@ -1464,7 +1470,7 @@ export default function AiPanel({
             </button>
             {pendingOps.length > 0 && (
               <button
-                className="btn btn-secondary btn-sm"
+                className={buttonClass('secondary', 'sm')}
                 onClick={approveAll}
                 title={`Approve all ${pendingOps.length} pending write/command operation${pendingOps.length === 1 ? '' : 's'}`}
               >
@@ -1472,7 +1478,7 @@ export default function AiPanel({
               </button>
             )}
             <button
-              className="btn btn-ghost btn-sm"
+              className={buttonClass('ghost', 'sm')}
               onClick={discardProposal}
             >
               {t('btn_discard')}

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from '../i18n';
+import { toolButtonClass } from '../uiClasses';
 import { detectLanguage, highlightCode } from './syntaxHighlight';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ export default function ScriptEditor({ filePath, initialContent, onSave, onClose
         {dirty && <span className="script-editor-dirty">●</span>}
         <div className="script-editor-actions">
           <button
-            className="tool-btn"
+            className={toolButtonClass()}
             onClick={handleSave}
             disabled={!dirty}
             title={t('script_save_title')}
@@ -90,7 +91,7 @@ export default function ScriptEditor({ filePath, initialContent, onSave, onClose
             {t('btn_save')}
           </button>
           <button
-            className="tool-btn"
+            className={toolButtonClass()}
             onClick={onClose}
             title={t('btn_close')}
           >
@@ -110,7 +111,7 @@ export default function ScriptEditor({ filePath, initialContent, onSave, onClose
             onChange={(e) => setFindText(e.target.value)}
             autoFocus
           />
-          <button className="tool-btn" onClick={() => setFindOpen(false)}>×</button>
+          <button className={toolButtonClass()} onClick={() => setFindOpen(false)}>×</button>
         </div>
       )}
 

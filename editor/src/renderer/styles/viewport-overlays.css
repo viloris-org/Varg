@@ -1,0 +1,47 @@
+/* ===================================================================
+   VIEWPORT OVERLAYS
+   =================================================================== */
+
+.viewport-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
+  z-index: 1;
+  opacity: 0.6;
+}
+
+/* ── Orientation Gizmo (top-right compass) ── */
+
+.orientation-gizmo {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 80px;
+  height: 80px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.orientation-gizmo svg {
+  pointer-events: auto;
+  cursor: pointer;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,0.5));
+}
+
+.orientation-gizmo-axis {
+  cursor: pointer;
+  pointer-events: bounding-box;
+}
+
+.orientation-gizmo-axis:hover {
+  opacity: 1;
+}
+
+.orientation-gizmo svg text {
+  pointer-events: none;
+  user-select: none;
+}

@@ -4,6 +4,12 @@ import remarkGfm from 'remark-gfm';
 import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
 import {
+  buttonClass,
+  copilotPlanBadgeClass,
+  copilotPlanBadgeReadClass,
+  copilotStatusBadgeClass,
+} from '../uiClasses';
+import {
   IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
   IconChevronDown, IconChevronRight, IconInfo, IconLoader,
 } from '../icons';
@@ -64,17 +70,17 @@ function MessageBubble({ role, content }: { role: string; content: string }) {
 
 function StatusBadge({ status }: { status: CopilotStatus }) {
   const { t } = useTranslation();
-  const config: Record<CopilotStatus, { label: string; className: string }> = {
-    idle: { label: '', className: '' },
-    planning: { label: t('copilot_status_planning'), className: 'badge-copilot-planning' },
-    ready: { label: t('copilot_status_ready'), className: 'badge-copilot-ready' },
-    executing: { label: t('copilot_status_executing'), className: 'badge-copilot-executing' },
-    complete: { label: t('copilot_status_complete'), className: 'badge-copilot-complete' },
-    error: { label: t('copilot_status_error'), className: 'badge-copilot-error' },
+  const config: Record<CopilotStatus, { label: string; variant: Exclude<CopilotStatus, 'idle'> | null }> = {
+    idle: { label: '', variant: null },
+    planning: { label: t('copilot_status_planning'), variant: 'planning' },
+    ready: { label: t('copilot_status_ready'), variant: 'ready' },
+    executing: { label: t('copilot_status_executing'), variant: 'executing' },
+    complete: { label: t('copilot_status_complete'), variant: 'complete' },
+    error: { label: t('copilot_status_error'), variant: 'error' },
   };
   const c = config[status];
-  if (!c.label) return null;
-  return <span className={`badge-copilot ${c.className}`}>{c.label}</span>;
+  if (!c.label || !c.variant) return null;
+  return <span className={copilotStatusBadgeClass(c.variant)}>{c.label}</span>;
 }
 
 // ─── Copilot Panel ───────────────────────────────────────────────────────────
@@ -268,24 +274,24 @@ export default function CopilotPanel() {
                     onChange={() => toggleApproval(op.index)}
                   />
                 ) : (
-                  <span className="copilot-plan-badge-read"><IconCheck /></span>
+                  <span className={copilotPlanBadgeReadClass}><IconCheck /></span>
                 )}
                 <span className="copilot-plan-preview">{op.preview}</span>
                 {op.requires_write && (
-                  <span className="copilot-plan-badge">{t('copilot_badge_write')}</span>
+                  <span className={copilotPlanBadgeClass}>{t('copilot_badge_write')}</span>
                 )}
               </label>
             ))}
             <div className="copilot-plan-actions">
               <button
-                className="btn btn-primary btn-sm"
+                className={buttonClass('primary', 'sm')}
                 disabled={approvedCount === 0}
                 onClick={() => executeApproved()}
               >
                 {t('copilot_apply').replace('{count}', String(approvedCount))}
               </button>
               <button
-                className="btn btn-ghost btn-sm"
+                className={buttonClass('ghost', 'sm')}
                 onClick={() => { setPlan(null); setStatus('idle'); }}
               >
                 {t('copilot_reject')}

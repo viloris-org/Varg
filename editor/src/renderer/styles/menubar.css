@@ -1,0 +1,110 @@
+/* ===================================================================
+   MENUBAR
+   =================================================================== */
+
+.menubar {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  min-height: 26px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 4px;
+  user-select: none;
+  z-index: 50;
+}
+
+.menubar-menu {
+  position: relative;
+}
+
+.menubar-trigger {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.menubar-trigger:hover,
+.menubar-trigger.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.menubar-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px 0;
+  z-index: 1000;
+  animation: fadeIn 100ms ease;
+}
+
+.menubar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 5px 14px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.menubar-item:hover:not(.disabled) {
+  background: var(--bg-hover);
+}
+
+.menubar-item.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.menubar-item-label {
+  flex: 1;
+}
+
+.menubar-item-shortcut {
+  margin-left: 24px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.menubar-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 8px;
+}
+
+.menubar-submenu {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.menubar-submenu .menubar-item-label {
+  flex: 1;
+}
+
+.menubar-submenu-dropdown {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+}

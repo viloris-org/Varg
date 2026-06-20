@@ -7,6 +7,15 @@ import {
   viewportReadback,
 } from '../api';
 import { useTranslation } from '../i18n';
+import {
+  buttonClass,
+  productEmptyClass,
+  productEmptyIconClass,
+  productEmptyTextClass,
+  productEmptyTitleClass,
+  taskOperationPermissionLabelClass,
+  toolButtonClass,
+} from '../uiClasses';
 import AiPanel, { type AiWorkspaceState } from './AiPanel';
 import { CloseProjectDialog } from './Dialogs';
 import { ViewportGrid, OrientationGizmo } from './ViewportOverlays';
@@ -1845,7 +1854,7 @@ export default function EditorPage({
         </div>
         <div className="toolbar-spacer" />
         <button
-          className="tool-btn"
+          className={toolButtonClass({ size: 'toolbar' })}
           onClick={() => rpc('shell/save_scene').then(() => refreshSceneTree())}
           disabled={!shellState.scene_dirty}
           title="Save scene"
@@ -1853,7 +1862,7 @@ export default function EditorPage({
           <IconSave />
         </button>
         <button
-          className="tool-btn"
+          className={toolButtonClass({ size: 'toolbar' })}
           onClick={() => rpc('shell/undo').then(() => refreshSceneTree())}
           disabled={!shellState.can_undo}
           title="Undo"
@@ -1861,25 +1870,25 @@ export default function EditorPage({
           <IconUndo />
         </button>
         <button
-          className="tool-btn"
+          className={toolButtonClass({ size: 'toolbar' })}
           onClick={() => rpc('shell/redo').then(() => refreshSceneTree())}
           disabled={!shellState.can_redo}
           title="Redo"
         >
           <IconRedo />
         </button>
-        <button className="tool-btn play-btn" onClick={openGameView} title={t('editor_open_game_view')}><IconPlay /></button>
-        <button className="tool-btn" onClick={() => setWorkspaceView('build')} title="Build and package"><IconPackage /></button>
+        <button className={toolButtonClass({ variant: 'play', size: 'toolbar' })} onClick={openGameView} title={t('editor_open_game_view')}><IconPlay /></button>
+        <button className={toolButtonClass({ size: 'toolbar' })} onClick={() => setWorkspaceView('build')} title="Build and package"><IconPackage /></button>
         <button
-          className="tool-btn quest-mode-btn"
+          className={toolButtonClass({ size: 'toolbar', extra: 'quest-mode-btn' })}
           onClick={promoteCurrentContext}
           disabled={!onPromoteToQuest || promotingQuest}
           title="Promote current Editor context to Quest"
         >
           {promotingQuest ? <IconLoader className="spin-icon" /> : <IconSparkles />} <span>Promote</span>
         </button>
-        <button className="tool-btn quest-mode-btn" onClick={onOpenQuest} title="Open Quest Mode"><IconProjects /> <span>Quests</span></button>
-        <button className="tool-btn" onClick={handleClose} title={t('editor_close')}><IconX /></button>
+        <button className={toolButtonClass({ size: 'toolbar', extra: 'quest-mode-btn' })} onClick={onOpenQuest} title="Open Quest Mode"><IconProjects /> <span>Quests</span></button>
+        <button className={toolButtonClass({ size: 'toolbar' })} onClick={handleClose} title={t('editor_close')}><IconX /></button>
       </div>
 
       {/* Main body: viewport + AI panel */}
@@ -1956,9 +1965,9 @@ export default function EditorPage({
                 </section>
               )}
               <section className="task-operations"><div className="task-section-title"><span>{t('task_proposed_ops')}</span></div>
-                {!aiWorkspace?.plan ? <div className="product-empty"><IconProjects /><strong>{t('task_no_plan')}</strong><span>{t('task_no_plan_desc')}</span></div> : aiWorkspace.plan.operations.map(operation => <div key={operation.index}><span className={operation.permission_kind}>{operation.permission_kind.toUpperCase()}</span><p>{operation.preview}</p><small>{operation.permission_kind === 'read' ? t('op_auto_allowed') : aiWorkspace.approved.has(operation.index) ? t('op_allowed') : aiWorkspace.denied.has(operation.index) ? t('op_denied_once') : t('op_awaiting')}</small></div>)}
+                {!aiWorkspace?.plan ? <div className={productEmptyClass}><IconProjects className={productEmptyIconClass} /><strong className={productEmptyTitleClass}>{t('task_no_plan')}</strong><span className={productEmptyTextClass}>{t('task_no_plan_desc')}</span></div> : aiWorkspace.plan.operations.map(operation => <div key={operation.index}><span className={taskOperationPermissionLabelClass(operation.permission_kind)}>{operation.permission_kind.toUpperCase()}</span><p>{operation.preview}</p><small>{operation.permission_kind === 'read' ? t('op_auto_allowed') : aiWorkspace.approved.has(operation.index) ? t('op_allowed') : aiWorkspace.denied.has(operation.index) ? t('op_denied_once') : t('op_awaiting')}</small></div>)}
               </section>
-              {aiWorkspace?.plan && <footer><button className="btn btn-ghost" onClick={aiWorkspace.discardProposal}>{t('btn_discard')}</button><button className="btn btn-primary" disabled={aiWorkspace.approved.size === 0} onClick={aiWorkspace.applyApproved}>{t('btn_continue_allowed').replace('{count}', String(aiWorkspace.approved.size))}</button></footer>}
+              {aiWorkspace?.plan && <footer><button className={buttonClass('ghost')} onClick={aiWorkspace.discardProposal}>{t('btn_discard')}</button><button className={buttonClass('primary')} disabled={aiWorkspace.approved.size === 0} onClick={aiWorkspace.applyApproved}>{t('btn_continue_allowed').replace('{count}', String(aiWorkspace.approved.size))}</button></footer>}
             </div>}
 
             {workspaceView === 'game' && <div className={`game-editor-surface ${hierarchyOpen ? '' : 'hierarchy-closed'} ${inspectorOpen ? '' : 'inspector-closed'}`}>

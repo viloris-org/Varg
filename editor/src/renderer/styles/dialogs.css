@@ -1,0 +1,34 @@
+.location-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ── Delete Confirm ── */
+
+.delete-warning {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--danger-dim);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.delete-warning svg {
+  color: var(--danger);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.delete-warning-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.delete-warning-text strong {
+  color: var(--danger);
+}

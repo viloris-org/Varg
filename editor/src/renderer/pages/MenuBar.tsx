@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { rpc } from '../api';
 import { useTranslation } from '../i18n';
+import { toolButtonClass } from '../uiClasses';
 import {
   IconSave, IconUndo, IconRedo, IconPlay, IconMove, IconRotate, IconScale, IconView,
   IconX, IconChevronDown, IconChevronRight, IconPlus, IconMenu,
@@ -192,7 +193,7 @@ export function ToolbarExtras({
         {tools.map((tool) => (
           <button
             key={tool.key}
-            className={`tool-btn tool-btn-icon ${activeTool === tool.key ? 'active' : ''}`}
+            className={toolButtonClass({ size: 'icon', active: activeTool === tool.key })}
             onClick={() => onToolChange(tool.key)}
             title={`${tool.label} (${tool.shortcut})`}
           >
@@ -206,7 +207,7 @@ export function ToolbarExtras({
       {/* Transform space */}
       <div className="toolbar-group">
         <button
-          className={`tool-btn tool-btn-sm ${space === 'global' ? 'active' : ''}`}
+          className={toolButtonClass({ size: 'sm', active: space === 'global' })}
           onClick={() => onSpaceChange(space === 'global' ? 'local' : 'global')}
           title={t('tool_toggle_space')}
         >
@@ -219,7 +220,7 @@ export function ToolbarExtras({
       {/* Snap */}
       <div className="toolbar-group" style={{ position: 'relative' }}>
         <button
-          className={`tool-btn tool-btn-sm ${showSnap ? 'active' : ''}`}
+          className={toolButtonClass({ size: 'sm', active: showSnap })}
           onClick={() => setShowSnap(!showSnap)}
           title={t('tool_snap')}
         >
