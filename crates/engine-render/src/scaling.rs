@@ -261,6 +261,48 @@ impl UpscalerCapability {
     }
 }
 
+/// Backend family used by mobile vendor prototype adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MobileVendorAdapter {
+    /// Apple MetalFX upscaling.
+    MetalFx,
+    /// Qualcomm Snapdragon Game Super Resolution.
+    SnapdragonGsr,
+}
+
+impl MobileVendorAdapter {
+    /// Reports capability for a platform-gated mobile vendor integration shell.
+    pub fn capability(self, context: RenderScalingContext) -> UpscalerCapability {
+        match self {
+            Self::MetalFx if context.platform == RenderPlatformClass::AppleMobile => {
+                UpscalerCapability::unavailable(
+                    UpscalerKind::MetalFx,
+                    "MetalFX requires a native Metal adapter; wgpu handle integration is not available",
+                )
+            }
+            Self::MetalFx => UpscalerCapability::unavailable(
+                UpscalerKind::MetalFx,
+                "MetalFX is only available on Apple mobile platforms",
+            ),
+            Self::SnapdragonGsr
+                if matches!(
+                    context.platform,
+                    RenderPlatformClass::Android | RenderPlatformClass::WindowsOnArm
+                ) =>
+            {
+                UpscalerCapability::unavailable(
+                    UpscalerKind::SnapdragonGsr,
+                    "Snapdragon GSR SDK/runtime detection is not configured",
+                )
+            }
+            Self::SnapdragonGsr => UpscalerCapability::unavailable(
+                UpscalerKind::SnapdragonGsr,
+                "Snapdragon GSR is only considered for Android and Windows on Arm",
+            ),
+        }
+    }
+}
+
 /// Capability reported by one frame generation adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameGenerationCapability {
@@ -297,6 +339,18 @@ impl RenderScalingCapabilities {
             ],
             frame_generators: Vec::new(),
         }
+    }
+
+    /// Built-in capabilities plus mobile vendor prototype adapter boundaries.
+    pub fn mobile_prototype(context: RenderScalingContext) -> Self {
+        let mut capabilities = Self::built_in();
+        capabilities
+            .upscalers
+            .push(MobileVendorAdapter::MetalFx.capability(context));
+        capabilities
+            .upscalers
+            .push(MobileVendorAdapter::SnapdragonGsr.capability(context));
+        capabilities
     }
 
     /// Finds an upscaler capability.
@@ -435,6 +489,107 @@ pub struct TemporalCameraData {
     pub far: f32,
 }
 
+impl Default for TemporalCameraData {
+    fn default() -> Self {
+        Self {
+            jitter: [0.0, 0.0],
+            view_projection: identity_matrix(),
+            previous_view_projection: identity_matrix(),
+            near: 0.1,
+            far: 1000.0,
+        }
+    }
+}
+
+/// Stateful temporal metadata generator for TAA and temporal upscalers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemporalFrameState {
+    previous_view_projection: Option<[f32; 16]>,
+    previous_render_size: Option<(u32, u32)>,
+    sequence_index: u32,
+}
+
+impl Default for TemporalFrameState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TemporalFrameState {
+    /// Creates temporal state with no frame history.
+    pub const fn new() -> Self {
+        Self {
+            previous_view_projection: None,
+            previous_render_size: None,
+            sequence_index: 0,
+        }
+    }
+
+    /// Invalidates accumulated history before the next frame.
+    pub fn reset(&mut self) {
+        self.previous_view_projection = None;
+        self.previous_render_size = None;
+        self.sequence_index = 0;
+    }
+
+    /// Builds temporal camera metadata and advances history.
+    pub fn next_camera_data(
+        &mut self,
+        view_projection: [f32; 16],
+        render_size: (u32, u32),
+        near: f32,
+        far: f32,
+    ) -> (TemporalCameraData, bool) {
+        let render_size = (render_size.0.max(1), render_size.1.max(1));
+        let previous_view_projection = self.previous_view_projection.unwrap_or(view_projection);
+        let reset_history = self
+            .previous_render_size
+            .is_none_or(|previous| previous != render_size);
+        let jitter = halton_jitter(self.sequence_index, render_size);
+        self.previous_view_projection = Some(view_projection);
+        self.previous_render_size = Some(render_size);
+        self.sequence_index = self.sequence_index.wrapping_add(1);
+        (
+            TemporalCameraData {
+                jitter,
+                view_projection,
+                previous_view_projection,
+                near,
+                far,
+            },
+            reset_history,
+        )
+    }
+}
+
+fn halton_jitter(index: u32, render_size: (u32, u32)) -> [f32; 2] {
+    let sample = index + 1;
+    [
+        (halton(sample, 2) - 0.5) / render_size.0.max(1) as f32,
+        (halton(sample, 3) - 0.5) / render_size.1.max(1) as f32,
+    ]
+}
+
+fn halton(mut index: u32, base: u32) -> f32 {
+    let mut result = 0.0;
+    let mut fraction = 1.0 / base as f32;
+    while index > 0 {
+        result += (index % base) as f32 * fraction;
+        index /= base;
+        fraction /= base as f32;
+    }
+    result
+}
+
+fn identity_matrix() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
 /// Complete image and metadata contract for an upscaler invocation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UpscalerFrameData {
@@ -551,5 +706,80 @@ mod tests {
         );
         assert_eq!(selected.upscaler, UpscalerKind::Native);
         assert_eq!(selected.render_scale, 1.0);
+    }
+
+    #[test]
+    fn temporal_frame_state_tracks_previous_matrix_and_resize_resets_history() {
+        let mut state = TemporalFrameState::new();
+        let first_vp = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let second_vp = [
+            2.0, 0.0, 0.0, 0.0, //
+            0.0, 2.0, 0.0, 0.0, //
+            0.0, 0.0, 2.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let (first, first_reset) = state.next_camera_data(first_vp, (1920, 1080), 0.1, 1000.0);
+        assert!(first_reset);
+        assert_eq!(first.previous_view_projection, first_vp);
+        assert_eq!(first.jitter[0], 0.0);
+        assert!(first.jitter[1].abs() > 0.0);
+
+        let (second, second_reset) = state.next_camera_data(second_vp, (1920, 1080), 0.1, 1000.0);
+        assert!(!second_reset);
+        assert_eq!(second.previous_view_projection, first_vp);
+
+        let (_, resize_reset) = state.next_camera_data(second_vp, (1280, 720), 0.1, 1000.0);
+        assert!(resize_reset);
+    }
+
+    #[test]
+    fn mobile_vendor_prototype_reports_platform_specific_reasons() {
+        let apple = RenderScalingCapabilities::mobile_prototype(RenderScalingContext {
+            platform: RenderPlatformClass::AppleMobile,
+            ..Default::default()
+        });
+        assert!(apple
+            .upscaler(UpscalerKind::MetalFx)
+            .unwrap()
+            .reason
+            .contains("native Metal adapter"));
+
+        let android = RenderScalingCapabilities::mobile_prototype(RenderScalingContext {
+            platform: RenderPlatformClass::Android,
+            ..Default::default()
+        });
+        assert!(android
+            .upscaler(UpscalerKind::SnapdragonGsr)
+            .unwrap()
+            .reason
+            .contains("SDK/runtime detection"));
+    }
+
+    #[test]
+    fn mobile_vendor_request_falls_back_to_built_in_spatial() {
+        let context = RenderScalingContext {
+            platform: RenderPlatformClass::Android,
+            thermal_state: ThermalState::Warm,
+            battery_saver: true,
+        };
+        let settings = RenderScalingSettings {
+            preferred_upscaler: Some(UpscalerKind::SnapdragonGsr),
+            ..RenderScalingSettings::mobile()
+        };
+        let selected = negotiate_render_scaling(
+            &settings,
+            &RenderScalingCapabilities::mobile_prototype(context),
+            context,
+        );
+
+        assert_eq!(selected.upscaler, UpscalerKind::BuiltInSpatial);
+        assert!(selected.reason.contains("SnapdragonGsr unavailable"));
+        assert!(selected.render_scale >= settings.min_render_scale);
     }
 }

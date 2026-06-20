@@ -26,9 +26,10 @@ pub use resource::{
 };
 pub use scaling::{
     negotiate_render_scaling, BatteryPolicy, FrameGenerationCapability, FrameGenerationKind,
-    RenderPlatformClass, RenderQualityMode, RenderScalingCapabilities, RenderScalingContext,
-    RenderScalingSelection, RenderScalingSettings, TemporalCameraData, ThermalState,
-    UiCompositionPolicy, UpscalerBackend, UpscalerCapability, UpscalerFrameData, UpscalerKind,
+    MobileVendorAdapter, RenderPlatformClass, RenderQualityMode, RenderScalingCapabilities,
+    RenderScalingContext, RenderScalingSelection, RenderScalingSettings, TemporalCameraData,
+    TemporalFrameState, ThermalState, UiCompositionPolicy, UpscalerBackend, UpscalerCapability,
+    UpscalerFrameData, UpscalerKind,
 };
 pub use target::{RenderTarget, RenderTargetDesc, ViewKind};
 
@@ -463,8 +464,12 @@ pub trait RenderDevice {
         settings: &RenderScalingSettings,
         context: RenderScalingContext,
     ) -> RenderScalingSelection {
-        let selection =
-            negotiate_render_scaling(settings, &self.render_scaling_capabilities(), context);
+        let capabilities = if context.platform.is_mobile() {
+            RenderScalingCapabilities::mobile_prototype(context)
+        } else {
+            self.render_scaling_capabilities()
+        };
+        let selection = negotiate_render_scaling(settings, &capabilities, context);
         self.set_render_scale(selection.render_scale);
         selection
     }

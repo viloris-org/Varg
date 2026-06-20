@@ -8,11 +8,11 @@ type AiPlanItemButtonVariant = 'allow' | 'deny';
 type CopilotStatusBadgeVariant = 'planning' | 'ready' | 'executing' | 'complete' | 'error';
 type TaskOperationPermissionKind = 'write' | 'read' | 'command';
 
-const BUTTON_BASE = 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-transparent px-3.5 py-[7px] font-[var(--font-sans)] text-xs font-medium leading-none transition-all duration-[120ms] ease-in cursor-pointer disabled:pointer-events-none disabled:cursor-default disabled:opacity-40';
+const BUTTON_BASE = 'inline-flex items-center gap-1.5 rounded-[var(--radius-md)] border border-transparent px-3.5 py-[7px] font-[var(--font-sans)] text-xs font-semibold leading-none shadow-[var(--shadow-sm)] transition-all duration-[var(--transition-fast)] ease-in cursor-pointer disabled:pointer-events-none disabled:cursor-default disabled:opacity-40';
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
-  primary: 'border-[var(--accent)] bg-[var(--accent)] text-white enabled:hover:border-[var(--accent-hover)] enabled:hover:bg-[var(--accent-hover)]',
-  secondary: 'border-[var(--border)] bg-transparent text-[var(--text-secondary)] enabled:hover:border-[var(--border-light)] enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)]',
+  primary: 'border-[var(--brand)] bg-[linear-gradient(180deg,var(--brand),var(--brand-hover))] text-white enabled:hover:border-[var(--brand-hover)] enabled:hover:brightness-110',
+  secondary: 'border-[var(--border)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] enabled:hover:border-[var(--border-light)] enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)]',
   danger: 'border-[var(--border)] bg-transparent text-[var(--danger)] enabled:hover:border-[var(--danger)] enabled:hover:bg-[var(--danger-dim)]',
   ghost: 'border-transparent bg-transparent text-[var(--text-secondary)] enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)]',
 };
@@ -30,7 +30,7 @@ export function buttonClass(
   return [BUTTON_BASE, BUTTON_VARIANTS[variant], BUTTON_SIZES[size], extra].filter(Boolean).join(' ');
 }
 
-const TOOL_BUTTON_BASE = 'inline-flex cursor-pointer items-center justify-center rounded-[3px] border border-transparent bg-transparent px-2 py-[2px] font-[var(--font-sans)] text-xs text-[var(--text-secondary)] transition-all duration-150 enabled:hover:border-[var(--border)] enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)] disabled:cursor-default disabled:opacity-35';
+const TOOL_BUTTON_BASE = 'inline-flex cursor-pointer items-center justify-center rounded-[var(--radius-sm)] border border-transparent bg-transparent px-2 py-[2px] font-[var(--font-sans)] text-xs text-[var(--text-secondary)] transition-all duration-150 enabled:hover:border-[var(--border-light)] enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)] disabled:cursor-default disabled:opacity-35';
 const TOOL_BUTTON_VARIANTS: Record<ToolButtonVariant, string> = {
   default: '',
   play: 'font-semibold text-[var(--accent)] enabled:hover:border-[var(--accent)] enabled:hover:bg-[var(--accent-dim)] enabled:hover:text-[var(--accent)]',
@@ -62,9 +62,9 @@ export function toolButtonClass({
   ].filter(Boolean).join(' ');
 }
 
-export const modalOverlayClass = 'fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-[4px] animate-[fadeIn_150ms_ease]';
+export const modalOverlayClass = 'fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-[8px] animate-[fadeIn_150ms_ease]';
 export function modalClass(width = 'w-[540px]'): string {
-  return `${width} max-h-[85vh] max-w-[90vw] overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--border)] bg-[var(--bg-surface)] shadow-[var(--shadow-lg)] animate-[slideUp_200ms_ease]`;
+  return `${width} max-h-[85vh] max-w-[90vw] overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--border-light)] bg-[var(--bg-elevated)] shadow-[var(--shadow-lg)] animate-[slideUp_200ms_ease]`;
 }
 export const modalHeaderClass = 'flex items-center justify-between px-6 pt-5';
 export const modalTitleClass = 'text-[17px] font-semibold text-[var(--text-primary)]';
@@ -74,15 +74,15 @@ export const modalFooterClass = 'flex items-center justify-end gap-2 px-6 pb-5';
 
 export const formGroupClass = 'mb-4';
 export const formLabelClass = 'mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.4px] text-[var(--text-muted)]';
-export const formInputClass = 'w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-2 font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] outline-none transition-[border-color] duration-[120ms] ease-in placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]';
-export const formSelectClass = 'w-full cursor-pointer rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-2 font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] outline-none transition-[border-color] duration-[120ms] ease-in focus:border-[var(--accent)]';
+export const formInputClass = 'w-full rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-2 font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] outline-none shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-[border-color,background-color,box-shadow] duration-[120ms] ease-in placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-dim)]';
+export const formSelectClass = 'w-full cursor-pointer rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-2 font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] outline-none transition-[border-color,box-shadow] duration-[120ms] ease-in focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-dim)]';
 export const formErrorClass = 'mt-1 text-xs text-[var(--danger)]';
 
 export const templateGridClass = 'mb-4 grid grid-cols-2 gap-2.5';
 export function templateCardClass(selected: boolean): string {
   return selected
-    ? 'cursor-pointer rounded-[var(--radius-lg)] border border-[var(--accent)] bg-[var(--accent-dim)] p-4 transition-all duration-[120ms] ease-in'
-    : 'cursor-pointer rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-base)] p-4 transition-all duration-[120ms] ease-in hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]';
+    ? 'cursor-pointer rounded-[var(--radius-lg)] border border-[var(--accent)] bg-[var(--accent-dim)] p-4 shadow-[var(--shadow-sm)] transition-all duration-[120ms] ease-in'
+    : 'cursor-pointer rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4 shadow-[var(--shadow-sm)] transition-all duration-[120ms] ease-in hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]';
 }
 export const templateCardIconClass = 'mb-2 block h-6 w-6 text-[var(--accent)]';
 export const templateCardTitleClass = 'mb-1 text-sm font-semibold text-[var(--text-primary)]';
@@ -93,7 +93,7 @@ export const warningPanelClass = 'mb-4 flex items-start gap-3 rounded-[var(--rad
 export const warningPanelIconClass = 'mt-px flex-shrink-0 text-[var(--danger)]';
 export const warningPanelTextClass = 'text-[13px] leading-[1.5] text-[var(--text-primary)] [&_strong]:text-[var(--danger)]';
 
-export const installCardClass = 'flex items-center gap-3.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] px-4 py-3.5 transition-[border-color] duration-[120ms] ease-in hover:border-[var(--border-light)]';
+export const installCardClass = 'flex items-center gap-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] px-4 py-3.5 shadow-[var(--shadow-sm)] transition-[border-color,background-color,transform] duration-[120ms] ease-in hover:-translate-y-px hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]';
 export const installIconClass = 'flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--accent-dim)] text-[var(--accent)]';
 export const installInfoClass = 'min-w-0 flex-1';
 export const installVersionClass = 'text-sm font-semibold text-[var(--text-primary)]';
@@ -121,16 +121,16 @@ export function themeOptionClass(active: boolean): string {
 
 export function projectCardClass(selected: boolean): string {
   return selected
-    ? 'relative flex cursor-pointer items-center gap-3.5 rounded-[var(--radius-lg)] border border-[var(--accent)] bg-[var(--accent-dim)] px-4 py-3.5 transition-all duration-200 ease-in hover:bg-[rgba(34,197,94,0.2)]'
-    : 'relative flex cursor-pointer items-center gap-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-surface)] px-4 py-3.5 transition-all duration-200 ease-in hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]';
+    ? 'relative flex cursor-pointer items-center gap-3.5 rounded-[var(--radius-lg)] border border-[var(--brand)] bg-[var(--brand-dim)] px-4 py-3.5 shadow-[var(--shadow-md)] transition-all duration-200 ease-in hover:brightness-110'
+    : 'relative flex cursor-pointer items-center gap-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] px-4 py-3.5 shadow-[var(--shadow-sm)] transition-all duration-200 ease-in hover:-translate-y-px hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]';
 }
-export const projectAvatarClass = 'flex h-[42px] w-[42px] flex-shrink-0 items-center justify-center rounded-[var(--radius-md)] font-[var(--font-sans)] text-[15px] font-bold text-white';
+export const projectAvatarClass = 'flex h-[42px] w-[42px] flex-shrink-0 items-center justify-center rounded-[var(--radius-md)] font-[var(--font-sans)] text-[15px] font-bold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.24),0_8px_18px_rgba(0,0,0,0.22)]';
 export const projectInfoClass = 'min-w-0 flex-1';
 export const projectNameClass = 'overflow-hidden text-ellipsis whitespace-nowrap text-sm font-semibold text-[var(--text-primary)]';
 export const projectPathClass = 'mt-px overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-[var(--text-muted)]';
 export const projectMetaClass = 'mt-[3px] flex items-center gap-2 text-[11px] text-[var(--text-muted)]';
 export const projectMetaDotClass = 'h-[3px] w-[3px] rounded-full bg-[var(--text-muted)]';
-export const projectFolderButtonClass = 'flex h-[30px] w-[30px] flex-shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-sm)] border border-transparent bg-transparent text-[var(--text-muted)] transition-all duration-[120ms] ease-in hover:border-[var(--border-light)] hover:bg-[var(--bg-base)] hover:text-[var(--text-primary)]';
+export const projectFolderButtonClass = 'flex h-[30px] w-[30px] flex-shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border border-transparent bg-transparent text-[var(--text-muted)] transition-all duration-[120ms] ease-in hover:border-[var(--border-light)] hover:bg-[var(--bg-base)] hover:text-[var(--text-primary)]';
 export const projectPanelIconButtonClass = 'flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-[3px] border-0 bg-transparent text-[var(--text-secondary)] transition-all duration-[var(--transition-fast)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]';
 export const projectPanelSearchInputClass = 'w-full rounded-[3px] border border-[var(--border)] bg-[var(--bg-base)] bg-[url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2711%27%20height=%2711%27%20viewBox=%270%200%2024%2024%27%20fill=%27none%27%20stroke=%27%2364748B%27%20stroke-width=%272%27%20stroke-linecap=%27round%27%20stroke-linejoin=%27round%27%3E%3Ccircle%20cx=%2711%27%20cy=%2711%27%20r=%278%27/%3E%3Cline%20x1=%2721%27%20y1=%2721%27%20x2=%2716.65%27%20y2=%2716.65%27/%3E%3C/svg%3E)] bg-[position:6px_center] bg-no-repeat py-[3px] pr-2 pl-[22px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none transition-[border-color] duration-[var(--transition-fast)] focus:border-[var(--accent)]';
 export const projectTreeRenameInputClass = 'min-w-0 flex-1 rounded-[2px] border border-[var(--accent)] bg-[var(--bg-surface)] px-1 py-px font-[var(--font-sans)] text-xs text-[var(--text-primary)] outline-none';
@@ -161,7 +161,7 @@ export const hubEmptyTextClass = 'max-w-xs text-[13px] leading-normal text-[var(
 export const aiEntityContextCompBadgeClass = 'rounded-[3px] bg-[var(--accent-dim)] px-1.5 py-px text-[10px] font-medium text-[var(--accent)]';
 
 export function aiPlanBadgeClass(variant: AiPlanBadgeVariant): string {
-  const base = 'flex h-[18px] min-w-[22px] flex-shrink-0 items-center justify-center rounded px-[3px] text-[9px] font-bold';
+  const base = 'flex h-[18px] min-w-[22px] flex-shrink-0 items-center justify-center rounded px-[3px] text-[10px] font-bold';
   return variant === 'write'
     ? `${base} bg-[#f59e0b20] text-[#f59e0b]`
     : `${base} bg-[#10b98120] text-[#10b981]`;
@@ -174,7 +174,7 @@ export function aiPlanItemButtonClass(variant: AiPlanItemButtonVariant): string 
     : `${base} border-[rgba(239,68,68,0.3)] bg-[rgba(239,68,68,0.08)] text-[#ef4444] hover:border-[#ef4444] hover:bg-[rgba(239,68,68,0.18)]`;
 }
 
-const COPILOT_STATUS_BADGE_BASE = 'ml-auto rounded-[3px] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.3px]';
+const COPILOT_STATUS_BADGE_BASE = 'ml-auto rounded-[3px] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.3px]';
 const COPILOT_STATUS_BADGE_VARIANTS: Record<CopilotStatusBadgeVariant, string> = {
   planning: 'bg-[var(--info)] text-white',
   ready: 'bg-[var(--accent)] text-white',
@@ -188,17 +188,17 @@ export function copilotStatusBadgeClass(variant: CopilotStatusBadgeVariant): str
 }
 
 export const copilotPlanBadgeReadClass = 'flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center text-[var(--accent)]';
-export const copilotPlanBadgeClass = 'flex-shrink-0 rounded-[3px] bg-[var(--warning)] px-[5px] py-px text-[9px] font-semibold uppercase tracking-[0.3px] text-black';
+export const copilotPlanBadgeClass = 'flex-shrink-0 rounded-[3px] bg-[var(--warning)] px-[5px] py-px text-[10px] font-semibold uppercase tracking-[0.3px] text-black';
 
 export const productEmptyClass = 'product-empty flex min-h-[220px] flex-col items-center justify-center gap-[7px] text-[var(--text-muted)]';
-export const productEmptyIconClass = 'h-5 w-5 text-[#60a5fa]';
+export const productEmptyIconClass = 'h-5 w-5 text-[var(--text-muted)]';
 export const productEmptyTitleClass = 'text-xs font-semibold text-[var(--text-secondary)]';
 export const productEmptyTextClass = 'text-[10px]';
 
 const TASK_OPERATION_PERMISSION_LABEL_COLORS: Record<TaskOperationPermissionKind, string> = {
   write: 'text-[#fbbf24]',
   read: 'text-[#22c55e]',
-  command: 'text-[#60a5fa]',
+  command: 'text-[var(--text-secondary)]',
 };
 
 export function taskOperationPermissionLabelClass(kind: string): string {

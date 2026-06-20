@@ -2214,6 +2214,9 @@ impl WgpuRenderDevice {
             },
             active_upscaler: engine_render::UpscalerKind::Native,
             upscale_sharpness: 0.35,
+            temporal_state: engine_render::TemporalFrameState::default(),
+            latest_temporal_camera: engine_render::TemporalCameraData::default(),
+            reset_temporal_history: true,
         };
         renderer.upload_debug_meshes();
         renderer.bake_ibl();

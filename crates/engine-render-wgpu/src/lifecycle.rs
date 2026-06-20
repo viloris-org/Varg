@@ -24,6 +24,11 @@ impl WgpuRenderDevice {
         self.submitted_worlds
     }
 
+    /// Returns the most recent temporal camera metadata and history reset flag.
+    pub fn latest_temporal_camera(&self) -> (engine_render::TemporalCameraData, bool) {
+        (self.latest_temporal_camera, self.reset_temporal_history)
+    }
+
     /// Returns adapter and native output capability information.
     pub fn output_capabilities(&self) -> WgpuOutputCapabilities {
         let limits = self.device.limits();

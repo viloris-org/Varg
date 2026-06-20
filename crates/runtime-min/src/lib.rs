@@ -40,10 +40,10 @@ use engine_physics::{
 };
 use engine_platform::{ActionMap, GamepadProvider, InputState};
 use engine_render::{
-    BatteryPolicy, HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle, ImageUsage,
-    PresentStrategy, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder,
+    BatteryPolicy, FrameGenerationKind, HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle,
+    ImageUsage, PresentStrategy, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder,
     RenderPerformanceConfig, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
-    RenderScalingSettings, RenderWorld, ThermalState, UpscalerKind,
+    RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy, UpscalerKind,
 };
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
@@ -2016,7 +2016,8 @@ pub fn runtime_performance_config_from_env() -> RenderPerformanceConfig {
 ///
 /// Supported variables are `ASTER_UPSCALER`, `ASTER_RENDER_QUALITY`,
 /// `ASTER_RENDER_SCALE_MIN`, `ASTER_RENDER_SCALE_MAX`, `ASTER_UPSCALE_SHARPNESS`,
-/// `ASTER_TARGET_FPS`, `ASTER_DYNAMIC_RESOLUTION`, and `ASTER_BATTERY_POLICY`.
+/// `ASTER_TARGET_FPS`, `ASTER_DYNAMIC_RESOLUTION`, `ASTER_BATTERY_POLICY`,
+/// `ASTER_FRAME_GENERATION`, and `ASTER_UI_COMPOSITION`.
 pub fn runtime_scaling_settings_from_env() -> RenderScalingSettings {
     apply_runtime_scaling_env(RenderScalingSettings::default())
 }
@@ -2033,6 +2034,8 @@ pub fn render_scaling_settings_from_build(build: &BuildConfiguration) -> RenderS
         sharpness: f32::from(render.sharpness_percent) / 100.0,
         target_fps: render.target_fps,
         battery_policy: parse_battery_policy(&render.battery_policy),
+        frame_generation: parse_frame_generation(&render.frame_generation),
+        ui_composition: parse_ui_composition(&render.ui_composition),
         ..RenderScalingSettings::default()
     };
     apply_runtime_scaling_env(settings)
@@ -2070,6 +2073,12 @@ fn apply_runtime_scaling_env(mut settings: RenderScalingSettings) -> RenderScali
     }
     if let Ok(value) = std::env::var("ASTER_BATTERY_POLICY") {
         settings.battery_policy = parse_battery_policy(&value);
+    }
+    if let Ok(value) = std::env::var("ASTER_FRAME_GENERATION") {
+        settings.frame_generation = parse_frame_generation(&value);
+    }
+    if let Ok(value) = std::env::var("ASTER_UI_COMPOSITION") {
+        settings.ui_composition = parse_ui_composition(&value);
     }
     settings.normalized()
 }
@@ -2109,6 +2118,24 @@ fn parse_battery_policy(value: &str) -> BatteryPolicy {
     }
 }
 
+fn parse_frame_generation(value: &str) -> FrameGenerationKind {
+    match value.to_ascii_lowercase().as_str() {
+        "fsr" => FrameGenerationKind::Fsr,
+        "dlss" => FrameGenerationKind::Dlss,
+        "xess" => FrameGenerationKind::Xess,
+        "metalfx" | "metal-fx" => FrameGenerationKind::MetalFx,
+        _ => FrameGenerationKind::Disabled,
+    }
+}
+
+fn parse_ui_composition(value: &str) -> UiCompositionPolicy {
+    match value.to_ascii_lowercase().as_str() {
+        "before-frame-generation" | "before-fg" => UiCompositionPolicy::BeforeFrameGeneration,
+        "separate-texture" | "separate" => UiCompositionPolicy::SeparateTexture,
+        _ => UiCompositionPolicy::AfterFrameGeneration,
+    }
+}
+
 /// Detects broad runtime conditions used by automatic scaling policy.
 pub fn runtime_scaling_context() -> RenderScalingContext {
     let platform = if cfg!(target_os = "android") {
@@ -2119,6 +2146,8 @@ pub fn runtime_scaling_context() -> RenderScalingContext {
         target_os = "visionos"
     )) {
         RenderPlatformClass::AppleMobile
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        RenderPlatformClass::WindowsOnArm
     } else {
         RenderPlatformClass::Desktop
     };
@@ -2156,11 +2185,13 @@ pub fn build_default_render_graph() -> RenderGraph {
     let mut builder = RenderGraphBuilder::new();
     let shadow = builder.add_pass("shadow");
     let forward = builder.add_pass("forward");
+    let temporal_inputs = builder.add_pass_at_stage("temporal-inputs", RenderStage::TemporalInputs);
     let upscale = builder.add_pass_at_stage("upscale", RenderStage::Upscale);
     let post = builder.add_pass_at_stage("post", RenderStage::PostUpscale);
     let ui = builder.add_pass_at_stage("ui", RenderStage::UiComposition);
     builder.order_before(shadow, forward);
-    builder.order_before(forward, upscale);
+    builder.order_before(forward, temporal_inputs);
+    builder.order_before(temporal_inputs, upscale);
     builder.order_before(upscale, post);
     builder.order_before(post, ui);
     builder.build()
@@ -2609,12 +2640,13 @@ mod tests {
     #[test]
     fn default_render_graph_has_expected_passes() {
         let graph = build_default_render_graph();
-        assert_eq!(graph.pass_count(), 5);
+        assert_eq!(graph.pass_count(), 6);
         assert_eq!(graph.passes[0].name, "shadow");
         assert_eq!(graph.passes[1].name, "forward");
-        assert_eq!(graph.passes[2].name, "upscale");
-        assert_eq!(graph.passes[3].name, "post");
-        assert_eq!(graph.passes[4].name, "ui");
+        assert_eq!(graph.passes[2].name, "temporal-inputs");
+        assert_eq!(graph.passes[3].name, "upscale");
+        assert_eq!(graph.passes[4].name, "post");
+        assert_eq!(graph.passes[5].name, "ui");
     }
 
     #[test]

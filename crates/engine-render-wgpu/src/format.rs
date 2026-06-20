@@ -65,6 +65,7 @@ pub(crate) fn to_wgpu_format(format: ImageFormat) -> wgpu::TextureFormat {
         ImageFormat::Rgba8Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         ImageFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         ImageFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        ImageFormat::Rg16Float => wgpu::TextureFormat::Rg16Float,
         ImageFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
         ImageFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
         ImageFormat::Depth24Stencil8 => wgpu::TextureFormat::Depth24PlusStencil8,
@@ -81,6 +82,7 @@ pub(crate) fn from_wgpu_format(format: wgpu::TextureFormat) -> Option<ImageForma
             Some(ImageFormat::Rgba8Unorm)
         }
         wgpu::TextureFormat::Rgba16Float => Some(ImageFormat::Rgba16Float),
+        wgpu::TextureFormat::Rg16Float => Some(ImageFormat::Rg16Float),
         wgpu::TextureFormat::Rgba32Float => Some(ImageFormat::Rgba32Float),
         _ => None,
     }

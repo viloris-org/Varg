@@ -227,6 +227,36 @@ pub(crate) fn fog_uniform_from_world(world: &RenderWorld) -> FogUniform {
     }
 }
 pub(crate) fn camera_uniform_from_world(world: &RenderWorld, aspect: f32) -> CameraUniform {
+    let (vp, eye, target, _) = camera_temporal_basis(world, aspect);
+    CameraUniform {
+        view_projection: vp,
+        camera_position: [eye.x, eye.y, eye.z, 1.0],
+        camera_forward: {
+            let forward = (target - eye).normalized();
+            [forward.x, forward.y, forward.z, 0.0]
+        },
+    }
+}
+
+pub(crate) fn temporal_camera_from_world(
+    world: &RenderWorld,
+    aspect: f32,
+    render_size: (u32, u32),
+    state: &mut engine_render::TemporalFrameState,
+) -> (engine_render::TemporalCameraData, bool) {
+    let (view_projection, _, _, (near, far)) = camera_temporal_basis(world, aspect);
+    state.next_camera_data(flatten_mat4(view_projection), render_size, near, far)
+}
+
+fn camera_temporal_basis(
+    world: &RenderWorld,
+    aspect: f32,
+) -> (
+    [[f32; 4]; 4],
+    engine_core::math::Vec3,
+    engine_core::math::Vec3,
+    (f32, f32),
+) {
     let eye = world
         .camera
         .as_ref()
@@ -281,14 +311,28 @@ pub(crate) fn camera_uniform_from_world(world: &RenderWorld, aspect: f32) -> Cam
         _ => perspective_rh(fov.to_radians(), aspect, near, far),
     };
     let vp = mul_mat4(&proj, &view);
-    CameraUniform {
-        view_projection: vp,
-        camera_position: [eye.x, eye.y, eye.z, 1.0],
-        camera_forward: {
-            let forward = (target - eye).normalized();
-            [forward.x, forward.y, forward.z, 0.0]
-        },
-    }
+    (vp, eye, target, (near, far))
+}
+
+fn flatten_mat4(matrix: [[f32; 4]; 4]) -> [f32; 16] {
+    [
+        matrix[0][0],
+        matrix[0][1],
+        matrix[0][2],
+        matrix[0][3],
+        matrix[1][0],
+        matrix[1][1],
+        matrix[1][2],
+        matrix[1][3],
+        matrix[2][0],
+        matrix[2][1],
+        matrix[2][2],
+        matrix[2][3],
+        matrix[3][0],
+        matrix[3][1],
+        matrix[3][2],
+        matrix[3][3],
+    ]
 }
 
 pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUniform {

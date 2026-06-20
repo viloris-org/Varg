@@ -29,11 +29,16 @@ import {
 } from './gizmoMath';
 import {
   IconAlertCircle,
+  IconAudio,
+  IconBot,
   IconCheck,
+  IconChevronDown,
+  IconChevronRight,
   IconCode,
   IconCopy,
   IconFile,
   IconLoader,
+  IconModel,
   IconPackage,
   IconPlay,
   IconPlus,
@@ -41,8 +46,10 @@ import {
   IconRedo,
   IconSave,
   IconSparkles,
+  IconSun,
   IconTrash,
   IconUndo,
+  IconView,
   IconX,
 } from '../icons';
 import type { QuestEditorArtifact } from '../App';
@@ -209,40 +216,43 @@ function cx(...classes: Array<string | false | null | undefined>): string {
 
 const shellClass = {
   loading: 'flex h-screen items-center justify-center text-[var(--text-secondary)]',
-  root: 'flex h-full w-full min-h-0 flex-col bg-[var(--bg-base)]',
-  toolbar: 'flex min-h-[42px] items-center gap-2 border-b border-[var(--border)] bg-[var(--bg-surface)] py-[5px] pr-2 pl-3 shadow-[0_1px_0_rgba(255,255,255,0.02)]',
+  root: 'flex h-full w-full min-h-0 flex-col bg-[linear-gradient(135deg,rgba(255,255,255,0.025),transparent_34%),var(--bg-base)]',
+  toolbar: 'flex min-h-[44px] items-center gap-2 border-b border-[var(--border)] bg-[var(--bg-overlay)] py-[5px] pr-2 pl-3 shadow-[var(--shadow-sm)] backdrop-blur-xl',
   toolbarProject: 'flex min-w-[120px] flex-col justify-center leading-[1.15]',
-  toolbarProjectKicker: 'text-[9px] font-semibold tracking-[0.08em] text-[var(--text-muted)] uppercase',
+  toolbarProjectKicker: 'text-[10px] font-semibold tracking-[0.08em] text-[var(--text-muted)] uppercase',
   toolbarProjectName: 'text-[13px] font-semibold text-[var(--text-primary)]',
   toolbarSpacer: 'flex-1',
   body: 'flex min-h-0 flex-1 overflow-hidden',
-  statusbar: 'flex h-[22px] min-h-[22px] select-none items-center justify-between border-t border-[var(--border)] bg-[var(--bg-surface)] px-2 text-[11px]',
+  statusbar: 'flex h-[23px] min-h-[23px] select-none items-center justify-between border-t border-[var(--border)] bg-[var(--bg-overlay)] px-2 text-[11px] backdrop-blur-xl',
   statusGroup: 'flex min-w-0 items-center gap-[7px]',
   statusDivider: 'h-2.5 w-px flex-none bg-[var(--border)]',
   statusItem: 'min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[var(--text-secondary)]',
   statusSelection: 'text-[var(--accent)]',
-  statusSaved: 'text-[#22c55e]',
+  statusSaved: 'text-[var(--success)]',
   statusDirty: 'flex items-center gap-[5px]',
-  statusDot: 'size-1.5 rounded-full bg-[#f59e0b]',
+  statusDot: 'size-1.5 rounded-full bg-[var(--warning)] shadow-[0_0_8px_var(--warning)]',
   version: 'text-[var(--accent)]',
 };
 
 const workspaceClass = {
-  root: 'flex min-w-0 flex-1 flex-col overflow-hidden bg-[#111216]',
-  tabs: 'flex min-h-11 items-end gap-0.5 border-b border-[var(--border)] bg-[var(--bg-surface)] px-3.5',
-  tab: 'flex h-9 cursor-pointer items-center gap-[7px] border-0 border-b-2 border-transparent bg-transparent px-[13px] text-[11px] font-medium text-[var(--text-muted)] transition-[color,background,border-color] duration-150 hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_svg]:size-[13px]',
-  tabActive: 'border-b-[#60a5fa] text-[#93c5fd]',
-  tabBadge: 'min-w-[17px] rounded-lg bg-[rgba(96,165,250,0.13)] px-[5px] py-px text-center text-[9px] text-[#93c5fd]',
+  root: 'flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-base)]',
+  tabs: 'flex min-h-[38px] items-stretch gap-0.5 border-b border-[var(--border)] bg-[var(--bg-surface)] px-2',
+  tab: 'group relative flex cursor-pointer items-center gap-2 border-0 bg-transparent px-3 text-[12px] font-medium text-[var(--text-muted)] transition-colors duration-150 hover:text-[var(--text-primary)] [&_svg]:size-[14px] [&_svg]:opacity-70 hover:[&_svg]:opacity-100',
+  tabActive: 'tab-active text-[var(--text-primary)] [&_svg]:text-[var(--brand)] [&_svg]:opacity-100 after:absolute after:inset-x-2 after:bottom-0 after:h-[2px] after:rounded-full after:bg-[var(--brand)]',
+  tabBadge: 'min-w-[16px] rounded-full bg-[var(--bg-active)] px-1.5 text-center text-[10px] font-semibold leading-[15px] text-[var(--text-secondary)] group-[.tab-active]:bg-[var(--brand-dim)] group-[.tab-active]:text-[var(--brand)]',
   view: 'min-h-0 flex-1 overflow-auto',
   viewGame: 'flex overflow-hidden',
-  aiPanel: 'flex min-w-[380px] flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--bg-base)] max-[900px]:min-w-[330px] [&_.ai-context-selected]:hidden',
+  aiPanel: 'flex min-w-[320px] flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--bg-surface)] max-[900px]:min-w-[320px] [&_.ai-context-selected]:hidden',
+  aiRail: 'flex w-12 shrink-0 flex-col items-center gap-2 border-l border-[var(--border)] bg-[var(--bg-surface)] px-1.5 py-2',
+  aiRailButton: 'grid size-8 cursor-pointer place-items-center rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+  aiRailBadge: 'grid size-5 place-items-center rounded-full bg-[var(--warning)] font-mono text-[10px] font-bold text-black',
   resizeHandle: 'relative z-10 w-1 shrink-0 cursor-col-resize hover:bg-[var(--accent)] hover:opacity-30 active:bg-[var(--accent)] active:opacity-30 focus-visible:bg-[var(--accent-dim)] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-[var(--accent)]',
 };
 
 const prdClass = {
   document: 'mx-auto mt-[34px] mb-16 w-[min(820px,calc(100%_-_64px))] text-[var(--text-secondary)]',
   header: 'border-b border-[var(--border)] pb-7',
-  kicker: 'text-[10px] font-bold tracking-[0.1em] text-[#60a5fa] uppercase',
+  kicker: 'text-[10px] font-bold tracking-[0.1em] text-[var(--text-secondary)] uppercase',
   title: 'my-2 block text-[28px] tracking-[-0.03em] text-[var(--text-primary)]',
   description: 'm-0 text-xs text-[var(--text-muted)]',
   section: 'border-b border-[var(--border)] py-[25px]',
@@ -261,39 +271,39 @@ const taskClass = {
   kicker: prdClass.kicker,
   title: 'mt-1.5 mb-0 text-[21px] text-[var(--text-primary)] capitalize',
   meta: 'text-[var(--text-muted)]',
-  artifactCard: 'mb-[18px] grid grid-cols-[minmax(0,1fr)_auto] gap-3.5 rounded-lg border border-[#29446f] bg-[rgba(37,99,235,0.08)] p-3.5',
-  artifactKicker: 'block text-[9px] font-bold text-[#93c5fd] uppercase',
+  artifactCard: 'mb-[18px] grid grid-cols-[minmax(0,1fr)_auto] gap-3.5 rounded-lg border border-[var(--border-light)] bg-[var(--accent-dim)] p-3.5',
+  artifactKicker: 'block text-[10px] font-bold text-[var(--text-secondary)] uppercase',
   artifactTitle: 'mt-[5px] block text-sm text-[var(--text-primary)]',
   artifactDescription: 'mt-[7px] mb-0 text-[11px] leading-normal text-[var(--text-secondary)]',
   artifactPath: 'mt-2 block overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-[var(--text-muted)]',
   artifactActions: 'flex items-start gap-2',
-  artifactButton: 'inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border)] bg-[#111216] px-[9px] py-[7px] text-[10px] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
+  artifactButton: 'inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] px-[9px] py-[7px] text-[10px] text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:text-[var(--text-primary)]',
   operations: 'overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-surface)]',
   operationsTitle: 'flex min-h-[42px] items-center justify-between border-b border-[var(--border)] px-[13px] text-[11px] font-semibold text-[var(--text-secondary)]',
   operationRow: 'grid grid-cols-[58px_1fr_auto] items-start gap-[9px] border-b border-[var(--border)] px-[13px] py-3 last:border-b-0',
-  operationPermission: 'pt-0.5 font-mono text-[8px] font-bold',
+  operationPermission: 'pt-0.5 font-mono text-[10px] font-bold',
   operationPreview: 'm-0 text-[11px] leading-normal text-[var(--text-secondary)]',
-  operationState: 'whitespace-nowrap text-[9px] text-[var(--text-muted)]',
+  operationState: 'whitespace-nowrap text-[10px] text-[var(--text-muted)]',
   footer: 'mt-3.5 flex justify-end gap-2',
 };
 
 const surfaceClass = {
-  root: 'flex h-full min-h-0 flex-col bg-[#090a0d]',
-  header: 'flex min-h-[46px] items-center justify-between gap-3 border-b border-[var(--border)] bg-[#0d0e12] px-3.5',
-  buildHeader: 'flex min-h-[52px] items-center justify-between gap-3 border-b border-[var(--border)] bg-[#0d0e12] px-4',
-  headerKicker: 'block text-[9px] text-[var(--text-muted)] uppercase',
-  buildKicker: 'block text-[9px] font-bold tracking-[0.08em] text-[var(--text-muted)] uppercase',
+  root: 'flex h-full min-h-0 flex-col bg-[var(--bg-base)]',
+  header: 'flex min-h-[46px] items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-overlay)] px-3.5 backdrop-blur-xl',
+  buildHeader: 'flex min-h-[52px] items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-overlay)] px-4 backdrop-blur-xl',
+  headerKicker: 'block text-[10px] text-[var(--text-muted)] uppercase',
+  buildKicker: 'block text-[10px] font-bold tracking-[0.08em] text-[var(--text-muted)] uppercase',
   headerTitle: 'mt-0.5 block text-xs text-[var(--text-primary)]',
   buildHeaderTitle: 'mt-[3px] block text-[13px] text-[var(--text-primary)]',
   toolbar: 'flex min-w-0 flex-wrap justify-end gap-1.5',
-  button: 'min-h-7 cursor-pointer rounded-[5px] border border-[var(--border)] bg-[#111216] px-2.5 text-[10px] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
-  primaryButton: 'inline-flex min-h-8 cursor-pointer items-center gap-[7px] rounded-md border border-[#2563eb] bg-[rgba(37,99,235,0.16)] px-3 text-[11px] text-[#bfdbfe] disabled:cursor-not-allowed disabled:opacity-60',
+  button: 'min-h-7 cursor-pointer rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-2.5 text-[10px] text-[var(--text-secondary)] shadow-[var(--shadow-sm)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
+  primaryButton: 'inline-flex min-h-8 cursor-pointer items-center gap-[7px] rounded-[var(--radius-md)] border border-[var(--accent-hover)] bg-[var(--accent-dim)] px-3 text-[11px] text-[var(--accent)] shadow-[var(--shadow-sm)] hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60',
   list: 'min-h-0 flex-1 overflow-auto p-2',
   empty: 'grid min-h-[220px] place-items-center text-xs text-[var(--text-muted)]',
 };
 
 const assetsClass = {
-  row: 'grid grid-cols-[18px_minmax(0,1fr)_92px_92px_auto] items-center gap-2.5 border-b border-[var(--border)] px-2.5 py-[9px] text-[var(--text-secondary)] [&_svg]:text-[#60a5fa]',
+  row: 'grid grid-cols-[18px_minmax(0,1fr)_92px_92px_auto] items-center gap-2.5 border-b border-[var(--border)] px-2.5 py-[9px] text-[var(--text-secondary)] [&_svg]:text-[var(--text-muted)]',
   rowMain: 'min-w-0',
   rowTitle: 'block overflow-hidden text-ellipsis whitespace-nowrap text-xs text-[var(--text-primary)]',
   rowMeta: 'block overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--text-muted)]',
@@ -304,28 +314,28 @@ const buildClass = {
   layout: 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px] max-[1100px]:grid-cols-1',
   main: 'min-w-0 overflow-auto p-4',
   presets: 'mb-3.5 grid grid-cols-4 gap-2 max-[1100px]:grid-cols-2',
-  presetButton: 'grid min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)] gap-[7px] rounded-[7px] border border-[var(--border)] bg-[#111216] p-[11px] text-left text-[var(--text-secondary)] [&_svg]:row-span-2 [&_svg]:mt-px [&_svg]:text-[#93c5fd]',
-  selectedButton: 'border-[#60a5fa] bg-[rgba(37,99,235,0.12)]',
-  card: 'mb-3.5 rounded-lg border border-[var(--border)] bg-[#111216]',
+  presetButton: 'grid min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)] gap-[7px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-[11px] text-left text-[var(--text-secondary)] shadow-[var(--shadow-sm)] transition-[border-color,background-color,transform] duration-150 hover:-translate-y-px hover:border-[var(--border-light)] [&_svg]:row-span-2 [&_svg]:mt-px [&_svg]:text-[var(--accent)]',
+  selectedButton: 'border-[var(--accent)] bg-[var(--accent-dim)]',
+  card: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-sm)]',
   sectionTitle: 'flex min-h-[42px] items-center justify-between gap-3 border-b border-[var(--border)] px-3',
   sectionValue: 'text-[11px] text-[var(--text-secondary)]',
   targetGrid: 'grid grid-cols-3 gap-2 p-2.5 max-[1100px]:grid-cols-2',
-  targetButton: 'grid min-w-0 cursor-pointer gap-[5px] rounded-[7px] border border-[var(--border)] bg-[#111216] p-[11px] text-left text-[var(--text-secondary)]',
+  targetButton: 'grid min-w-0 cursor-pointer gap-[5px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-[11px] text-left text-[var(--text-secondary)] transition-[border-color,background-color] duration-150 hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]',
   itemTitle: 'overflow-hidden text-ellipsis whitespace-nowrap text-[11px] font-bold text-[var(--text-primary)]',
   itemMeta: 'overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--text-muted)]',
-  status: 'justify-self-start rounded-full px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase',
+  status: 'justify-self-start rounded-full px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase',
   formGrid: 'grid grid-cols-2 gap-2.5 p-3',
   formLabel: 'grid min-w-0 gap-1.5',
   formLabelText: 'text-[10px] text-[var(--text-muted)]',
-  select: 'min-h-8 rounded-md border border-[var(--border)] bg-[#090a0d] text-[11px] text-[var(--text-primary)]',
+  select: 'min-h-8 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] text-[11px] text-[var(--text-primary)]',
   checkbox: 'grid grid-cols-[16px_minmax(0,1fr)] items-center gap-1.5',
   checkboxInput: 'size-3.5',
-  output: 'mb-3.5 rounded-lg border border-[var(--border)] bg-[#111216] p-3',
+  output: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-[var(--shadow-sm)]',
   outputPath: 'mt-[5px] block [overflow-wrap:anywhere] font-mono text-[11px] text-[var(--text-primary)]',
   outputNote: 'mt-2.5 mb-0 text-[11px] leading-[1.55] text-[var(--text-secondary)]',
-  outputPre: 'mt-3 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--border)] bg-[#090a0d] p-2.5 font-mono text-[10px] leading-normal text-[var(--text-secondary)]',
-  sidebar: 'min-h-0 overflow-auto border-l border-[var(--border)] bg-[#0d0e12] px-3.5 py-4 max-[1100px]:border-t max-[1100px]:border-l-0',
-  sidebarSection: 'mb-3.5 rounded-lg border border-[var(--border)] bg-[#111216] p-3',
+  outputPre: 'mt-3 overflow-auto whitespace-pre-wrap rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2.5 font-mono text-[10px] leading-normal text-[var(--text-secondary)]',
+  sidebar: 'min-h-0 overflow-auto border-l border-[var(--border)] bg-[var(--bg-surface)] px-3.5 py-4 max-[1100px]:border-t max-[1100px]:border-l-0',
+  sidebarSection: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-[var(--shadow-sm)]',
   sidebarList: 'mt-3 grid list-none gap-2.5 p-0',
   sidebarItem: 'flex items-center gap-2 text-[11px] text-[var(--text-muted)]',
   sidebarDl: 'mt-3 grid gap-2',
@@ -335,34 +345,37 @@ const buildClass = {
 };
 
 const gameClass = {
-  surface: 'grid h-full min-h-0 w-full flex-1 bg-[#090a0d]',
+  surface: 'grid h-full min-h-0 w-full flex-1 bg-[var(--bg-base)]',
   surfaceOpen: 'grid-cols-[minmax(190px,240px)_minmax(0,1fr)_minmax(230px,280px)]',
   surfaceInspectorClosed: 'grid-cols-[minmax(190px,240px)_minmax(0,1fr)]',
   surfaceHierarchyClosed: 'grid-cols-[minmax(0,1fr)_minmax(230px,280px)]',
   surfaceOnlyMain: 'grid-cols-[minmax(0,1fr)]',
-  sidePanel: 'flex min-h-0 min-w-0 flex-col border-r border-[var(--border)] bg-[#111218]',
-  inspectorPanel: 'flex min-h-0 min-w-0 flex-col border-l border-[var(--border)] bg-[#111218]',
-  panelHeader: 'flex min-h-[42px] items-center justify-between gap-2 border-b border-[var(--border)] px-2.5',
-  panelHeaderText: 'text-[9px] text-[var(--text-muted)] uppercase',
+  sidePanel: 'flex min-h-0 min-w-0 flex-col border-r border-[var(--border)] bg-[var(--bg-surface)] shadow-[var(--shadow-sm)]',
+  inspectorPanel: 'flex min-h-0 min-w-0 flex-col border-l border-[var(--border)] bg-[var(--bg-surface)] shadow-[var(--shadow-sm)]',
+  panelHeader: 'flex min-h-[42px] items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--bg-overlay)] px-2.5 backdrop-blur-xl',
+  panelHeaderText: 'text-[10px] text-[var(--text-muted)] uppercase',
   panelHeaderTitle: 'mt-0.5 block text-[11px] text-[var(--text-primary)] normal-case',
   panelHeaderActions: 'flex items-center gap-1.5',
-  iconButton: 'grid size-[26px] cursor-pointer place-items-center rounded-[5px] border border-[var(--border)] bg-[#171923] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
-  hierarchyList: 'flex min-h-0 flex-1 flex-col gap-[3px] overflow-auto p-2',
-  hierarchyItem: 'grid min-h-[34px] cursor-pointer grid-cols-[14px_minmax(0,1fr)] items-center gap-1.5 rounded-[5px] border border-transparent bg-transparent text-left text-[var(--text-primary)] hover:border-[#2f5f9f] hover:bg-[rgba(37,99,235,0.14)]',
-  hierarchyItemSelected: 'border-[#2f5f9f] bg-[rgba(37,99,235,0.14)]',
-  hierarchyMarker: 'text-[9px] text-[var(--text-muted)]',
-  hierarchyName: 'overflow-hidden text-ellipsis whitespace-nowrap',
-  hierarchyTag: 'col-start-2 overflow-hidden text-ellipsis whitespace-nowrap text-[9px] text-[var(--text-muted)]',
+  iconButton: 'grid size-[26px] cursor-pointer place-items-center rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] shadow-[var(--shadow-sm)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
+  hierarchyList: 'flex min-h-0 flex-1 flex-col overflow-auto py-1',
+  hierarchyItem: 'group/row relative flex min-h-[28px] w-full cursor-pointer items-center gap-1.5 border-l-2 border-transparent pr-2 text-left text-[12px] text-[var(--text-secondary)] transition-colors duration-100 hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+  hierarchyItemSelected: 'border-l-[var(--brand)] bg-[var(--brand-dim)] text-[var(--text-primary)]',
+  hierarchyTwisty: 'grid size-4 flex-none place-items-center rounded-[3px] text-[var(--text-muted)] hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] [&_svg]:size-3',
+  hierarchyTwistySpacer: 'size-4 flex-none',
+  hierarchyIcon: 'flex-none text-[var(--text-muted)] group-hover/row:text-[var(--text-secondary)]',
+  hierarchyIconSelected: 'flex-none text-[var(--brand)]',
+  hierarchyName: 'min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap',
+  hierarchyTag: 'flex-none rounded-[3px] bg-[var(--bg-active)] px-1.5 py-px text-[10px] font-medium text-[var(--text-muted)] opacity-0 group-hover/row:opacity-100',
   mainPanel: 'flex min-h-0 min-w-0 flex-col',
-  previewBar: 'flex min-h-[42px] items-center justify-between border-b border-[var(--border)] bg-[#0d0e12] px-3 text-[10px] text-[var(--text-secondary)]',
+  previewBar: 'flex min-h-[42px] items-center justify-between border-b border-[var(--border)] bg-[var(--bg-overlay)] px-3 text-[10px] text-[var(--text-secondary)] backdrop-blur-xl',
   previewBarGroup: 'flex items-center gap-[7px]',
-  liveDot: 'size-1.5 rounded-full bg-[#22c55e] shadow-[0_0_7px_rgba(34,197,94,0.7)]',
-  modeSwitch: 'inline-flex gap-0.5 rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] p-0.5',
-  modeButton: 'flex h-[27px] cursor-pointer items-center gap-[5px] rounded bg-transparent px-[9px] text-[9px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
+  liveDot: 'size-1.5 rounded-full bg-[var(--success)] shadow-[0_0_7px_var(--success)]',
+  modeSwitch: 'inline-flex gap-0.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5',
+  modeButton: 'flex h-[27px] cursor-pointer items-center gap-[5px] rounded-[4px] bg-transparent px-[9px] text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
   modeButtonActive: 'bg-[var(--bg-active)] text-[var(--text-primary)]',
-  createPresets: 'flex min-h-[38px] items-center gap-1.5 overflow-x-auto border-b border-[var(--border)] bg-[#101116] px-2.5 py-[5px]',
-  createButton: 'inline-flex min-h-[26px] flex-none cursor-pointer items-center gap-[5px] rounded-[5px] border border-[var(--border)] bg-[#111216] px-2 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
-  previewCanvas: 'relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090a0d]',
+  createPresets: 'flex min-h-[38px] items-center gap-1.5 overflow-x-auto border-b border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-[5px]',
+  createButton: 'inline-flex min-h-[26px] flex-none cursor-pointer items-center gap-[5px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-2 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
+  previewCanvas: 'relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#070A0F]',
   empty: 'p-3.5 text-[11px] text-[var(--text-muted)]',
 };
 
@@ -370,7 +383,7 @@ const diagnosticsClass = {
   headerActions: 'flex gap-1.5',
   entry: 'grid grid-cols-[132px_minmax(0,1fr)] gap-2.5 border-b border-[var(--border)] px-2.5 py-[9px] text-[11px] text-[var(--text-secondary)]',
   meta: 'min-w-0',
-  level: 'mb-[3px] inline-flex font-mono text-[9px] font-bold uppercase',
+  level: 'mb-[3px] inline-flex font-mono text-[10px] font-bold uppercase',
   subsystem: 'block overflow-hidden text-ellipsis whitespace-nowrap text-[10px] font-medium text-[var(--text-muted)]',
   message: 'm-0 min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]',
   source: 'col-start-2 font-mono text-[10px] text-[var(--text-muted)]',
@@ -378,75 +391,75 @@ const diagnosticsClass = {
 
 const artifactPopoverClass = {
   root: 'fixed z-[90] translate-x-2.5 translate-y-2.5 drop-shadow-[0_10px_24px_rgba(0,0,0,0.42)]',
-  button: 'flex h-[30px] cursor-pointer items-center gap-1.5 rounded-md border border-[rgba(96,165,250,0.45)] bg-[#172033] px-2.5 text-[10px] font-semibold text-[#bfdbfe] hover:border-[#60a5fa] hover:bg-[#1d2a43]',
-  panel: 'w-[310px] overflow-hidden rounded-lg border border-[rgba(96,165,250,0.38)] bg-[#17181d]',
-  header: 'flex h-8 items-center justify-between gap-2 border-b border-[var(--border)] px-[9px] font-mono text-[9px] text-[#93c5fd]',
+  button: 'flex h-[30px] cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border-light)] bg-[var(--bg-elevated)] px-2.5 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:bg-[var(--bg-hover)]',
+  panel: 'w-[310px] overflow-hidden rounded-lg border border-[var(--border-light)] bg-[var(--bg-elevated)]',
+  header: 'flex h-8 items-center justify-between gap-2 border-b border-[var(--border)] px-[9px] font-mono text-[10px] text-[var(--text-secondary)]',
   label: 'overflow-hidden text-ellipsis whitespace-nowrap',
   closeButton: 'grid size-[22px] flex-none cursor-pointer place-items-center border-0 bg-transparent text-[var(--text-muted)]',
   form: 'flex gap-1.5 p-2',
-  input: 'min-w-0 flex-1 rounded-[5px] border border-[var(--border-light)] bg-[#0f1014] px-2 py-[7px] text-[10px] text-[var(--text-primary)] outline-none focus:border-[#60a5fa]',
-  submit: 'cursor-pointer rounded-[5px] border-0 bg-[#2563eb] px-2.5 text-[10px] font-semibold text-white disabled:cursor-default disabled:opacity-40',
+  input: 'min-w-0 flex-1 rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-base)] px-2 py-[7px] text-[10px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
+  submit: 'cursor-pointer rounded-[5px] border-0 bg-[var(--brand)] px-2.5 text-[10px] font-semibold text-white transition-[background] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-default disabled:opacity-40',
 };
 
 const questBannerClass = {
-  root: 'flex min-h-[46px] items-center gap-2 border-b border-[var(--border)] bg-[rgba(37,99,235,0.12)] px-3.5 text-[var(--text-secondary)]',
-  error: 'bg-[rgba(239,68,68,0.12)]',
-  icon: 'text-[#93c5fd]',
-  errorIcon: 'text-[#f87171]',
+  root: 'flex min-h-[46px] items-center gap-2 border-b border-[var(--border)] bg-[var(--accent-dim)] px-3.5 text-[var(--text-secondary)]',
+  error: 'bg-[var(--danger-dim)]',
+  icon: 'text-[var(--accent)]',
+  errorIcon: 'text-[var(--danger)]',
   content: 'min-w-0 flex-1',
-  kicker: 'block text-[9px] font-bold tracking-[0.08em] text-[var(--text-muted)] uppercase',
+  kicker: 'block text-[10px] font-bold tracking-[0.08em] text-[var(--text-muted)] uppercase',
   title: 'block overflow-hidden text-ellipsis whitespace-nowrap text-xs text-[var(--text-primary)]',
   meta: 'block overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--text-muted)]',
-  button: 'inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--border)] bg-[#111216] px-2.5 text-[10px] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
-  iconButton: 'grid size-7 cursor-pointer place-items-center rounded-[5px] border border-[var(--border)] bg-[#111216] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
+  button: 'inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-2.5 text-[10px] text-[var(--text-secondary)] shadow-[var(--shadow-sm)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
+  iconButton: 'grid size-7 cursor-pointer place-items-center rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] shadow-[var(--shadow-sm)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
 };
 
 const workspaceSelectionClass = {
-  card: 'm-[0_8px_10px] flex flex-col gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] p-2.5',
+  card: 'm-[0_8px_10px] flex flex-col gap-1.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-2.5 shadow-[var(--shadow-sm)]',
   title: 'flex items-start justify-between gap-2',
   titleText: 'flex min-w-0 flex-col gap-0.5',
   name: 'overflow-hidden text-ellipsis whitespace-nowrap text-xs',
   tag: 'text-[10px] text-[var(--text-muted)]',
-  liveBadge: 'rounded-lg bg-[rgba(34,197,94,0.12)] px-[5px] py-0.5 font-mono text-[8px] font-bold text-[#22c55e] uppercase',
-  label: 'text-[9px] font-bold tracking-[0.06em] text-[var(--text-muted)] uppercase',
+  liveBadge: 'rounded-lg bg-[var(--success-dim)] px-[5px] py-0.5 font-mono text-[10px] font-bold text-[var(--success)] uppercase',
+  label: 'text-[10px] font-bold tracking-[0.06em] text-[var(--text-muted)] uppercase',
   positionGrid: 'grid grid-cols-3 gap-1',
   positionInputWrap: 'grid grid-cols-[14px_1fr] items-center overflow-hidden rounded border border-[var(--border)] bg-[var(--bg-base)] focus-within:border-[var(--accent)]',
-  positionAxis: 'text-center font-mono text-[9px] text-[var(--text-muted)]',
-  positionInput: 'w-full min-w-0 border-0 bg-transparent px-[3px] py-[5px] font-mono text-[9px] text-[var(--text-secondary)] outline-none',
-  button: 'cursor-pointer rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1.5 text-[10px] font-medium text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)]',
+  positionAxis: 'text-center font-mono text-[10px] text-[var(--text-muted)]',
+  positionInput: 'w-full min-w-0 border-0 bg-transparent px-[3px] py-[5px] font-mono text-[10px] text-[var(--text-secondary)] outline-none',
+  button: 'cursor-pointer rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1.5 text-[10px] font-medium text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)]',
 };
 
 const viewportClass = {
-  container: 'relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#1a1a1e]',
+  container: 'relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#0B0F16]',
   canvas: 'block h-full w-full object-fill',
   selectionOverlay: 'pointer-events-none absolute inset-0 z-20 h-full w-full',
 };
 
 const inspectorClass = {
   root: 'flex flex-col gap-2.5 p-2.5',
-  section: 'rounded-md border border-[var(--border)] bg-[#111216]',
+  section: 'rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-sm)]',
   sectionTitle: 'border-b border-[var(--border)] px-2.5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-muted)]',
   field: 'grid gap-1.5 px-2.5 py-2 text-[11px] text-[var(--text-secondary)] [&>span]:text-[10px] [&>span]:font-semibold [&>span]:uppercase [&>span]:tracking-[0.06em] [&>span]:text-[var(--text-muted)]',
   fieldRow: 'grid-cols-[minmax(0,1fr)_auto] items-center',
-  input: 'w-full min-w-0 rounded border border-[var(--border)] bg-[#171923] px-2 py-1.5 font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
-  select: 'w-full min-w-0 appearance-none rounded border border-[var(--border)] bg-[#171923] px-2 py-1.5 pr-[26px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
+  input: 'w-full min-w-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1.5 font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
+  select: 'w-full min-w-0 appearance-none rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1.5 pr-[26px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
   json: 'min-h-20 resize-y font-[var(--font-mono)]',
   colorField: 'grid gap-2 px-2.5 py-2 text-[11px] text-[var(--text-secondary)] [&>span]:text-[10px] [&>span]:font-semibold [&>span]:uppercase [&>span]:tracking-[0.06em] [&>span]:text-[var(--text-muted)]',
   colorCustom: 'flex items-center gap-2',
   colorPicker: 'relative grid size-7 cursor-pointer place-items-center overflow-hidden rounded border border-[var(--border)] [&_input]:absolute [&_input]:inset-0 [&_input]:cursor-pointer [&_input]:opacity-0 [&_span]:size-full',
-  colorHex: 'min-w-0 flex-1 rounded border border-[var(--border)] bg-[#171923] px-2 py-1.5 font-[var(--font-mono)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
+  colorHex: 'min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1.5 font-[var(--font-mono)] text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
   colorPresets: 'grid grid-cols-10 gap-1',
   colorPreset: 'size-5 cursor-pointer rounded border border-[var(--border)] hover:border-[var(--accent)]',
   colorPresetActive: 'ring-1 ring-[var(--accent)]',
   colorChannels: 'grid grid-cols-3 gap-1.5',
-  channelInput: 'grid grid-cols-[16px_1fr] items-center overflow-hidden rounded border border-[var(--border)] bg-[#171923] focus-within:border-[var(--accent)] [&_span]:text-center [&_span]:font-mono [&_span]:text-[9px] [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-1 [&_input]:py-1.5 [&_input]:font-mono [&_input]:text-[10px] [&_input]:text-[var(--text-primary)] [&_input]:outline-none',
+  channelInput: 'grid grid-cols-[16px_1fr] items-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] focus-within:border-[var(--accent)] [&_span]:text-center [&_span]:font-mono [&_span]:text-[10px] [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:px-1 [&_input]:py-1.5 [&_input]:font-mono [&_input]:text-[10px] [&_input]:text-[var(--text-primary)] [&_input]:outline-none',
   vec3: 'grid grid-cols-3 gap-1.5',
   vec4: 'grid grid-cols-4 gap-1.5',
-  vecInputWrap: 'grid grid-cols-[16px_1fr] items-center overflow-hidden rounded border border-[var(--border)] bg-[#171923] focus-within:border-[var(--accent)]',
-  vecLabel: 'text-center font-mono text-[9px] text-[var(--text-muted)]',
+  vecInputWrap: 'grid grid-cols-[16px_1fr] items-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] focus-within:border-[var(--accent)]',
+  vecLabel: 'text-center font-mono text-[10px] text-[var(--text-muted)]',
   vecInput: 'min-w-0 border-0 bg-transparent px-1 py-1.5 font-mono text-[10px] text-[var(--text-primary)] outline-none',
   actionRow: 'mt-2 flex gap-1.5',
-  actionButton: 'inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded border border-[var(--border)] bg-[#171923] px-2 text-[10px] text-[var(--text-secondary)] hover:border-[#60a5fa] hover:text-[var(--text-primary)]',
+  actionButton: 'inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[10px] text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
   component: 'border-t border-[var(--border)] first:border-t-0',
   componentHeader: 'flex items-center justify-between gap-2 px-2.5 py-2',
   componentType: 'text-[11px] font-semibold text-[var(--text-primary)]',
@@ -459,24 +472,24 @@ const inspectorClass = {
 const scriptSurfaceClass = {
   root: 'grid h-full grid-cols-[230px_minmax(0,1fr)] max-[900px]:grid-cols-[170px_minmax(0,1fr)]',
   sidebar: 'overflow-auto border-r border-[var(--border)] bg-[var(--bg-surface)]',
-  sidebarHeader: 'flex h-[42px] items-center justify-between border-b border-[var(--border)] px-3 text-[10px] font-semibold text-[var(--text-secondary)]',
+  sidebarHeader: 'flex h-[42px] items-center justify-between border-b border-[var(--border)] bg-[var(--bg-overlay)] px-3 text-[10px] font-semibold text-[var(--text-secondary)] backdrop-blur-xl',
   sidebarEmpty: 'p-3 text-[10px] text-[var(--text-muted)]',
-  scriptButton: 'grid w-full cursor-pointer grid-cols-[16px_1fr] gap-x-[7px] gap-y-0.5 border-0 border-b border-[var(--border)] bg-transparent px-[11px] py-[9px] text-left text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[#93c5fd] [&_svg]:row-span-2 [&_svg]:mt-0.5',
-  scriptButtonActive: 'bg-[var(--bg-hover)] text-[#93c5fd]',
+  scriptButton: 'grid w-full cursor-pointer grid-cols-[16px_1fr] gap-x-[7px] gap-y-0.5 border-0 border-b border-[var(--border)] bg-transparent px-[11px] py-[9px] text-left text-[var(--text-muted)] transition-colors duration-150 hover:bg-[var(--bg-hover)] hover:text-[var(--accent)] [&_svg]:row-span-2 [&_svg]:mt-0.5',
+  scriptButtonActive: 'bg-[var(--accent-dim)] text-[var(--accent)] shadow-[inset_3px_0_0_var(--accent)]',
   scriptName: 'text-[10px] text-[var(--text-secondary)]',
-  scriptPath: 'overflow-hidden text-ellipsis whitespace-nowrap text-[8px]',
-  editor: 'flex min-w-0 flex-col bg-[#0d0e12]',
-  editorHeader: 'flex h-[42px] items-center justify-between border-b border-[var(--border)] px-[13px] font-mono text-[10px] text-[var(--text-secondary)]',
+  scriptPath: 'overflow-hidden text-ellipsis whitespace-nowrap text-[10px]',
+  editor: 'flex min-w-0 flex-col bg-[var(--bg-base)]',
+  editorHeader: 'flex h-[42px] items-center justify-between border-b border-[var(--border)] bg-[var(--bg-overlay)] px-[13px] font-mono text-[10px] text-[var(--text-secondary)] backdrop-blur-xl',
   editorActions: 'flex items-center gap-2',
-  editorHint: 'font-[var(--font-sans)] text-[8px] font-bold tracking-[0.08em] text-[var(--text-muted)]',
-  editorButton: 'min-h-[26px] cursor-pointer rounded-[5px] border border-[var(--border)] bg-[#111216] px-[9px] text-[10px] font-semibold text-[var(--text-secondary)] hover:not-disabled:border-[#60a5fa] hover:not-disabled:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
+  editorHint: 'font-[var(--font-sans)] text-[10px] font-bold tracking-[0.08em] text-[var(--text-muted)]',
+  editorButton: 'min-h-[26px] cursor-pointer rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-[9px] text-[10px] font-semibold text-[var(--text-secondary)] shadow-[var(--shadow-sm)] hover:not-disabled:border-[var(--accent)] hover:not-disabled:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
   editorPane: 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_220px]',
-  textarea: 'h-full min-h-0 w-full min-w-0 resize-none overflow-auto whitespace-pre border-0 border-r border-[var(--border)] bg-[#0b0c10] px-5 py-[18px] font-mono text-[11px] leading-[1.65] text-[#dbeafe] outline-none [tab-size:2] focus:shadow-[inset_0_0_0_1px_rgba(96,165,250,0.38)]',
-  gutter: 'm-0 flex-1 overflow-auto border-l border-white/[0.03] bg-[#0d0e12] px-5 py-[18px] font-mono text-[11px] leading-[1.65] text-[#cbd5e1] [tab-size:2] [&_code]:block [&_code]:min-w-max',
-  gutterButton: 'grid w-full cursor-text grid-cols-[42px_minmax(max-content,1fr)] border-0 bg-transparent p-0 text-left font-inherit text-inherit whitespace-pre hover:bg-[rgba(96,165,250,0.07)]',
-  gutterButtonSelected: 'bg-[rgba(59,130,246,0.18)]',
+  textarea: 'h-full min-h-0 w-full min-w-0 resize-none overflow-auto whitespace-pre border-0 border-r border-[var(--border)] bg-[#070A0F] px-5 py-[18px] font-mono text-[11px] leading-[1.65] text-[var(--text-primary)] outline-none [tab-size:2] focus:shadow-[inset_0_0_0_1px_var(--accent)]',
+  gutter: 'm-0 flex-1 overflow-auto border-l border-white/[0.03] bg-[var(--bg-base)] px-5 py-[18px] font-mono text-[11px] leading-[1.65] text-[var(--text-secondary)] [tab-size:2] [&_code]:block [&_code]:min-w-max',
+  gutterButton: 'grid w-full cursor-text grid-cols-[42px_minmax(max-content,1fr)] border-0 bg-transparent p-0 text-left font-inherit text-inherit whitespace-pre hover:bg-[var(--accent-dim)]',
+  gutterButtonSelected: 'bg-[var(--accent-dim)]',
   gutterLineNumber: 'select-none text-[#4b5563]',
-  gutterLineText: 'pr-6 not-italic text-[#cbd5e1]',
+  gutterLineText: 'pr-6 not-italic text-[var(--text-secondary)]',
 };
 
 function gameSurfaceClass(hierarchyOpen: boolean, inspectorOpen: boolean): string {
@@ -492,16 +505,16 @@ function gameSurfaceClass(hierarchyOpen: boolean, inspectorOpen: boolean): strin
 function buildStatusClass(status: BuildTargetOption['status']): string {
   return cx(
     buildClass.status,
-    status === 'ready' && 'bg-[rgba(34,197,94,0.14)] text-[#4ade80]',
-    status === 'planned' && 'bg-[rgba(96,165,250,0.14)] text-[#93c5fd]',
-    status === 'blocked' && 'bg-[rgba(245,158,11,0.14)] text-[#fbbf24]',
+    status === 'ready' && 'bg-[var(--success-dim)] text-[var(--success)]',
+    status === 'planned' && 'bg-[var(--accent-dim)] text-[var(--accent)]',
+    status === 'blocked' && 'bg-[var(--warning-dim)] text-[var(--warning)]',
   );
 }
 
 function diagnosticLevelClass(level: string): string {
-  if (level === 'error') return 'text-[#ef4444]';
-  if (level === 'warn' || level === 'warning') return 'text-[#f59e0b]';
-  if (level === 'info') return 'text-[#60a5fa]';
+  if (level === 'error') return 'text-[var(--danger)]';
+  if (level === 'warn' || level === 'warning') return 'text-[var(--warning)]';
+  if (level === 'info') return 'text-[var(--accent)]';
   return '';
 }
 
@@ -624,7 +637,7 @@ const COLOR_PRESETS = [
   '#fecaca',
   '#fbcfe8',
   '#ddd6fe',
-  '#bfdbfe',
+  '#d4d4d8',
   '#a7f3d0',
   '#111827',
 ];
@@ -854,6 +867,22 @@ function isScriptPath(path?: string): boolean {
   return Boolean(path && /\.(rhai|js|ts|tsx|lua|rs)$/i.test(path));
 }
 
+// Infer a scene-tree icon from a node's name/tag, the way Godot shows a
+// type glyph per node. Heuristic only — the backend exposes no component
+// list on the lightweight scene-tree payload.
+function sceneNodeIcon(object: SceneObject, selected: boolean): React.ReactNode {
+  const hint = `${object.name} ${object.tag}`.toLowerCase();
+  const cls = selected ? gameClass.hierarchyIconSelected : gameClass.hierarchyIcon;
+  let glyph: React.ReactNode;
+  if (/camera/.test(hint)) glyph = <IconView size={14} />;
+  else if (/light|lamp|sun/.test(hint)) glyph = <IconSun size={14} />;
+  else if (/audio|sound|music|speaker/.test(hint)) glyph = <IconAudio size={14} />;
+  else if (/script|behavior|behaviour/.test(hint)) glyph = <IconCode size={14} />;
+  else if (/mesh|model|cube|sphere|player|prop/.test(hint)) glyph = <IconModel size={14} />;
+  else glyph = <span className="size-1.5 rounded-full bg-current" />;
+  return <span className={cx(cls, 'grid size-3.5 place-items-center')}>{glyph}</span>;
+}
+
 function questArtifactContext(artifact: QuestEditorArtifact): QuestArtifactContext {
   const path = artifact.path;
   if (artifact.kind === 'spec' || artifact.kind === 'intent') {
@@ -959,9 +988,9 @@ function WorkspaceInspector({ object, onFocus, onPositionChange }: {
             <span
               className={cx(
                 workspaceSelectionClass.positionAxis,
-                index === 0 && 'text-[#ef4444]',
-                index === 1 && 'text-[#22c55e]',
-                index === 2 && 'text-[#3b82f6]',
+                index === 0 && 'text-[var(--axis-x)]',
+                index === 1 && 'text-[var(--axis-y)]',
+                index === 2 && 'text-[var(--axis-z)]',
               )}
             >
               {['X', 'Y', 'Z'][index]}
@@ -1326,7 +1355,7 @@ function SelectionOverlay({ sceneTree, selectedId, camera, width, height, viewMo
         cy={screenPos.y}
         r={18}
         fill="none"
-        stroke="var(--accent, #60A5FA)"
+        stroke="var(--accent, #A1A1AA)"
         strokeWidth={2}
         strokeDasharray="4 3"
         opacity={0.9}
@@ -1338,7 +1367,7 @@ function SelectionOverlay({ sceneTree, selectedId, camera, width, height, viewMo
         width={Math.max(60, selected.name.length * 7 + 16)}
         height={20}
         rx={4}
-        fill="rgba(37, 99, 235, 0.85)"
+        fill="rgba(39, 39, 42, 0.9)"
       />
       <text
         x={screenPos.x + 30}
@@ -1376,6 +1405,9 @@ export default function EditorPage({
     const saved = Number(window.localStorage.getItem('aster.aiPanelWidth'));
     return Number.isFinite(saved) && saved >= 320 && saved <= 560 ? saved : 380;
   });
+  const [aiPanelOpen, setAiPanelOpen] = useState(() => (
+    window.localStorage.getItem('aster.aiPanelOpen') !== 'false'
+  ));
   const [inspectorOpen, setInspectorOpen] = useState(() => (
     window.localStorage.getItem('aster.inspectorOpen') !== 'false'
   ));
@@ -1421,6 +1453,7 @@ export default function EditorPage({
     yaw: -0.5, pitch: 0.3, distance: 6,
     targetX: 0, targetY: 1, targetZ: 0,
   });
+  const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(() => new Set());
   const validParentOptions = useMemo(() => {
     if (!selectedId) return sceneTree;
     const descendants = new Set<string>();
@@ -1440,6 +1473,39 @@ export default function EditorPage({
     }
     return sceneTree.filter(object => object.id !== selectedId && !descendants.has(object.id));
   }, [sceneTree, selectedId]);
+
+  // Flatten the scene tree into ordered rows with depth, parent-child grouping,
+  // and collapse handling — the render layer just maps over this.
+  const hierarchyRows = useMemo(() => {
+    const childrenOf = new Map<string | null, SceneObject[]>();
+    for (const object of sceneTree) {
+      const key = object.parent_id ?? null;
+      const list = childrenOf.get(key);
+      if (list) list.push(object);
+      else childrenOf.set(key, [object]);
+    }
+    const rows: Array<{ object: SceneObject; depth: number; hasChildren: boolean }> = [];
+    const walk = (parentId: string | null, depth: number) => {
+      for (const object of childrenOf.get(parentId) ?? []) {
+        const hasChildren = childrenOf.has(object.id);
+        rows.push({ object, depth, hasChildren });
+        if (hasChildren && !collapsedNodes.has(object.id)) {
+          walk(object.id, depth + 1);
+        }
+      }
+    };
+    walk(null, 0);
+    return rows;
+  }, [sceneTree, collapsedNodes]);
+
+  const toggleNodeCollapsed = useCallback((id: string) => {
+    setCollapsedNodes(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Gizmo state
   const [activeTool] = useState<'view' | 'move' | 'rotate' | 'scale'>('move');
@@ -1469,6 +1535,16 @@ export default function EditorPage({
   useEffect(() => {
     window.localStorage.setItem('aster.aiPanelWidth', String(aiPanelWidth));
   }, [aiPanelWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem('aster.aiPanelOpen', String(aiPanelOpen));
+  }, [aiPanelOpen]);
+
+  useEffect(() => {
+    if (contextualRequest || aiWorkspace?.plan || aiWorkspace?.completedBundle || aiWorkspace?.status === 'thinking' || aiWorkspace?.status === 'executing' || aiWorkspace?.status === 'error') {
+      setAiPanelOpen(true);
+    }
+  }, [aiWorkspace?.completedBundle, aiWorkspace?.plan, aiWorkspace?.status, contextualRequest]);
 
   useEffect(() => {
     window.localStorage.setItem('aster.inspectorOpen', String(inspectorOpen));
@@ -2130,25 +2206,25 @@ export default function EditorPage({
     ? sceneTree.find(o => o.id === selectedId) ?? null
     : null;
   const scriptDirty = scriptContent !== scriptSavedContent;
-  const hasSpecArtifact = Boolean(openedQuestArtifact?.surface === 'prd');
-  const hasTaskArtifact = Boolean(openedQuestArtifact?.surface === 'tasks' || aiWorkspace?.plan);
   const hasDiagnostics = consoleEntries.length > 0 || Boolean(promoteError);
   const visibleWorkspaceTabs = ([
-    ...(hasSpecArtifact ? [['prd', 'Spec', <IconFile key="prd" />] as const] : []),
-    ...(hasTaskArtifact ? [['tasks', 'AI work', <IconCheck key="tasks" />] as const] : []),
-    ['game', t('tab_game_view'), <IconPlay key="game" />] as const,
+    ['game', 'Scene', <IconView key="game" />] as const,
     ['assets', 'Assets', <IconFile key="assets" />] as const,
     ['scripts', t('tab_scripts'), <IconCode key="scripts" />] as const,
     ['build', 'Build', <IconPackage key="build" />] as const,
-    ...(hasDiagnostics ? [['diagnostics', 'Diagnostics', <IconAlertCircle key="diagnostics" />] as const] : []),
   ]);
+  const pendingAiDecisionCount = aiWorkspace?.plan?.operations.filter(operation => operation.permission_kind !== 'read').length ?? 0;
 
   useEffect(() => {
-    const visible = new Set<WorkspaceView>(visibleWorkspaceTabs.map(([view]) => view));
+    const visible = new Set<WorkspaceView>([
+      ...visibleWorkspaceTabs.map(([view]) => view),
+      ...(aiWorkspace?.plan ? ['tasks' as WorkspaceView] : []),
+      ...(hasDiagnostics ? ['diagnostics' as WorkspaceView] : []),
+    ]);
     if (!visible.has(workspaceView)) {
       setWorkspaceView('game');
     }
-  }, [visibleWorkspaceTabs, workspaceView]);
+  }, [aiWorkspace?.plan, hasDiagnostics, visibleWorkspaceTabs, workspaceView]);
 
   // ── Render ──
 
@@ -2238,12 +2314,35 @@ export default function EditorPage({
                 aria-selected={workspaceView === view}
               >
                 {icon}<span>{label}</span>
-                {view === 'tasks' && aiWorkspace?.plan && <b className={workspaceClass.tabBadge}>{aiWorkspace.plan.operations.length}</b>}
                 {view === 'assets' && assets.length > 0 && <b className={workspaceClass.tabBadge}>{assets.length}</b>}
                 {view === 'scripts' && scripts.length > 0 && <b className={workspaceClass.tabBadge}>{scripts.length}</b>}
-                {view === 'diagnostics' && consoleEntries.length > 0 && <b className={workspaceClass.tabBadge}>{consoleEntries.length}</b>}
               </button>
             ))}
+            {aiWorkspace?.plan && (
+              <button
+                className={cx(workspaceClass.tab, workspaceView === 'tasks' && workspaceClass.tabActive)}
+                onClick={() => {
+                  setWorkspaceView('tasks');
+                  setAiPanelOpen(true);
+                }}
+                role="tab"
+                aria-selected={workspaceView === 'tasks'}
+              >
+                <IconCheck /><span>Review changes</span>
+                <b className={workspaceClass.tabBadge}>{aiWorkspace.plan.operations.length}</b>
+              </button>
+            )}
+            {hasDiagnostics && (
+              <button
+                className={cx(workspaceClass.tab, workspaceView === 'diagnostics' && workspaceClass.tabActive)}
+                onClick={() => setWorkspaceView('diagnostics')}
+                role="tab"
+                aria-selected={workspaceView === 'diagnostics'}
+              >
+                <IconAlertCircle /><span>View diagnostics</span>
+                {consoleEntries.length > 0 && <b className={workspaceClass.tabBadge}>{consoleEntries.length}</b>}
+              </button>
+            )}
           </nav>
 
           <section className={cx(workspaceClass.view, workspaceView === 'game' && workspaceClass.viewGame)}>
@@ -2299,18 +2398,35 @@ export default function EditorPage({
                   </div>
                 </header>
                 <div className={gameClass.hierarchyList}>
-                  {sceneTree.length === 0 ? <p>No scene objects.</p> : sceneTree.map(object => (
-                    <button
-                      key={object.id}
-                      className={cx(gameClass.hierarchyItem, selectedId === object.id && gameClass.hierarchyItemSelected)}
-                      onClick={() => selectSceneObject(object.id)}
-                      style={{ paddingLeft: object.parent_id ? 22 : 10 }}
-                    >
-                      <span className={gameClass.hierarchyMarker}>{object.parent_id ? '↳' : '●'}</span>
-                      <strong className={gameClass.hierarchyName}>{object.name}</strong>
-                      <small className={gameClass.hierarchyTag}>{object.tag || 'Untagged'}</small>
-                    </button>
-                  ))}
+                  {hierarchyRows.length === 0 ? (
+                    <p className={gameClass.empty}>No scene objects.</p>
+                  ) : hierarchyRows.map(({ object, depth, hasChildren }) => {
+                    const selected = selectedId === object.id;
+                    const collapsed = collapsedNodes.has(object.id);
+                    return (
+                      <div
+                        key={object.id}
+                        className={cx(gameClass.hierarchyItem, selected && gameClass.hierarchyItemSelected)}
+                        onClick={() => selectSceneObject(object.id)}
+                        style={{ paddingLeft: depth * 14 + 6 }}
+                      >
+                        {hasChildren ? (
+                          <span
+                            className={gameClass.hierarchyTwisty}
+                            onClick={event => { event.stopPropagation(); toggleNodeCollapsed(object.id); }}
+                            title={collapsed ? 'Expand' : 'Collapse'}
+                          >
+                            {collapsed ? <IconChevronRight /> : <IconChevronDown />}
+                          </span>
+                        ) : (
+                          <span className={gameClass.hierarchyTwistySpacer} />
+                        )}
+                        {sceneNodeIcon(object, selected)}
+                        <span className={gameClass.hierarchyName}>{object.name}</span>
+                        {object.tag && <span className={gameClass.hierarchyTag}>{object.tag}</span>}
+                      </div>
+                    );
+                  })}
                 </div>
               </aside>}
 
@@ -2684,7 +2800,7 @@ export default function EditorPage({
                     <span className={surfaceClass.buildKicker}>Pipeline</span>
                     <ol className={buildClass.sidebarList}>
                       <li className={cx(buildClass.sidebarItem, 'text-[#4ade80]')}><IconCheck /> Validate project</li>
-                      <li className={cx(buildClass.sidebarItem, 'text-[#93c5fd]')}><IconPackage /> Export runtime</li>
+                      <li className={cx(buildClass.sidebarItem, 'text-[var(--text-secondary)]')}><IconPackage /> Export runtime</li>
                       <li className={buildClass.sidebarItem}><IconPackage /> Bundle assets</li>
                       <li className={buildClass.sidebarItem}><IconPackage /> Create installer</li>
                       <li className={buildClass.sidebarItem}><IconCheck /> Sign & verify</li>
@@ -2739,41 +2855,59 @@ export default function EditorPage({
           </div>}
         </main>
 
-        {/* Resize handle */}
-        <div
-          className={workspaceClass.resizeHandle}
-          onMouseDown={handleResizeDown}
-          role="separator"
-          aria-label="Resize AI workspace"
-          aria-orientation="vertical"
-          aria-valuemin={360}
-          aria-valuemax={720}
-          aria-valuenow={aiPanelWidth}
-          tabIndex={0}
-          onKeyDown={event => {
-            if (event.key === 'ArrowLeft') setAiPanelWidth(width => Math.min(720, width + 16));
-            if (event.key === 'ArrowRight') setAiPanelWidth(width => Math.max(360, width - 16));
-          }}
-        />
+        {aiPanelOpen ? (
+          <>
+            <div
+              className={workspaceClass.resizeHandle}
+              onMouseDown={handleResizeDown}
+              role="separator"
+              aria-label="Resize AI assistant"
+              aria-orientation="vertical"
+              aria-valuemin={320}
+              aria-valuemax={560}
+              aria-valuenow={aiPanelWidth}
+              tabIndex={0}
+              onKeyDown={event => {
+                if (event.key === 'ArrowLeft') setAiPanelWidth(width => Math.min(560, width + 16));
+                if (event.key === 'ArrowRight') setAiPanelWidth(width => Math.max(320, width - 16));
+              }}
+            />
 
-        {/* AI Panel (right side) */}
-        <aside className={workspaceClass.aiPanel} style={{ width: aiPanelWidth }}>
-          <AiPanel
-            projectName={shellState.project_name}
-            selectedEntity={selectedId}
-            selectedEntityName={selectedEntityName}
-            sceneObjectCount={sceneTree.length}
-            sceneObjects={sceneTree}
-            onQuickAction={handleQuickAction}
-            onSceneChanged={handleAiSceneChanged}
-            onFocusPosition={focusOnPosition}
-            chatOnly
-            onWorkspaceStateChange={setAiWorkspace}
-            contextualRequest={contextualRequest}
-            onContextualRequestConsumed={id => setContextualRequest(current => current?.id === id ? null : current)}
-            onOpenSettings={onOpenSettings}
-          />
-        </aside>
+            <aside className={workspaceClass.aiPanel} style={{ width: aiPanelWidth }}>
+              <div className="flex min-h-8 items-center justify-between border-b border-[var(--border)] px-2 text-[10px] text-[var(--text-muted)]">
+                <span>Assistant</span>
+                <button className={toolButtonClass({ size: 'icon' })} onClick={() => setAiPanelOpen(false)} title="Collapse assistant">
+                  <IconChevronRight />
+                </button>
+              </div>
+              <AiPanel
+                projectName={shellState.project_name}
+                selectedEntity={selectedId}
+                selectedEntityName={selectedEntityName}
+                sceneObjectCount={sceneTree.length}
+                sceneObjects={sceneTree}
+                onQuickAction={handleQuickAction}
+                onSceneChanged={handleAiSceneChanged}
+                onFocusPosition={focusOnPosition}
+                chatOnly
+                onWorkspaceStateChange={setAiWorkspace}
+                contextualRequest={contextualRequest}
+                onContextualRequestConsumed={id => setContextualRequest(current => current?.id === id ? null : current)}
+                onOpenSettings={onOpenSettings}
+              />
+            </aside>
+          </>
+        ) : (
+          <aside className={workspaceClass.aiRail} aria-label="AI assistant">
+            <button className={workspaceClass.aiRailButton} onClick={() => setAiPanelOpen(true)} title="Open assistant">
+              <IconBot />
+            </button>
+            {pendingAiDecisionCount > 0 && <span className={workspaceClass.aiRailBadge}>{pendingAiDecisionCount}</span>}
+            {aiWorkspace?.status === 'thinking' || aiWorkspace?.status === 'executing' ? (
+              <IconLoader className="mt-1 size-4 animate-spin text-[var(--text-muted)]" />
+            ) : null}
+          </aside>
+        )}
       </div>
 
       {/* Status Bar */}

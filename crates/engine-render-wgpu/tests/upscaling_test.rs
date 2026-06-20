@@ -1,8 +1,9 @@
 //! Integration test for live built-in spatial upscaling.
 
+use engine_core::math::{Transform, Vec3};
 use engine_render::{
-    RenderDevice, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
-    RenderScalingSettings, RenderWorld, UpscalerKind,
+    RenderCamera, RenderDevice, RenderFrame, RenderPlatformClass, RenderQualityMode,
+    RenderScalingContext, RenderScalingSettings, RenderWorld, UpscalerKind,
 };
 use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 
@@ -65,4 +66,85 @@ fn live_spatial_upscaling_renders_internal_resolution_to_output_resolution() {
     let metrics = device.performance_metrics();
     assert_eq!((metrics.internal_width, metrics.internal_height), (160, 90));
     assert_eq!(metrics.upscaler, UpscalerKind::Native);
+}
+
+#[test]
+fn offscreen_render_updates_temporal_camera_metadata() {
+    let Ok(mut device) = WgpuRenderDevice::new_offscreen(WgpuOffscreenConfig {
+        width: 160,
+        height: 90,
+        format: engine_render::ImageFormat::Rgba8Srgb,
+    }) else {
+        eprintln!("skipping wgpu temporal test: no compatible adapter");
+        return;
+    };
+
+    let mut world = RenderWorld {
+        camera: Some(RenderCamera {
+            object: engine_core::EntityId::from_u128(1),
+            transform: Transform {
+                translation: Vec3::new(0.0, 0.0, 5.0),
+                ..Transform::default()
+            },
+            projection: engine_render::RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.25,
+            far: 250.0,
+            look_at_target: Some(Vec3::ZERO),
+        }),
+        ..RenderWorld::default()
+    };
+
+    device
+        .submit_render_world(&world, RenderFrame { frame_index: 0 })
+        .expect("first temporal render should succeed");
+    let (first, first_reset) = device.latest_temporal_camera();
+    assert!(first_reset);
+    assert_eq!(first.near, 0.25);
+    assert_eq!(first.far, 250.0);
+
+    if let Some(camera) = world.camera.as_mut() {
+        camera.look_at_target = Some(Vec3::new(1.0, 0.0, 0.0));
+    }
+    device
+        .submit_render_world(&world, RenderFrame { frame_index: 1 })
+        .expect("second temporal render should succeed");
+    let (second, second_reset) = device.latest_temporal_camera();
+    assert!(!second_reset);
+    assert_eq!(second.previous_view_projection, first.view_projection);
+
+    device
+        .resize_default_target(80, 45)
+        .expect("target resize should succeed");
+    device
+        .submit_render_world(&world, RenderFrame { frame_index: 2 })
+        .expect("resized temporal render should succeed");
+    let (_, resize_reset) = device.latest_temporal_camera();
+    assert!(resize_reset);
+}
+
+#[test]
+fn mobile_vendor_upscaler_request_uses_portable_wgpu_fallback() {
+    let Ok(mut device) = WgpuRenderDevice::new_offscreen(WgpuOffscreenConfig {
+        width: 160,
+        height: 90,
+        format: engine_render::ImageFormat::Rgba8Srgb,
+    }) else {
+        eprintln!("skipping wgpu mobile fallback test: no compatible adapter");
+        return;
+    };
+
+    let selection = device.configure_render_scaling(
+        &RenderScalingSettings {
+            preferred_upscaler: Some(UpscalerKind::MetalFx),
+            ..RenderScalingSettings::mobile()
+        },
+        RenderScalingContext {
+            platform: RenderPlatformClass::AppleMobile,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(selection.upscaler, UpscalerKind::BuiltInSpatial);
+    assert!(selection.reason.contains("MetalFx unavailable"));
 }

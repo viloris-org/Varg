@@ -21,9 +21,9 @@ const RHAI_RULES: TokenRule[] = [
   { pattern: RHAI_COMMENT_BLOCK, className: 'text-[#546E7A] italic' },
   { pattern: RHAI_COMMENT_SINGLE, className: 'text-[#546E7A] italic' },
   { pattern: RHAI_STRING, className: 'text-[#C3E88D]' },
-  { pattern: RHAI_KEYWORDS, className: 'text-[#C792EA] font-medium' },
+  { pattern: RHAI_KEYWORDS, className: 'text-[#D4D4D8] font-medium' },
   { pattern: RHAI_NUMBER, className: 'text-[#F78C6C]' },
-  { pattern: RHAI_OPERATOR, className: 'text-[#89DDFF]' },
+  { pattern: RHAI_OPERATOR, className: 'text-[#A1A1AA]' },
 ];
 
 // ─── Python ─────────────────────────────────────────────────────────────────
@@ -38,10 +38,10 @@ const PY_OPERATOR = /[+\-*/%=!<>&|^~@]+/g;
 const PY_RULES: TokenRule[] = [
   { pattern: PY_STRING, className: 'text-[#C3E88D]' },
   { pattern: PY_COMMENT, className: 'text-[#546E7A] italic' },
-  { pattern: PY_DECORATOR, className: 'text-[#C792EA] font-medium' },
-  { pattern: PY_KEYWORDS, className: 'text-[#C792EA] font-medium' },
+  { pattern: PY_DECORATOR, className: 'text-[#D4D4D8] font-medium' },
+  { pattern: PY_KEYWORDS, className: 'text-[#D4D4D8] font-medium' },
   { pattern: PY_NUMBER, className: 'text-[#F78C6C]' },
-  { pattern: PY_OPERATOR, className: 'text-[#89DDFF]' },
+  { pattern: PY_OPERATOR, className: 'text-[#A1A1AA]' },
 ];
 
 // ─── Common HTML escaping ───────────────────────────────────────────────────

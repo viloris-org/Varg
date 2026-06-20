@@ -77,7 +77,7 @@ const autoAcceptClass = 'flex cursor-pointer items-center gap-1.5 text-[10px] te
 const autoAcceptCheckboxClass = 'h-3 w-3 accent-[var(--accent)]';
 const inputRowClass = 'flex flex-shrink-0 gap-1 border-t border-[var(--border)] px-2 py-1.5';
 const inputClass = 'flex-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1.5 font-[var(--font-sans)] text-xs text-[var(--text-primary)] outline-none transition-[border-color] duration-[var(--transition-fast)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50';
-const sendButtonClass = 'flex h-7 w-7 flex-shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-sm)] border-0 bg-[var(--accent)] text-white transition-[background] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--accent-hover)] disabled:cursor-default disabled:opacity-40';
+const sendButtonClass = 'flex h-7 w-7 flex-shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-sm)] border-0 bg-[var(--brand)] text-white transition-[background] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-default disabled:opacity-40';
 
 const messageContainerClass = (role: string) => cx(
   messageClass,

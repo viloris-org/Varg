@@ -28,7 +28,7 @@ const contextKnowledgeTagClass = 'border border-[rgba(34,197,94,0.22)] bg-[rgba(
 const compactSelectClass = 'max-w-40 cursor-pointer truncate whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--bg-base)] px-2 py-[3px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none hover:border-[var(--accent)] focus:border-[var(--accent)]';
 const evidenceToggleClass = 'flex w-fit cursor-pointer items-center gap-1 rounded border-0 bg-transparent px-0 py-0 text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)]';
 const toolCallBaseClass = 'flex items-center gap-1.5 rounded-md px-2.5 py-1 font-[var(--font-mono)] text-xs';
-const toolCallClass = (complete: boolean) => cls(toolCallBaseClass, complete ? 'border border-[rgba(34,197,94,0.2)] bg-[rgba(34,197,94,0.1)] text-[#4ade80]' : 'border border-[rgba(59,130,246,0.2)] bg-[rgba(59,130,246,0.1)] text-[#60a5fa]');
+const toolCallClass = (complete: boolean) => cls(toolCallBaseClass, complete ? 'border border-[rgba(34,197,94,0.2)] bg-[rgba(34,197,94,0.1)] text-[#4ade80]' : 'border border-[var(--border-light)] bg-[var(--accent-dim)] text-[var(--text-secondary)]');
 const messageClass = (role: AiMessage['role']) => cls('flex gap-2', role === 'user' && 'flex-row-reverse');
 const assistantMarkdownClass = [
   '[&_h1]:my-[0.6em] [&_h1]:mb-[0.3em] [&_h1]:text-[1.2em] [&_h1]:font-semibold [&_h1]:leading-[1.3]',
@@ -45,15 +45,15 @@ const assistantMarkdownClass = [
   '[&_td]:border [&_td]:border-[var(--border)] [&_td]:px-2 [&_td]:py-1 [&_td]:align-top',
   '[&_hr]:my-[0.8em] [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[var(--border)]',
 ].join(' ');
-const messageContentClass = (role: AiMessage['role']) => cls('rounded-xl px-3 py-2 text-[13px] leading-normal', role === 'user' ? 'rounded-br bg-[#2563eb] text-white' : `rounded-bl bg-[var(--bg-secondary)] text-[var(--text-primary)] ${assistantMarkdownClass}`);
-const thinkingHeaderClass = 'flex w-full cursor-pointer items-center gap-1.5 border-0 bg-transparent px-2.5 py-1.5 text-left font-[var(--font-sans)] text-[11px] font-medium text-[#a78bfa] hover:bg-[rgba(139,92,246,0.08)] [&_svg]:shrink-0 [&_svg]:opacity-70';
+const messageContentClass = (role: AiMessage['role']) => cls('rounded-xl px-3 py-2 text-[13px] leading-normal', role === 'user' ? 'rounded-br bg-[var(--accent-strong)] text-white' : `rounded-bl bg-[var(--bg-secondary)] text-[var(--text-primary)] ${assistantMarkdownClass}`);
+const thinkingHeaderClass = 'flex w-full cursor-pointer items-center gap-1.5 border-0 bg-transparent px-2.5 py-1.5 text-left font-[var(--font-sans)] text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] [&_svg]:shrink-0 [&_svg]:opacity-70';
 const cardHeaderClass = 'flex w-full cursor-pointer items-center gap-1.5 border-0 bg-[var(--bg-secondary)] px-2.5 py-1.5 text-left text-[11px] text-[var(--text-secondary)]';
 const planItemStateClass = (state: 'allowed' | 'denied' | 'auto') => cls('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold', state === 'allowed' && 'bg-[rgba(16,185,129,0.12)] text-[#10b981]', state === 'denied' && 'bg-[rgba(239,68,68,0.1)] text-[#ef4444]', state === 'auto' && 'bg-[rgba(148,163,184,0.1)] text-[var(--text-muted)]');
 const traceResultClass = (result: string) => result === 'applied' ? 'text-[#10b981]' : 'text-[#ef4444]';
 const consoleLevelClass = (level: string) => cls('font-bold uppercase text-[var(--text-secondary)]', level === 'error' && 'text-[#ef4444]', (level === 'warn' || level === 'warning') && 'text-[#f59e0b]');
 const permissionStateClass = (allowed: boolean) => cls('text-[9px] font-semibold', allowed ? 'text-[#22c55e]' : 'text-[#f87171]');
-const permissionButtonClass = 'cursor-pointer rounded border border-[var(--border)] bg-[var(--bg-surface)] px-[7px] py-1 font-[var(--font-sans)] text-[9px] font-medium text-[var(--text-secondary)] hover:border-[#a78bfa] hover:text-[#c4b5fd]';
-const changeKindClass = (kind: CopilotOperation['permission_kind']) => cls('rounded-[3px] px-1 py-0.5 text-center font-[var(--font-mono)] text-[8px] font-bold', kind === 'write' && 'bg-[rgba(245,158,11,0.14)] text-[#f59e0b]', kind === 'read' && 'bg-[rgba(34,197,94,0.12)] text-[#22c55e]', kind === 'command' && 'bg-[rgba(96,165,250,0.14)] text-[#60a5fa]');
+const permissionButtonClass = 'cursor-pointer rounded border border-[var(--border)] bg-[var(--bg-surface)] px-[7px] py-1 font-[var(--font-sans)] text-[9px] font-medium text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:text-[var(--text-primary)]';
+const changeKindClass = (kind: CopilotOperation['permission_kind']) => cls('rounded-[3px] px-1 py-0.5 text-center font-[var(--font-mono)] text-[10px] font-bold', kind === 'write' && 'bg-[rgba(245,158,11,0.14)] text-[#f59e0b]', kind === 'read' && 'bg-[rgba(34,197,94,0.12)] text-[#22c55e]', kind === 'command' && 'bg-[var(--accent-dim)] text-[var(--text-secondary)]');
 const workflowStepClass = (active = false) => cls('rounded-[5px] px-[3px] py-1.5 text-[10px] font-medium text-[var(--text-muted)]', active && 'bg-[var(--accent-dim)] text-[var(--accent)]');
 const mentionItemClass = (active: boolean) => cls('flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-2.5 py-1.5 text-left font-[var(--font-sans)] text-xs text-[var(--text-primary)] hover:bg-[var(--accent-dim)]', active && 'bg-[var(--accent-dim)]');
 const messageStateClass = (state: 'queued' | 'interrupted') => cls('mt-1.5 w-fit rounded px-1.5 py-0.5 text-[9px] font-semibold', state === 'queued' ? 'bg-[rgba(245,158,11,0.12)] text-[#fbbf24]' : 'bg-[rgba(148,163,184,0.12)] text-[#94a3b8]');
@@ -400,7 +400,7 @@ function MessageBubble({ msg }: { msg: AiMessage }) {
       </div>
       <div className="flex max-w-[85%] flex-col gap-1.5">
         {msg.thinking && (
-          <div className="mb-2 overflow-hidden rounded-[7px] border border-[rgba(139,92,246,0.2)] bg-[rgba(139,92,246,0.05)]">
+          <div className="mb-2 overflow-hidden rounded-[7px] border border-[var(--border)] bg-[var(--bg-surface)]">
             <button
               className={thinkingHeaderClass}
               onClick={() => setThinkingExpanded(!thinkingExpanded)}
@@ -410,7 +410,7 @@ function MessageBubble({ msg }: { msg: AiMessage }) {
                <span>{t('ai_thinking_process')}</span>
             </button>
             {thinkingExpanded && (
-              <div className="whitespace-pre-wrap border-t border-[rgba(139,92,246,0.15)] px-2.5 py-2 text-xs leading-normal text-[var(--text-secondary)]">{msg.thinking}</div>
+              <div className="whitespace-pre-wrap border-t border-[var(--border)] px-2.5 py-2 text-xs leading-normal text-[var(--text-secondary)]">{msg.thinking}</div>
             )}
           </div>
         )}
@@ -1310,7 +1310,7 @@ export default function AiPanel({
         attachedKnowledgeCount={attachedKnowledge.length}
       />
 
-      {!chatOnly && (plan || completedBundle) && <div className="flex min-h-9 gap-1 border-b border-[var(--border)] bg-[var(--bg-surface)] px-2 py-1 [&_span]:min-w-4 [&_span]:rounded-lg [&_span]:bg-[rgba(167,139,250,0.16)] [&_span]:px-[5px] [&_span]:py-px [&_span]:text-[9px] [&_span]:text-[#a78bfa]" role="tablist" aria-label="AI workspace">
+      {!chatOnly && (plan || completedBundle) && <div className="flex min-h-9 gap-1 border-b border-[var(--border)] bg-[var(--bg-surface)] px-2 py-1 [&_span]:min-w-4 [&_span]:rounded-lg [&_span]:bg-[var(--accent-dim)] [&_span]:px-[5px] [&_span]:py-px [&_span]:text-[9px] [&_span]:text-[var(--text-secondary)]" role="tablist" aria-label="AI workspace">
         {(['chat', 'changes'] as AiWorkspaceView[]).map(view => (
           <button
             key={view}
@@ -1356,7 +1356,7 @@ export default function AiPanel({
                     <span><strong>{completedBundle.consoleEntries.length}</strong> console</span>
                   </div>
                   {completedBundle.undoAvailable && (
-                    <button className="inline-flex min-h-[30px] w-max cursor-pointer items-center gap-1.5 rounded-md border border-[rgba(96,165,250,0.45)] bg-[rgba(96,165,250,0.08)] px-2.5 py-0 font-[var(--font-sans)] text-[10px] font-semibold text-[#bfdbfe] hover:border-[#60a5fa] hover:bg-[rgba(96,165,250,0.14)] hover:text-[#dbeafe]" onClick={undoLastAiEdit}>
+                    <button className="inline-flex min-h-[30px] w-max cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border-light)] bg-[var(--bg-surface)] px-2.5 py-0 font-[var(--font-sans)] text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]" onClick={undoLastAiEdit}>
                       <IconUndo /> Undo {completedBundle.undoLabel ?? 'AI edit'}
                     </button>
                   )}
@@ -1364,7 +1364,7 @@ export default function AiPanel({
                   {completedBundle.consoleEntries.length > 0 && <InlineCard card={{ type: 'console', data: completedBundle.consoleEntries }} />}
                 </div>
               ) : (
-                <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-[rgba(167,139,250,0.45)] bg-[rgba(167,139,250,0.05)] p-[18px] [&_strong]:text-xs [&_strong]:text-[#c4b5fd] [&_span]:text-[11px] [&_span]:leading-normal [&_span]:text-[var(--text-muted)]">
+                <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-[var(--border-light)] bg-[var(--accent-dim)] p-[18px] [&_strong]:text-xs [&_strong]:text-[var(--text-secondary)] [&_span]:text-[11px] [&_span]:leading-normal [&_span]:text-[var(--text-muted)]">
                   <strong>{t('changes_empty')}</strong>
                   <span>{t('changes_empty_desc')}</span>
                 </div>
@@ -1374,7 +1374,7 @@ export default function AiPanel({
                 <span>{t('changes_decision_hint')}</span>
               </div>
               {plan.operations.map(operation => (
-              <div key={operation.index} className="grid grid-cols-[58px_1fr] items-start gap-2 rounded-lg border border-dashed border-[rgba(167,139,250,0.4)] bg-[rgba(167,139,250,0.05)] p-2.5 text-[11px] leading-[1.45] text-[var(--text-secondary)] hover:border-[#a78bfa]">
+              <div key={operation.index} className="grid grid-cols-[58px_1fr] items-start gap-2 rounded-lg border border-dashed border-[var(--border)] bg-[var(--accent-dim)] p-2.5 text-[11px] leading-[1.45] text-[var(--text-secondary)] hover:border-[var(--border-light)]">
                 <span className={changeKindClass(operation.permission_kind)}>
                   {operation.permission_kind.toUpperCase()}
                 </span>
@@ -1406,7 +1406,7 @@ export default function AiPanel({
         {(chatOnly || workspaceView === 'chat') && <>
         {messages.length === 0 && (
           <div className="m-auto flex h-full max-w-[440px] flex-col items-center justify-start gap-2.5 px-5 pt-7 pb-5 text-center text-[var(--text-secondary)]">
-            <div className="mb-0.5 flex h-[46px] w-[46px] items-center justify-center rounded-[14px] border border-[rgba(96,165,250,0.25)] bg-[linear-gradient(145deg,rgba(96,165,250,0.18),rgba(96,165,250,0.04))] text-[var(--accent)] shadow-[0_8px_24px_rgba(0,0,0,0.2)] [&_svg]:opacity-90"><IconSparkles size={24} /></div>
+            <div className="mb-0.5 flex h-[46px] w-[46px] items-center justify-center rounded-[14px] border border-[var(--border-light)] bg-[linear-gradient(145deg,var(--bg-elevated),var(--bg-surface))] text-[var(--accent)] shadow-[0_8px_24px_rgba(0,0,0,0.2)] [&_svg]:opacity-90"><IconSparkles size={24} /></div>
             <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--accent)]">{t('ai_workspace_eyebrow')}</span>
             <p className="text-xl font-semibold text-[var(--text-primary)]">{t('ai_empty_title')}</p>
             <p className="max-w-[340px] text-[13px] leading-[1.55] text-[var(--text-secondary)]">
@@ -1566,7 +1566,7 @@ export default function AiPanel({
         )}
 
         {(requestActive || status === 'executing' || queuedPrompts.length > 0) && (
-          <div className="mb-2 flex items-center justify-between gap-2.5 rounded-[7px] border border-[rgba(96,165,250,0.28)] bg-[rgba(59,130,246,0.07)] px-2 py-[7px] text-[11px] text-[#bfdbfe] [&>div]:flex [&>div]:min-w-0 [&>div]:items-center [&>div]:gap-1.5 [&_svg]:h-[11px] [&_svg]:w-[11px] [&_svg]:shrink-0 [&_button]:shrink-0 [&_button]:cursor-pointer [&_button]:rounded-[5px] [&_button]:border [&_button]:border-[rgba(248,113,113,0.35)] [&_button]:bg-[rgba(239,68,68,0.09)] [&_button]:px-[7px] [&_button]:py-1 [&_button]:font-[var(--font-sans)] [&_button]:text-[11px] [&_button]:font-semibold [&_button]:text-[#fca5a5] [&_button:hover:not(:disabled)]:border-[#f87171] [&_button:disabled]:cursor-default [&_button:disabled]:opacity-55" role="status">
+          <div className="mb-2 flex items-center justify-between gap-2.5 rounded-[7px] border border-[var(--border-light)] bg-[var(--accent-dim)] px-2 py-[7px] text-[11px] text-[var(--text-secondary)] [&>div]:flex [&>div]:min-w-0 [&>div]:items-center [&>div]:gap-1.5 [&_svg]:h-[11px] [&_svg]:w-[11px] [&_svg]:shrink-0 [&_button]:shrink-0 [&_button]:cursor-pointer [&_button]:rounded-[5px] [&_button]:border [&_button]:border-[rgba(248,113,113,0.35)] [&_button]:bg-[rgba(239,68,68,0.09)] [&_button]:px-[7px] [&_button]:py-1 [&_button]:font-[var(--font-sans)] [&_button]:text-[11px] [&_button]:font-semibold [&_button]:text-[#fca5a5] [&_button:hover:not(:disabled)]:border-[#f87171] [&_button:disabled]:cursor-default [&_button:disabled]:opacity-55" role="status">
             <div>
               <IconLoader className={requestActive || status === 'executing' ? commonSpinnerClass : undefined} />
               <span>
@@ -1620,7 +1620,7 @@ export default function AiPanel({
             rows={2}
           />
           <button
-            className="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg border-0 bg-[var(--accent)] text-white transition-[background,opacity] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg border-0 bg-[var(--brand)] text-white transition-[background,opacity] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-40"
             onClick={() => queueOrSubmitPrompt(input)}
             disabled={!input.trim()}
             aria-label={t('btn_send')}

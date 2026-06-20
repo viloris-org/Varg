@@ -536,6 +536,10 @@ pub struct BuildRenderSettings {
     pub sharpness_percent: u8,
     /// Battery policy name.
     pub battery_policy: String,
+    /// Requested frame generation backend name.
+    pub frame_generation: String,
+    /// UI composition policy name.
+    pub ui_composition: String,
 }
 
 impl Default for BuildRenderSettings {
@@ -549,6 +553,8 @@ impl Default for BuildRenderSettings {
             max_render_scale_percent: 100,
             sharpness_percent: 35,
             battery_policy: "balanced".to_owned(),
+            frame_generation: "disabled".to_owned(),
+            ui_composition: "after-frame-generation".to_owned(),
         }
     }
 }
@@ -657,6 +663,8 @@ mod tests {
         assert!(prefab.diagnostics().is_empty());
         assert_eq!(preferences.theme, "system");
         assert!(build.diagnostics().is_empty());
+        assert_eq!(build.render.frame_generation, "disabled");
+        assert_eq!(build.render.ui_composition, "after-frame-generation");
     }
 
     #[test]

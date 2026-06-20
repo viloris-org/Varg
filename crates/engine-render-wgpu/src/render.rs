@@ -233,6 +233,10 @@ impl WgpuRenderDevice {
                 .ok_or_else(|| EngineError::invalid_handle(missing_error))?;
             target._desc.output_size()
         };
+        let (temporal_camera, reset_history) =
+            temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
+        self.latest_temporal_camera = temporal_camera;
+        self.reset_temporal_history = reset_history;
         let frame_res =
             self.encode_frame_passes(&batches, &csm, tw, th, ow, oh, true, encoder_label);
 

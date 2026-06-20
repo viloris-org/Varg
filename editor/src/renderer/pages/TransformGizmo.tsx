@@ -37,17 +37,20 @@ interface TransformGizmoProps {
 }
 
 // ─── Axis Colors ───────────────────────────────────────────────────────────
+// Kept as concrete hex (canvas 2D fillStyle can't resolve CSS vars) but the
+// values mirror the --axis-x/y/z design tokens so the gizmo matches the rest
+// of the editor's spatial color coding.
 
-const AXIS_X = '#FF4444';
-const AXIS_Y = '#44CC44';
-const AXIS_Z = '#4488FF';
+const AXIS_X = '#FF4D4D';
+const AXIS_Y = '#4ADE5C';
+const AXIS_Z = '#4D8DFF';
 const AXIS_CENTER = '#AAAAAA';
 const AXIS_HIGHLIGHT = '#FFFFFF';
 
 const AXES: { dir: Vec3; color: string; colorHex: string; name: string }[] = [
-  { dir: [1, 0, 0], color: AXIS_X, colorHex: '#FF4444', name: 'X' },
-  { dir: [0, 1, 0], color: AXIS_Y, colorHex: '#44CC44', name: 'Y' },
-  { dir: [0, 0, 1], color: AXIS_Z, colorHex: '#4488FF', name: 'Z' },
+  { dir: [1, 0, 0], color: AXIS_X, colorHex: AXIS_X, name: 'X' },
+  { dir: [0, 1, 0], color: AXIS_Y, colorHex: AXIS_Y, name: 'Y' },
+  { dir: [0, 0, 1], color: AXIS_Z, colorHex: AXIS_Z, name: 'Z' },
 ];
 
 // ─── Handle Types for Hit Testing ─────────────────────────────────────────

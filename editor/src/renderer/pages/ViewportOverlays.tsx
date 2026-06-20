@@ -42,11 +42,11 @@ interface GizmoAxis {
 }
 
 const AXIS_DEFS: Array<{ name: AxisName; label: string; color: string; dir: Vec3 }> = [
-  { name: 'x', label: 'X', color: '#FF4444', dir: [1, 0, 0] },
+  { name: 'x', label: 'X', color: '#FF4D4D', dir: [1, 0, 0] },
   { name: '-x', label: '-X', color: '#B91C1C', dir: [-1, 0, 0] },
-  { name: 'y', label: 'Y', color: '#44CC44', dir: [0, 1, 0] },
+  { name: 'y', label: 'Y', color: '#4ADE5C', dir: [0, 1, 0] },
   { name: '-y', label: '-Y', color: '#15803D', dir: [0, -1, 0] },
-  { name: 'z', label: 'Z', color: '#4488FF', dir: [0, 0, 1] },
+  { name: 'z', label: 'Z', color: '#4D8DFF', dir: [0, 0, 1] },
   { name: '-z', label: '-Z', color: '#1D4ED8', dir: [0, 0, -1] },
 ];
 

@@ -1,9 +1,13 @@
 use engine_core::EngineConfig;
+use engine_ecs::{BuildConfiguration, BuildRenderSettings};
 use engine_render::{
-    RenderFrame, RenderGraphBuilder, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
-    RenderScalingSettings, UpscalerKind,
+    FrameGenerationKind, RenderFrame, RenderGraphBuilder, RenderPlatformClass, RenderQualityMode,
+    RenderScalingContext, RenderScalingSettings, UiCompositionPolicy, UpscalerKind,
 };
-use runtime_min::{build_default_render_graph, smoke_runtime_min, RuntimeServices};
+use runtime_min::{
+    build_default_render_graph, render_scaling_settings_from_build, smoke_runtime_min,
+    RuntimeServices,
+};
 
 #[test]
 fn native_runtime_min_smoke_test() {
@@ -13,12 +17,13 @@ fn native_runtime_min_smoke_test() {
 #[test]
 fn default_render_graph_pass_order() {
     let graph = build_default_render_graph();
-    assert_eq!(graph.pass_count(), 5);
+    assert_eq!(graph.pass_count(), 6);
     assert_eq!(graph.passes[0].name, "shadow");
     assert_eq!(graph.passes[1].name, "forward");
-    assert_eq!(graph.passes[2].name, "upscale");
-    assert_eq!(graph.passes[3].name, "post");
-    assert_eq!(graph.passes[4].name, "ui");
+    assert_eq!(graph.passes[2].name, "temporal-inputs");
+    assert_eq!(graph.passes[3].name, "upscale");
+    assert_eq!(graph.passes[4].name, "post");
+    assert_eq!(graph.passes[5].name, "ui");
 }
 
 #[test]
@@ -52,6 +57,50 @@ fn player_render_settings_apply_without_recreating_runtime() {
         services.render_scaling_settings.quality,
         RenderQualityMode::Performance
     );
+}
+
+#[test]
+fn build_render_settings_map_frame_generation_and_ui_policy() {
+    let mut build = BuildConfiguration::runtime_min();
+    build.render = BuildRenderSettings {
+        quality: "quality".to_string(),
+        upscaler: "dlss".to_string(),
+        frame_generation: "dlss".to_string(),
+        ui_composition: "separate-texture".to_string(),
+        ..BuildRenderSettings::default()
+    };
+
+    let settings = render_scaling_settings_from_build(&build);
+    assert_eq!(settings.quality, RenderQualityMode::Quality);
+    assert_eq!(settings.preferred_upscaler, Some(UpscalerKind::Dlss));
+    assert_eq!(settings.frame_generation, FrameGenerationKind::Dlss);
+    assert_eq!(
+        settings.ui_composition,
+        UiCompositionPolicy::SeparateTexture
+    );
+
+    let mut services = RuntimeServices::minimal(EngineConfig::default());
+    let selection = services.set_render_scaling(settings, RenderScalingContext::default());
+    assert_eq!(selection.upscaler, UpscalerKind::BuiltInSpatial);
+    assert_eq!(selection.frame_generation, FrameGenerationKind::Disabled);
+}
+
+#[test]
+fn mobile_vendor_request_falls_back_in_headless_runtime() {
+    let mut services = RuntimeServices::minimal(EngineConfig::default());
+    let selection = services.set_render_scaling(
+        RenderScalingSettings {
+            preferred_upscaler: Some(UpscalerKind::SnapdragonGsr),
+            ..RenderScalingSettings::mobile()
+        },
+        RenderScalingContext {
+            platform: RenderPlatformClass::Android,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(selection.upscaler, UpscalerKind::BuiltInSpatial);
+    assert!(selection.reason.contains("SnapdragonGsr unavailable"));
 }
 
 #[test]

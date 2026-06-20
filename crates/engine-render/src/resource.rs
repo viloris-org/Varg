@@ -59,6 +59,8 @@ pub enum ImageFormat {
     Rgba8Unorm,
     /// 16-bit float RGBA.
     Rgba16Float,
+    /// 16-bit float RG for motion vectors and compact velocity fields.
+    Rg16Float,
     /// 32-bit float RGBA.
     Rgba32Float,
     /// 32-bit depth.
@@ -105,6 +107,7 @@ impl ImageFormat {
             ImageFormat::Rgba8Srgb => 4,
             ImageFormat::Rgba8Unorm => 4,
             ImageFormat::Rgba16Float => 8,
+            ImageFormat::Rg16Float => 4,
             ImageFormat::Rgba32Float => 16,
             ImageFormat::Depth32Float => 4,
             ImageFormat::Depth24Stencil8 => 4,
@@ -158,6 +161,34 @@ impl ImageDesc {
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             label: None,
         }
+    }
+
+    /// Creates a motion-vector image descriptor at internal render resolution.
+    pub fn motion_vectors_2d(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            mip_levels: 1,
+            samples: 1,
+            format: ImageFormat::Rg16Float,
+            usage: ImageUsage::SAMPLED.or(ImageUsage::COLOR_ATTACHMENT),
+            label: Some("aster motion vectors"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn motion_vector_descriptor_uses_compact_sampled_render_target() {
+        let desc = ImageDesc::motion_vectors_2d(1280, 720);
+        assert_eq!(desc.width, 1280);
+        assert_eq!(desc.height, 720);
+        assert_eq!(desc.format, ImageFormat::Rg16Float);
+        assert!(desc.usage.contains(ImageUsage::SAMPLED));
+        assert!(desc.usage.contains(ImageUsage::COLOR_ATTACHMENT));
     }
 }
 

@@ -15,6 +15,8 @@ pub enum RenderStage {
     /// Rendering at internal resolution before upscaling.
     #[default]
     PreUpscale,
+    /// Motion vectors, depth history, exposure, and reactive mask preparation.
+    TemporalInputs,
     /// Resolution reconstruction or spatial scaling.
     Upscale,
     /// Full-resolution post-processing.
@@ -284,5 +286,20 @@ mod tests {
         builder.add_pass_at_stage("upscale", RenderStage::Upscale);
         let graph = builder.build();
         assert_eq!(graph.passes[0].stage, RenderStage::Upscale);
+    }
+
+    #[test]
+    fn temporal_inputs_stage_orders_before_upscale() {
+        let mut builder = RenderGraphBuilder::new();
+        let forward = builder.add_pass("forward");
+        let temporal = builder.add_pass_at_stage("temporal-inputs", RenderStage::TemporalInputs);
+        let upscale = builder.add_pass_at_stage("upscale", RenderStage::Upscale);
+        builder.order_before(forward, temporal);
+        builder.order_before(temporal, upscale);
+
+        let graph = builder.build();
+        let names: Vec<&str> = graph.passes.iter().map(|pass| pass.name.as_str()).collect();
+        assert_eq!(names, ["forward", "temporal-inputs", "upscale"]);
+        assert_eq!(graph.passes[1].stage, RenderStage::TemporalInputs);
     }
 }

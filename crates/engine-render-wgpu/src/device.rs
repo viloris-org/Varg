@@ -4,6 +4,7 @@ use crate::meshes::MeshBuffers;
 use engine_core::{Handle, HandleAllocator};
 use engine_render::{
     ImageDesc, RenderPerformanceConfig, RenderPerformanceMetrics, RenderTarget, RenderTargetDesc,
+    TemporalCameraData, TemporalFrameState,
 };
 
 /// Native output capabilities exposed by the selected graphics adapter.
@@ -205,6 +206,9 @@ pub struct WgpuRenderDevice {
     pub(crate) performance_metrics: RenderPerformanceMetrics,
     pub(crate) active_upscaler: engine_render::UpscalerKind,
     pub(crate) upscale_sharpness: f32,
+    pub(crate) temporal_state: TemporalFrameState,
+    pub(crate) latest_temporal_camera: TemporalCameraData,
+    pub(crate) reset_temporal_history: bool,
 }
 pub(crate) struct FrameResources {
     pub(crate) ssao_bg: Option<Arc<wgpu::BindGroup>>,

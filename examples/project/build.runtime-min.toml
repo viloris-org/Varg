@@ -11,6 +11,8 @@ min_render_scale_percent = 50
 max_render_scale_percent = 100
 sharpness_percent = 35
 battery_policy = "balanced"
+frame_generation = "disabled"
+ui_composition = "after-frame-generation"
 
 [format]
 version = 1

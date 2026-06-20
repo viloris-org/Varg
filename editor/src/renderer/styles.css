@@ -20,6 +20,11 @@
   --color-danger-dim: var(--danger-dim);
   --color-warning: var(--warning);
   --color-info: var(--info);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-axis-x: var(--axis-x);
+  --color-axis-y: var(--axis-y);
+  --color-axis-z: var(--axis-z);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --radius-aster-sm: var(--radius-sm);
@@ -39,57 +44,84 @@
   }
 
   :root {
-    --bg-base: #18181B;
-    --bg-surface: #232327;
-    --bg-hover: #2D2D32;
-    --bg-active: #2563EB;
+    --bg-base: #0D0E10;
+    --bg-surface: #151619;
+    --bg-hover: #202124;
+    --bg-active: #3F3F46;
     --bg-primary: var(--bg-base);
     --bg-secondary: var(--bg-surface);
-    --border: #36363B;
-    --border-light: #42424A;
+    --bg-elevated: #1B1C20;
+    --bg-overlay: rgba(18, 18, 20, 0.86);
+    --border: rgba(212, 212, 216, 0.14);
+    --border-light: rgba(212, 212, 216, 0.24);
     --text-primary: #F4F4F5;
-    --text-secondary: #A1A1AA;
-    --text-muted: #71717A;
-    --accent: #60A5FA;
-    --accent-hover: #3B82F6;
-    --accent-dim: rgba(96, 165, 250, 0.15);
-    --danger: #EF4444;
-    --danger-dim: rgba(239, 68, 68, 0.12);
-    --warning: #F59E0B;
-    --info: #3B82F6;
+    --text-secondary: #C3C3C7;
+    --text-muted: #85858B;
+    --accent: #A1A1AA;
+    --accent-hover: #D4D4D8;
+    --accent-dim: rgba(161, 161, 170, 0.16);
+    --accent-strong: #71717A;
+    --success: #34D399;
+    --success-dim: rgba(52, 211, 153, 0.13);
+    --danger: #F87171;
+    --danger-dim: rgba(248, 113, 113, 0.12);
+    --error: var(--danger);
+    --warning: #FBBF24;
+    --warning-dim: rgba(251, 191, 36, 0.13);
+    --info: #A1A1AA;
+    /* Brand / selection accent — used only for "selected" semantics so a
+       picked node or active tab reads clearly against the neutral chrome. */
+    --brand: #22C55E;
+    --brand-hover: #4ADE80;
+    --brand-dim: rgba(34, 197, 94, 0.14);
+    /* Spatial axis colors — shared by every gizmo, overlay, and vector field
+       so X/Y/Z always mean the same thing (red / green / blue). */
+    --axis-x: #FF4D4D;
+    --axis-y: #4ADE5C;
+    --axis-z: #4D8DFF;
     --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
-    --radius-sm: 4px;
-    --radius-md: 6px;
-    --radius-lg: 10px;
-    --radius-xl: 14px;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
-    --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
-    --shadow-lg: 0 8px 30px rgba(0,0,0,0.5);
-    --transition-fast: 120ms ease;
-    --transition-normal: 200ms ease;
+    --radius-sm: 5px;
+    --radius-md: 7px;
+    --radius-lg: 8px;
+    --radius-xl: 8px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.03);
+    --shadow-md: 0 10px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.035);
+    --shadow-lg: 0 24px 70px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.04);
+    --transition-fast: 140ms ease;
+    --transition-normal: 220ms ease;
   }
 
   [data-theme="light"] {
-    --bg-base: #F4F4F5;
+    --bg-base: #F7F7F5;
     --bg-surface: #FFFFFF;
-    --bg-hover: #E4E4E7;
-    --bg-active: #DBEAFE;
-    --border: #D4D4D8;
-    --border-light: #E4E4E7;
-    --text-primary: #18181B;
-    --text-secondary: #52525B;
-    --text-muted: #A1A1AA;
-    --accent: #3B82F6;
-    --accent-hover: #2563EB;
-    --accent-dim: rgba(59, 130, 246, 0.12);
+    --bg-hover: #ECECEA;
+    --bg-active: #E4E4E2;
+    --bg-elevated: #FFFFFF;
+    --bg-overlay: rgba(255, 255, 255, 0.82);
+    --border: rgba(15, 23, 42, 0.12);
+    --border-light: rgba(15, 23, 42, 0.2);
+    --text-primary: #111827;
+    --text-secondary: #475569;
+    --text-muted: #8490A2;
+    --accent: #52525B;
+    --accent-hover: #3F3F46;
+    --accent-dim: rgba(82, 82, 91, 0.12);
+    --accent-strong: #27272A;
+    --success: #059669;
+    --success-dim: rgba(5, 150, 105, 0.1);
     --danger: #DC2626;
     --danger-dim: rgba(220, 38, 38, 0.10);
+    --error: var(--danger);
     --warning: #D97706;
-    --info: #2563EB;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.08);
-    --shadow-md: 0 4px 12px rgba(0,0,0,0.10);
-    --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+    --warning-dim: rgba(217, 119, 6, 0.11);
+    --info: #52525B;
+    --brand: #16A34A;
+    --brand-hover: #15803D;
+    --brand-dim: rgba(22, 163, 74, 0.12);
+    --shadow-sm: 0 1px 2px rgba(15,23,42,0.06), inset 0 1px 0 rgba(255,255,255,0.7);
+    --shadow-md: 0 10px 24px rgba(15,23,42,0.09);
+    --shadow-lg: 0 24px 70px rgba(15,23,42,0.16);
   }
 
   html {
@@ -105,7 +137,10 @@
   body {
     width: 100%;
     height: 100%;
-    background: var(--bg-base);
+    background:
+      radial-gradient(circle at 22% -12%, rgba(161, 161, 170, 0.10), transparent 32rem),
+      radial-gradient(circle at 92% 8%, rgba(120, 113, 108, 0.08), transparent 28rem),
+      var(--bg-base);
   }
 
   body {
@@ -115,7 +150,9 @@
   #root {
     width: 100%;
     height: 100%;
-    background: var(--bg-base);
+    background:
+      linear-gradient(135deg, rgba(255,255,255,0.025), transparent 36%),
+      var(--bg-base);
     overflow: hidden;
     position: relative;
   }
@@ -159,6 +196,20 @@
 
   button {
     font-family: var(--font-sans);
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    color-scheme: dark;
+  }
+
+  [data-theme="light"] button,
+  [data-theme="light"] input,
+  [data-theme="light"] select,
+  [data-theme="light"] textarea {
+    color-scheme: light;
   }
 }
 

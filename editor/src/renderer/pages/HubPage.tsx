@@ -94,14 +94,14 @@ interface Props {
 // ─── Avatar helper ──────────────────────────────────────────────────────────
 
 const AVATAR_COLORS = [
-  'bg-linear-to-br from-[#3B82F6] to-[#1D4ED8]',
+  'bg-linear-to-br from-[#6366F1] to-[#4338CA]',
+  'bg-linear-to-br from-[#14B8A6] to-[#0F766E]',
+  'bg-linear-to-br from-[#F59E0B] to-[#B45309]',
+  'bg-linear-to-br from-[#EC4899] to-[#BE185D]',
+  'bg-linear-to-br from-[#8B5CF6] to-[#6D28D9]',
   'bg-linear-to-br from-[#22C55E] to-[#15803D]',
-  'bg-linear-to-br from-[#A855F7] to-[#7C3AED]',
-  'bg-linear-to-br from-[#F59E0B] to-[#D97706]',
-  'bg-linear-to-br from-[#06B6D4] to-[#0891B2]',
-  'bg-linear-to-br from-[#EC4899] to-[#DB2777]',
-  'bg-linear-to-br from-[#EF4444] to-[#DC2626]',
-  'bg-linear-to-br from-[#14B8A6] to-[#0D9488]',
+  'bg-linear-to-br from-[#0EA5E9] to-[#0369A1]',
+  'bg-linear-to-br from-[#F97316] to-[#C2410C]',
 ];
 
 function getAvatarClass(name: string): string {
@@ -118,13 +118,28 @@ function getInitials(name: string): string {
     .slice(0, 2) || '?';
 }
 
-const hubClass = 'flex h-full min-h-0 w-full bg-[var(--bg-base)]';
+// last_touched may arrive as an epoch (seconds or millis) or an ISO string.
+// Normalize to a readable local date; fall back to the raw value if unparseable.
+function formatLastTouched(raw: string): string {
+  if (!raw) return '';
+  const numeric = Number(raw);
+  let date: Date;
+  if (Number.isFinite(numeric) && /^\d+$/.test(raw.trim())) {
+    date = new Date(numeric < 1e12 ? numeric * 1000 : numeric);
+  } else {
+    date = new Date(raw);
+  }
+  if (Number.isNaN(date.getTime())) return raw.slice(0, 10);
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+const hubClass = 'flex h-full min-h-0 w-full bg-[linear-gradient(135deg,rgba(255,255,255,0.035),transparent_34%),var(--bg-base)]';
 const hubMainClass = 'flex min-w-0 flex-1 flex-col overflow-hidden';
-const hubPageHeaderClass = 'flex flex-shrink-0 items-center justify-between px-8 pt-6';
-const hubPageTitleClass = 'text-[22px] font-semibold text-[var(--text-primary)]';
+const hubPageHeaderClass = 'flex flex-shrink-0 items-center justify-between px-8 pt-7';
+const hubPageTitleClass = 'text-[23px] font-semibold text-[var(--text-primary)]';
 const hubPageActionsClass = 'flex items-center gap-2';
 const hubSearchBarClass = 'flex-shrink-0 px-8 pt-4 pb-3';
-const hubSearchClass = 'w-full max-w-[400px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] bg-[url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2714%27%20height=%2714%27%20viewBox=%270%200%2024%2024%27%20fill=%27none%27%20stroke=%27%2364748B%27%20stroke-width=%272%27%20stroke-linecap=%27round%27%20stroke-linejoin=%27round%27%3E%3Ccircle%20cx=%2711%27%20cy=%2711%27%20r=%278%27/%3E%3Cline%20x1=%2721%27%20y1=%2721%27%20x2=%2716.65%27%20y2=%2716.65%27/%3E%3C/svg%3E)] bg-[position:12px_center] bg-no-repeat py-2 pr-3 pl-[34px] font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] outline-none transition-[border-color] duration-[120ms] ease-in placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]';
+const hubSearchClass = 'w-full max-w-[440px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] bg-[url(data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2714%27%20height=%2714%27%20viewBox=%270%200%2024%2024%27%20fill=%27none%27%20stroke=%27%2364748B%27%20stroke-width=%272%27%20stroke-linecap=%27round%27%20stroke-linejoin=%27round%27%3E%3Ccircle%20cx=%2711%27%20cy=%2711%27%20r=%278%27/%3E%3Cline%20x1=%2721%27%20y1=%2721%27%20x2=%2716.65%27%20y2=%2716.65%27/%3E%3C/svg%3E)] bg-[position:13px_center] bg-no-repeat py-2.5 pr-3 pl-[36px] font-[var(--font-sans)] text-[13px] text-[var(--text-primary)] shadow-[var(--shadow-sm)] outline-none transition-[border-color,box-shadow] duration-[120ms] ease-in placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-dim)]';
 const hubActionBarLabelClass = 'mr-1 text-[11px] text-[var(--text-muted)]';
 const hubScrollClass = 'flex-1 overflow-y-auto px-8 pb-6 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-[3px] [&::-webkit-scrollbar-thumb]:bg-[var(--border)] [&::-webkit-scrollbar-track]:bg-transparent';
 const hubGridClass = 'grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-2.5';
@@ -137,29 +152,29 @@ function hubActionBarClass(visible: boolean): string {
   ].join(' ');
 }
 
-const sidebarClass = 'flex w-[220px] min-w-[220px] select-none flex-col border-r border-[var(--border)] bg-[var(--bg-surface)]';
-const logoClass = 'flex items-center gap-2.5 px-5 pt-7 pb-5 [&_svg]:shrink-0';
+const sidebarClass = 'flex w-[232px] min-w-[232px] select-none flex-col border-r border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.035),transparent_42%),var(--bg-surface)] shadow-[var(--shadow-sm)]';
+const logoClass = 'flex items-center gap-2.5 px-5 pt-7 pb-5 [&_svg]:shrink-0 [&_svg]:drop-shadow-[0_6px_14px_rgba(0,0,0,0.24)]';
 const logoTitleClass = 'text-lg font-bold text-[var(--text-primary)]';
 const logoTaglineClass = 'text-[11px] font-normal text-[var(--text-muted)]';
 const navClass = 'flex flex-1 flex-col gap-0.5 px-2 py-2';
-const navItemBaseClass = 'flex w-full cursor-pointer items-center gap-2.5 rounded-[var(--radius-sm)] border-0 bg-transparent px-3 py-[9px] text-left font-[var(--font-sans)] text-[13px] transition-[background,color] duration-[120ms] ease-in [&_svg]:h-[18px] [&_svg]:w-[18px] [&_svg]:shrink-0 [&_svg]:opacity-70 [&_svg]:transition-opacity [&_svg]:duration-[120ms] [&_svg]:ease-in hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] hover:[&_svg]:opacity-100';
+const navItemBaseClass = 'flex w-full cursor-pointer items-center gap-2.5 rounded-[var(--radius-md)] border border-transparent bg-transparent px-3 py-[9px] text-left font-[var(--font-sans)] text-[13px] transition-[background,color,border-color] duration-[120ms] ease-in [&_svg]:h-[18px] [&_svg]:w-[18px] [&_svg]:shrink-0 [&_svg]:opacity-75 [&_svg]:transition-opacity [&_svg]:duration-[120ms] [&_svg]:ease-in hover:border-[var(--border)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] hover:[&_svg]:opacity-100';
 const sidebarFooterClass = 'flex items-center justify-between border-t border-[var(--border)] px-4 pt-3 pb-4';
 const themeToggleLabelClass = 'text-xs text-[var(--text-secondary)]';
-const themeToggleGroupClass = 'flex overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)]';
+const themeToggleGroupClass = 'flex overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5';
 
 function navItemClass(active = false): string {
   return [
     navItemBaseClass,
     active
-      ? 'bg-[var(--accent-dim)] text-[var(--accent)] [&_svg]:text-[var(--accent)] [&_svg]:opacity-100'
+      ? 'border-[var(--border-light)] bg-[var(--brand-dim)] text-[var(--brand)] shadow-[inset_3px_0_0_var(--brand)] [&_svg]:text-[var(--brand)] [&_svg]:opacity-100'
       : 'text-[var(--text-secondary)]',
   ].join(' ');
 }
 
 function themeToggleButtonClass(active: boolean): string {
   return [
-    'cursor-pointer border-0 px-2 py-1 font-[var(--font-sans)] text-xs transition-all duration-[120ms] ease-in hover:text-[var(--text-primary)]',
-    active ? 'bg-[var(--accent)] text-white' : 'bg-transparent text-[var(--text-muted)]',
+    'cursor-pointer rounded-[4px] border-0 px-2 py-1 font-[var(--font-sans)] text-xs transition-all duration-[120ms] ease-in hover:text-[var(--text-primary)]',
+    active ? 'bg-[var(--accent)] text-white shadow-[var(--shadow-sm)]' : 'bg-transparent text-[var(--text-muted)]',
   ].join(' ');
 }
 
@@ -171,7 +186,7 @@ const settingsControlBaseClass = 'min-w-0 justify-self-end max-[780px]:w-full ma
 const settingsControlClass = `${settingsControlBaseClass} w-full`;
 const settingsControlCompactClass = `${settingsControlBaseClass} w-[200px]`;
 const settingsActionsControlClass = `${settingsControlClass} flex justify-end`;
-const themeSelectorClass = 'grid h-8 w-[200px] grid-cols-3 gap-0.5 overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5 max-[780px]:w-full';
+const themeSelectorClass = 'grid h-8 w-[200px] grid-cols-3 gap-0.5 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5 max-[780px]:w-full';
 const connectedTextClass = 'text-[var(--success)]';
 const errorTextClass = 'text-[var(--error)]';
 const endpointOptionalClass = 'opacity-60';
@@ -186,8 +201,8 @@ function settingsRowClass(divided = false, extra = ''): string {
 
 function themeOptionButtonClass(active: boolean): string {
   return active
-    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-[var(--accent)] px-2 font-[var(--font-sans)] text-xs leading-none text-white transition-colors duration-[120ms] ease-in'
-    : 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-transparent px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--text-muted)] transition-colors duration-[120ms] ease-in hover:text-[var(--text-primary)]';
+    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[4px] border-0 bg-[var(--accent)] px-2 font-[var(--font-sans)] text-xs leading-none text-white shadow-[var(--shadow-sm)] transition-colors duration-[120ms] ease-in'
+    : 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[4px] border-0 bg-transparent px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--text-muted)] transition-colors duration-[120ms] ease-in hover:text-[var(--text-primary)]';
 }
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -599,7 +614,7 @@ function ProjectsPage({
                   <div className={projectMetaClass}>
                     <span>{project.toolchain_version}</span>
                     <span className={projectMetaDotClass} />
-                    <span>{project.last_touched.slice(0, 10)}</span>
+                    <span>{formatLastTouched(project.last_touched)}</span>
                   </div>
                 </div>
                 <button

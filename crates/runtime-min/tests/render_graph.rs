@@ -101,12 +101,13 @@ fn render_frame_index_propagates() {
 fn build_default_render_graph_pass_order() {
     use runtime_min::build_default_render_graph;
     let graph = build_default_render_graph();
-    assert_eq!(graph.pass_count(), 5);
+    assert_eq!(graph.pass_count(), 6);
     assert_eq!(graph.passes[0].name, "shadow");
     assert_eq!(graph.passes[1].name, "forward");
-    assert_eq!(graph.passes[2].name, "upscale");
-    assert_eq!(graph.passes[3].name, "post");
-    assert_eq!(graph.passes[4].name, "ui");
+    assert_eq!(graph.passes[2].name, "temporal-inputs");
+    assert_eq!(graph.passes[3].name, "upscale");
+    assert_eq!(graph.passes[4].name, "post");
+    assert_eq!(graph.passes[5].name, "ui");
 }
 
 #[test]

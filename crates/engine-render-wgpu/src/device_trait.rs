@@ -20,11 +20,7 @@ impl RenderDevice for WgpuRenderDevice {
         self.submit_render_world(&RenderWorld::default(), frame)
     }
 
-    fn submit_render_world(
-        &mut self,
-        world: &RenderWorld,
-        _frame: RenderFrame,
-    ) -> EngineResult<()> {
+    fn submit_render_world(&mut self, world: &RenderWorld, frame: RenderFrame) -> EngineResult<()> {
         let render_started = Instant::now();
         let batches = self.prepare_render_batches(world);
         let aspect = self
@@ -76,6 +72,10 @@ impl RenderDevice for WgpuRenderDevice {
             };
             let scale = self.dynamic_resolution.scale();
             let (rw, rh) = scaled_render_size(sw, sh, scale);
+            let (temporal_camera, reset_history) =
+                temporal_camera_from_world(world, aspect, (rw, rh), &mut self.temporal_state);
+            self.latest_temporal_camera = temporal_camera;
+            self.reset_temporal_history = reset_history || frame.frame_index == 0;
 
             let frame_res =
                 self.encode_frame_passes(&batches, &csm, rw, rh, sw, sh, true, "aster surface");
@@ -125,6 +125,10 @@ impl RenderDevice for WgpuRenderDevice {
 
         let frame_res =
             self.encode_frame_passes(&batches, &csm, tw, th, ow, oh, false, "aster offscreen");
+        let (temporal_camera, reset_history) =
+            temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
+        self.latest_temporal_camera = temporal_camera;
+        self.reset_temporal_history = reset_history || frame.frame_index == 0;
 
         let target = self
             .targets
@@ -197,11 +201,12 @@ impl RenderDevice for WgpuRenderDevice {
         context: engine_render::RenderScalingContext,
     ) -> engine_render::RenderScalingSelection {
         let settings = settings.clone().normalized();
-        let selection = engine_render::negotiate_render_scaling(
-            &settings,
-            &self.render_scaling_capabilities(),
-            context,
-        );
+        let capabilities = if context.platform.is_mobile() {
+            engine_render::RenderScalingCapabilities::mobile_prototype(context)
+        } else {
+            self.render_scaling_capabilities()
+        };
+        let selection = engine_render::negotiate_render_scaling(&settings, &capabilities, context);
         self.performance_config.dynamic_resolution.enabled = settings.dynamic_resolution
             && selection.upscaler != engine_render::UpscalerKind::Native;
         self.performance_config.dynamic_resolution.target_fps = settings.target_fps;
