@@ -112,6 +112,18 @@ pub struct RenderPerformanceMetrics {
     pub thermal_state: ThermalState,
     /// Number of dropped presentation frames observed by the backend.
     pub dropped_frames: u64,
+    /// Number of backend draw calls encoded for the latest frame.
+    pub draw_calls: u32,
+    /// Number of indexed triangles submitted for the latest frame.
+    pub triangles: u64,
+    /// Number of render objects considered before visibility selection.
+    pub submitted_objects: u32,
+    /// Number of render objects selected into the latest Visibility Set.
+    pub visible_objects: u32,
+    /// Number of render objects rejected by visibility selection.
+    pub culled_objects: u32,
+    /// Number of Frame Pipeline passes enabled for the latest frame.
+    pub pipeline_passes: u32,
 }
 
 /// Stateful controller for dynamic internal resolution.

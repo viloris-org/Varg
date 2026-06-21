@@ -179,3 +179,28 @@ pub(crate) struct PostProcessUniform {
     pub(crate) ssgi_intensity: f32,
     pub(crate) _pad: [f32; 2],
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct GpuGuiVertex {
+    pub(crate) position: [f32; 2],
+    pub(crate) uv: [f32; 2],
+    pub(crate) color: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct GuiUniform {
+    pub(crate) screen_size: [f32; 2],
+    pub(crate) _pad: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct SkinnedVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) uv: [f32; 2],
+    pub(crate) joints: [u32; 4],
+    pub(crate) weights: [f32; 4],
+}

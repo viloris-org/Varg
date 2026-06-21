@@ -4,6 +4,8 @@ use crate::{device::*, meshes::*, uniforms::*};
 use engine_render::RenderWorld;
 use wgpu::util::DeviceExt;
 
+pub(crate) type RenderBatch = (String, Vec<Instance>, String, bool);
+
 impl WgpuRenderDevice {
     /// Register PBR material parameters for an asset material name.
     ///
@@ -71,23 +73,30 @@ impl WgpuRenderDevice {
         }
     }
 
-    pub(crate) fn mesh_batches_from_world(
+    pub(crate) fn mesh_batches_from_world_visible(
         &self,
         world: &RenderWorld,
-    ) -> Vec<(String, Vec<Instance>, String, bool)> {
+        aspect: f32,
+    ) -> (Vec<RenderBatch>, engine_render::VisibilityResult) {
+        let visibility = engine_render::select_visibility(world, aspect);
         let batch_capacity = (world.objects.len()
             + usize::from(!world.sprites.is_empty())
             + usize::from(!world.particles.is_empty()))
         .min(32);
         let mut batches: HashMap<(String, String, bool), Vec<Instance>> =
             HashMap::with_capacity(batch_capacity);
-        for object in &world.objects {
+        for (&object_index, selected_mesh) in visibility
+            .visible_indices
+            .iter()
+            .zip(&visibility.selected_meshes)
+        {
+            let object = &world.objects[object_index];
             let (color, metallic, roughness, emissive) = self.pbr_for_material(&object.material);
             let t = object.transform;
-            let mesh = if object.mesh.is_empty() {
+            let mesh = if selected_mesh.is_empty() {
                 "debug/cube".to_string()
             } else {
-                object.mesh.clone()
+                selected_mesh.clone()
             };
             let mat = object.material.clone();
             batches
@@ -108,6 +117,10 @@ impl WgpuRenderDevice {
                     receive_shadows: if object.receive_shadows { 1.0 } else { 0.0 },
                 });
         }
+        let mut batches: Vec<_> = batches
+            .into_iter()
+            .map(|((mesh, mat, casts_shadows), instances)| (mesh, instances, mat, casts_shadows))
+            .collect();
         if !world.sprites.is_empty() {
             let mut sprites = world.sprites.iter().collect::<Vec<_>>();
             sprites.sort_by(|left, right| {
@@ -115,11 +128,13 @@ impl WgpuRenderDevice {
                     .cmp(&right.layer)
                     .then(left.order_in_layer.cmp(&right.order_in_layer))
             });
-            let sprite_instances = sprites.into_iter().map(|sprite| {
+            let mut current_texture: Option<String> = None;
+            let mut current_instances = Vec::new();
+            for sprite in sprites {
                 let t = sprite.transform;
                 let x = t.scale.x.abs().max(0.01) * if sprite.flip_h { -1.0 } else { 1.0 };
                 let y = t.scale.y.abs().max(0.01) * if sprite.flip_v { -1.0 } else { 1.0 };
-                Instance {
+                let instance = Instance {
                     offset: [
                         t.translation.x,
                         t.translation.y,
@@ -132,17 +147,50 @@ impl WgpuRenderDevice {
                     roughness: 0.5,
                     emissive: [0.0; 3],
                     receive_shadows: 1.0,
+                };
+                let texture = sprite.texture.clone().unwrap_or_default();
+                if current_texture
+                    .as_ref()
+                    .is_some_and(|current| current != &texture)
+                {
+                    batches.push((
+                        "debug/plane".to_owned(),
+                        std::mem::take(&mut current_instances),
+                        format!("@sprite:{}", current_texture.take().unwrap_or_default()),
+                        false,
+                    ));
                 }
-            });
-            batches
-                .entry(("debug/plane".to_string(), String::new(), false))
-                .or_default()
-                .extend(sprite_instances);
+                current_texture = Some(texture);
+                current_instances.push(instance);
+            }
+            if !current_instances.is_empty() {
+                batches.push((
+                    "debug/plane".to_owned(),
+                    current_instances,
+                    format!("@sprite:{}", current_texture.unwrap_or_default()),
+                    false,
+                ));
+            }
         }
-        if !world.particles.is_empty() {
-            let particle_instances: Vec<Instance> = world
-                .particles
-                .iter()
+        if world.particle_emitters.is_empty() && !world.particles.is_empty() {
+            let mut particles = world.particles.iter().collect::<Vec<_>>();
+            if let Some(camera) = &world.camera {
+                particles.sort_by(|left, right| {
+                    let left_distance =
+                        (left.transform.translation - camera.transform.translation).length();
+                    let right_distance =
+                        (right.transform.translation - camera.transform.translation).length();
+                    right_distance.total_cmp(&left_distance)
+                });
+            }
+            let camera_rotation = world
+                .camera
+                .as_ref()
+                .map_or(engine_core::math::Quat::IDENTITY, |camera| {
+                    camera.transform.rotation
+                });
+            let particle_instances: Vec<Instance> = particles
+                .into_iter()
                 .map(|particle| {
                     let t = particle.transform;
                     Instance {
@@ -153,7 +201,12 @@ impl WgpuRenderDevice {
                             t.scale.z.max(0.01),
                         ],
                         color: particle.color,
-                        rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                        rotation: [
+                            camera_rotation.x,
+                            camera_rotation.y,
+                            camera_rotation.z,
+                            camera_rotation.w,
+                        ],
                         metallic: 0.0,
                         roughness: 0.5,
                         emissive: [0.0; 3],
@@ -161,15 +214,14 @@ impl WgpuRenderDevice {
                     }
                 })
                 .collect();
-            batches
-                .entry(("debug/plane".to_string(), String::new(), false))
-                .or_default()
-                .extend(particle_instances);
+            batches.push((
+                "debug/plane".to_owned(),
+                particle_instances,
+                "@particle".to_owned(),
+                false,
+            ));
         }
-        batches
-            .into_iter()
-            .map(|((mesh, mat, casts_shadows), instances)| (mesh, instances, mat, casts_shadows))
-            .collect()
+        (batches, visibility)
     }
 
     pub(crate) fn pbr_for_material(&self, material: &str) -> ([f32; 4], f32, f32, [f32; 3]) {

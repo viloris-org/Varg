@@ -41,9 +41,10 @@ use engine_physics::{
 use engine_platform::{ActionMap, GamepadProvider, InputState};
 use engine_render::{
     BatteryPolicy, FrameGenerationKind, HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle,
-    ImageUsage, PresentStrategy, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder,
-    RenderPerformanceConfig, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
-    RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy, UpscalerKind,
+    ImageUsage, PresentStrategy, RenderApi, RenderDevice, RenderFrame, RenderGraph,
+    RenderGraphBuilder, RenderPerformanceConfig, RenderPlatformClass, RenderQualityMode,
+    RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy,
+    UpscalerKind,
 };
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
@@ -138,6 +139,16 @@ pub struct RuntimeStats {
     pub frame_time_seconds: f32,
     /// Number of renderable objects submitted this frame.
     pub draw_calls: usize,
+    /// Number of indexed triangles submitted by the render backend.
+    pub triangles: u64,
+    /// Number of render objects considered before visibility selection.
+    pub submitted_render_objects: u32,
+    /// Number of render objects selected into the latest Visibility Set.
+    pub visible_render_objects: u32,
+    /// Number of render objects rejected by visibility selection.
+    pub culled_render_objects: u32,
+    /// Number of enabled Frame Pipeline passes.
+    pub render_pipeline_passes: u32,
     /// Number of scene objects.
     pub entity_count: usize,
     /// Number of render resources known to the runtime.
@@ -470,9 +481,11 @@ impl<R: RenderDevice> RuntimeServices<R> {
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
         };
-        self.renderer
-            .submit_render_world(&self.render_world, frame)?;
-        self.renderer.execute_graph(&self.render_graph, frame)?;
+        self.renderer.submit_render_world_with_graph(
+            &self.render_world,
+            &self.render_graph,
+            frame,
+        )?;
         self.renderer.record_frame_time(dt * 1000.0);
         let render_metrics = self.renderer.performance_metrics();
 
@@ -482,7 +495,24 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.scene.process_deferred_destroy()?;
 
         // ── end_frame ──────────────────────────────────────────────────
-        self.stats.draw_calls = self.render_world.objects.len();
+        self.stats.draw_calls = if self.renderer.api() == RenderApi::Headless {
+            self.render_world.objects.len()
+        } else {
+            render_metrics.draw_calls as usize
+        };
+        if self.renderer.api() == RenderApi::Headless {
+            self.stats.triangles = 0;
+            self.stats.submitted_render_objects = self.render_world.objects.len() as u32;
+            self.stats.visible_render_objects = self.render_world.objects.len() as u32;
+            self.stats.culled_render_objects = 0;
+            self.stats.render_pipeline_passes = self.render_graph.pass_count() as u32;
+        } else {
+            self.stats.triangles = render_metrics.triangles;
+            self.stats.submitted_render_objects = render_metrics.submitted_objects;
+            self.stats.visible_render_objects = render_metrics.visible_objects;
+            self.stats.culled_render_objects = render_metrics.culled_objects;
+            self.stats.render_pipeline_passes = render_metrics.pipeline_passes;
+        }
         self.stats.entity_count = self.scene.object_count();
         self.stats.resource_count = self.render_world.objects.len()
             + self.render_world.lights.len()
@@ -2609,6 +2639,8 @@ mod tests {
                     material: format!("asset:{:032x}", explicit_guid.as_u128()),
                     casts_shadows: true,
                     receive_shadows: true,
+                    bounds: engine_render::RenderBounds::default(),
+                    lods: Vec::new(),
                 },
                 engine_render::RenderObject {
                     object: engine_core::EntityId::from_u128(2),
@@ -2617,6 +2649,8 @@ mod tests {
                     material: "debug/default".to_string(),
                     casts_shadows: true,
                     receive_shadows: true,
+                    bounds: engine_render::RenderBounds::default(),
+                    lods: Vec::new(),
                 },
             ],
             ..RenderWorld::default()

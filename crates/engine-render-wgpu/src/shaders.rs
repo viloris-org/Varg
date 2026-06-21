@@ -380,6 +380,104 @@ fn fs_main(input: VsOut) -> FsOut {
 }
 "#;
 
+pub(crate) const GUI_SHADER: &str = r#"
+struct GuiUniform {
+    screen_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> gui: GuiUniform;
+@group(0) @binding(1) var gui_texture: texture_2d<f32>;
+@group(0) @binding(2) var gui_sampler: sampler;
+
+struct VsIn {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: u32,
+};
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+fn unpack_color(value: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(value & 255u),
+        f32((value >> 8u) & 255u),
+        f32((value >> 16u) & 255u),
+        f32((value >> 24u) & 255u)
+    ) / 255.0;
+}
+
+@vertex
+fn vs_main(input: VsIn) -> VsOut {
+    var out: VsOut;
+    let ndc = vec2<f32>(
+        input.position.x / max(gui.screen_size.x, 1.0) * 2.0 - 1.0,
+        1.0 - input.position.y / max(gui.screen_size.y, 1.0) * 2.0
+    );
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = input.uv;
+    out.color = unpack_color(input.color);
+    return out;
+}
+
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(gui_texture, gui_sampler, input.uv) * input.color;
+}
+"#;
+
+pub(crate) const SKINNED_SHADER: &str = r#"
+struct CameraUniform {
+    view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
+    camera_forward: vec4<f32>,
+};
+
+struct BonePalette {
+    matrices: array<mat4x4<f32>>,
+};
+
+@group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(1) @binding(0) var<storage, read> bones: BonePalette;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) joints: vec4<u32>,
+    @location(4) weights: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(input: VsIn) -> VsOut {
+    let skin = bones.matrices[input.joints.x] * input.weights.x
+        + bones.matrices[input.joints.y] * input.weights.y
+        + bones.matrices[input.joints.z] * input.weights.z
+        + bones.matrices[input.joints.w] * input.weights.w;
+    var out: VsOut;
+    out.position = camera.view_projection * skin * vec4<f32>(input.position, 1.0);
+    out.normal = normalize((skin * vec4<f32>(input.normal, 0.0)).xyz);
+    out.uv = input.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
+    let light = max(dot(input.normal, normalize(vec3<f32>(0.4, 0.8, 0.2))), 0.15);
+    return vec4<f32>(vec3<f32>(0.82, 0.86, 0.92) * light, 1.0);
+}
+"#;
+
 pub(crate) const GRID_SHADER: &str = r#"
 struct CameraUniform {
     view_projection: mat4x4<f32>,

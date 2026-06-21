@@ -74,6 +74,16 @@ impl RenderGraph {
     pub fn pass_count(&self) -> usize {
         self.passes.len()
     }
+
+    /// Returns whether the graph contains a pass with the given name.
+    pub fn contains_pass(&self, name: &str) -> bool {
+        self.passes.iter().any(|pass| pass.name == name)
+    }
+
+    /// Returns whether the graph contains at least one pass in the given stage.
+    pub fn contains_stage(&self, stage: RenderStage) -> bool {
+        self.passes.iter().any(|pass| pass.stage == stage)
+    }
 }
 
 /// Builder for constructing a [`RenderGraph`].
@@ -301,5 +311,16 @@ mod tests {
         let names: Vec<&str> = graph.passes.iter().map(|pass| pass.name.as_str()).collect();
         assert_eq!(names, ["forward", "temporal-inputs", "upscale"]);
         assert_eq!(graph.passes[1].stage, RenderStage::TemporalInputs);
+    }
+
+    #[test]
+    fn graph_reports_named_passes_and_stages() {
+        let mut builder = RenderGraphBuilder::new();
+        builder.add_pass("forward");
+        builder.add_pass_at_stage("ui", RenderStage::UiComposition);
+        let graph = builder.build();
+        assert!(graph.contains_pass("forward"));
+        assert!(!graph.contains_pass("shadow"));
+        assert!(graph.contains_stage(RenderStage::UiComposition));
     }
 }

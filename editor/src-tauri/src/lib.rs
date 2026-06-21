@@ -1284,7 +1284,8 @@ impl EditorHost {
             generated.question_cards,
         )?;
         let detail = if has_question_cards {
-            self.quest_store.transition(&detail.record.id, QuestStatus::Clarifying)?
+            self.quest_store
+                .transition(&detail.record.id, QuestStatus::Clarifying)?
         } else {
             self.quest_store.get(&detail.record.id)?
         };
@@ -1467,7 +1468,8 @@ impl EditorHost {
             generated.question_cards,
         )?;
         let detail = if has_question_cards {
-            self.quest_store.transition(&detail.record.id, QuestStatus::Clarifying)?
+            self.quest_store
+                .transition(&detail.record.id, QuestStatus::Clarifying)?
         } else {
             self.quest_store.get(&detail.record.id)?
         };
@@ -1684,9 +1686,7 @@ impl EditorHost {
         let prepared = self.prepare_quest_execution(&id)?;
         match run_quest_execution(prepared) {
             Ok(value) => Ok(value),
-            Err(error) => {
-                record_quest_execution_failure(&self.quest_store, &id, started_at, error)
-            }
+            Err(error) => record_quest_execution_failure(&self.quest_store, &id, started_at, error),
         }
     }
 
@@ -1748,7 +1748,12 @@ fn record_quest_execution_failure(
                 "open_review_finding",
                 reason.clone(),
             ),
-            QuestReviewAction::with_target("revise-spec", "Revise Quest spec", "revise", reason.clone()),
+            QuestReviewAction::with_target(
+                "revise-spec",
+                "Revise Quest spec",
+                "revise",
+                reason.clone(),
+            ),
             QuestReviewAction::new("retry-execution", "Retry execution", "retry"),
         ],
         project_fingerprint: None,
@@ -1763,7 +1768,9 @@ fn record_quest_execution_failure(
             validation_count: 1,
             validation_failure_count: 1,
             baseline_changed_file_count: 0,
-            notes: vec!["Execution failed before the isolated attempt produced review evidence.".to_owned()],
+            notes: vec![
+                "Execution failed before the isolated attempt produced review evidence.".to_owned(),
+            ],
         },
         risk: "medium".to_owned(),
     };
@@ -1777,7 +1784,10 @@ fn record_quest_execution_failure(
     serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
 }
 
-fn prepare_quest_workspace(quest_store: &QuestStore, detail: &quest::QuestDetail) -> EngineResult<PathBuf> {
+fn prepare_quest_workspace(
+    quest_store: &QuestStore,
+    detail: &quest::QuestDetail,
+) -> EngineResult<PathBuf> {
     prepare_quest_attempt_workspace(
         quest_store,
         detail,
@@ -1845,89 +1855,154 @@ fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineResult<Value> 
         }),
     )?;
     quest_store.append_timeline_event(
-            id,
-            "command_policy",
-            "Registered Solo sandbox command policy",
-            serde_json::json!({
-                "sandbox_commands": AgentCommandPolicy::validation_registry_summary(),
-                "outside_sandbox_commands": "approval_required",
-                "destructive_commands": "denied_by_default",
-            }),
-        )?;
-        detail = quest_store.record_checkpoint(
-            id,
-            "isolated-workspace",
-            "Isolated workspace checkpoint",
-            "Captured the isolated Quest workspace before model execution and validation.",
-            Some(workspace_id.clone()),
-            Some(project_fingerprint(&project_root)?),
-        )?;
-        let baseline_workspace_root = prepare_quest_attempt_workspace(quest_store, &detail, "baseline")?;
+        id,
+        "command_policy",
+        "Registered Solo sandbox command policy",
+        serde_json::json!({
+            "sandbox_commands": AgentCommandPolicy::validation_registry_summary(),
+            "outside_sandbox_commands": "approval_required",
+            "destructive_commands": "denied_by_default",
+        }),
+    )?;
+    detail = quest_store.record_checkpoint(
+        id,
+        "isolated-workspace",
+        "Isolated workspace checkpoint",
+        "Captured the isolated Quest workspace before model execution and validation.",
+        Some(workspace_id.clone()),
+        Some(project_fingerprint(&project_root)?),
+    )?;
+    let baseline_workspace_root =
+        prepare_quest_attempt_workspace(quest_store, &detail, "baseline")?;
+    quest_store.append_timeline_event(
+        id,
+        "alternative",
+        "Created isolated baseline comparison workspace",
+        serde_json::json!({
+            "attempt_id": "baseline",
+            "workspace": baseline_workspace_root,
+            "selected": false,
+        }),
+    )?;
+
+    let before = collect_workspace_snapshot(&workspace_root)?;
+    let baseline_before = collect_workspace_snapshot(&baseline_workspace_root)?;
+    let context = engine_editor::ProjectContext::open(&workspace_root)?;
+    let knowledge_context = if detail.attached_knowledge.is_empty() {
+        String::new()
+    } else {
+        let entries = detail
+            .attached_knowledge
+            .iter()
+            .map(|entry| format!("- [{}] {}", entry.category, entry.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nApproved project Knowledge attached to this Quest:\n{entries}")
+    };
+    let prompt = SoloQuestRunner::initial_prompt(&detail.spec, &knowledge_context);
+    let mut session = AgentSession::new(context)?;
+    let model = create_quest_model_from_prepared(prepared.model_provider)?;
+    let first_action_started_at = Instant::now();
+    let plan = session.plan_with_history_streaming(
+        model.as_ref(),
+        &prompt,
+        &[],
+        PermissionPolicy::worktree_write(),
+        parse_thinking_effort(&detail.record.model_config.thinking_effort),
+        &mut |_| {},
+    )?;
+    let plan_latency_ms = elapsed_millis(first_action_started_at);
+    let planned: Vec<String> = plan
+        .operations
+        .iter()
+        .map(|operation| operation.preview.clone())
+        .collect();
+    quest_store.append_timeline_event(
+        id,
+        "plan",
+        "Model produced an executable Quest plan",
+        serde_json::json!({
+            "operations": planned,
+            "requires_write": plan.requires_write,
+        }),
+    )?;
+
+    let apply_started_at = Instant::now();
+    let mut outcome = session.apply_plan(&plan)?;
+    let mut tool_call_latency_ms = plan_latency_ms + elapsed_millis(apply_started_at);
+    save_project_context_scene(&session.context)?;
+    quest_store.append_timeline_event(
+        id,
+        "execution",
+        "Applied model operations in isolated workspace",
+        serde_json::json!({
+            "operations_performed": outcome.operations_performed,
+            "completed": outcome.completed,
+            "summary": outcome.summary,
+            "trace": outcome.trace_entries.iter().map(|entry| serde_json::json!({
+                "tool": entry.tool,
+                "result": entry.result,
+                "recovery_hint": entry.recovery_hint,
+            })).collect::<Vec<_>>(),
+        }),
+    )?;
+
+    quest_store.transition(id, QuestStatus::Validating)?;
+    let validation_started_at = Instant::now();
+    let mut validations = validate_quest_workspace(&workspace_root);
+    append_validation_events(quest_store, id, &validations, None)?;
+    let mut repair_attempts = 0usize;
+    while validations_failed(&validations) && repair_attempts < SoloQuestRunner::REPAIR_LIMIT {
+        repair_attempts += 1;
+        quest_store.transition(id, QuestStatus::Repairing)?;
+        let repair_prompt =
+            SoloQuestRunner::repair_prompt(&detail.spec, &validations, repair_attempts);
         quest_store.append_timeline_event(
             id,
-            "alternative",
-            "Created isolated baseline comparison workspace",
+            "repair",
+            &format!("Solo repair attempt {repair_attempts} started"),
             serde_json::json!({
-                "attempt_id": "baseline",
-                "workspace": baseline_workspace_root,
-                "selected": false,
+                "attempt": repair_attempts,
+                "failed_validations": validation_failure_summaries(&validations),
             }),
         )?;
-
-        let before = collect_workspace_snapshot(&workspace_root)?;
-        let baseline_before = collect_workspace_snapshot(&baseline_workspace_root)?;
-        let context = engine_editor::ProjectContext::open(&workspace_root)?;
-        let knowledge_context = if detail.attached_knowledge.is_empty() {
-            String::new()
-        } else {
-            let entries = detail
-                .attached_knowledge
-                .iter()
-                .map(|entry| format!("- [{}] {}", entry.category, entry.content))
-                .collect::<Vec<_>>()
-            .join("\n");
-            format!("\n\nApproved project Knowledge attached to this Quest:\n{entries}")
-        };
-        let prompt = SoloQuestRunner::initial_prompt(&detail.spec, &knowledge_context);
-        let mut session = AgentSession::new(context)?;
-        let model = create_quest_model_from_prepared(prepared.model_provider)?;
-        let first_action_started_at = Instant::now();
-        let plan = session.plan_with_history_streaming(
+        let repair_started_at = Instant::now();
+        let repair_plan = session.plan_with_history_streaming(
             model.as_ref(),
-            &prompt,
+            &repair_prompt,
             &[],
             PermissionPolicy::worktree_write(),
             parse_thinking_effort(&detail.record.model_config.thinking_effort),
             &mut |_| {},
         )?;
-        let plan_latency_ms = elapsed_millis(first_action_started_at);
-        let planned: Vec<String> = plan
+        let repair_plan_latency_ms = elapsed_millis(repair_started_at);
+        let planned_repair: Vec<String> = repair_plan
             .operations
             .iter()
             .map(|operation| operation.preview.clone())
             .collect();
         quest_store.append_timeline_event(
             id,
-            "plan",
-            "Model produced an executable Quest plan",
+            "repair_plan",
+            &format!("Model produced Solo repair plan {repair_attempts}"),
             serde_json::json!({
-                "operations": planned,
-                "requires_write": plan.requires_write,
+                "attempt": repair_attempts,
+                "operations": planned_repair,
+                "requires_write": repair_plan.requires_write,
             }),
         )?;
-
-        let apply_started_at = Instant::now();
-        let mut outcome = session.apply_plan(&plan)?;
-        let mut tool_call_latency_ms = plan_latency_ms + elapsed_millis(apply_started_at);
+        let repair_apply_started_at = Instant::now();
+        let repair_outcome = session.apply_plan(&repair_plan)?;
+        tool_call_latency_ms += repair_plan_latency_ms + elapsed_millis(repair_apply_started_at);
+        merge_agent_outcome(&mut outcome, repair_outcome);
         save_project_context_scene(&session.context)?;
         quest_store.append_timeline_event(
             id,
-            "execution",
-            "Applied model operations in isolated workspace",
+            "repair",
+            &format!("Solo repair attempt {repair_attempts} applied"),
             serde_json::json!({
+                "attempt": repair_attempts,
                 "operations_performed": outcome.operations_performed,
-                "completed": outcome.completed,
-                "summary": outcome.summary,
                 "trace": outcome.trace_entries.iter().map(|entry| serde_json::json!({
                     "tool": entry.tool,
                     "result": entry.result,
@@ -1935,260 +2010,196 @@ fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineResult<Value> 
                 })).collect::<Vec<_>>(),
             }),
         )?;
-
         quest_store.transition(id, QuestStatus::Validating)?;
-        let validation_started_at = Instant::now();
-        let mut validations = validate_quest_workspace(&workspace_root);
-        append_validation_events(quest_store, id, &validations, None)?;
-        let mut repair_attempts = 0usize;
-        while validations_failed(&validations) && repair_attempts < SoloQuestRunner::REPAIR_LIMIT {
-            repair_attempts += 1;
-            quest_store.transition(id, QuestStatus::Repairing)?;
-            let repair_prompt =
-                SoloQuestRunner::repair_prompt(&detail.spec, &validations, repair_attempts);
-            quest_store.append_timeline_event(
-                id,
-                "repair",
-                &format!("Solo repair attempt {repair_attempts} started"),
-                serde_json::json!({
-                    "attempt": repair_attempts,
-                    "failed_validations": validation_failure_summaries(&validations),
-                }),
-            )?;
-            let repair_started_at = Instant::now();
-            let repair_plan = session.plan_with_history_streaming(
-                model.as_ref(),
-                &repair_prompt,
-                &[],
-                PermissionPolicy::worktree_write(),
-                parse_thinking_effort(&detail.record.model_config.thinking_effort),
-                &mut |_| {},
-            )?;
-            let repair_plan_latency_ms = elapsed_millis(repair_started_at);
-            let planned_repair: Vec<String> = repair_plan
-                .operations
-                .iter()
-                .map(|operation| operation.preview.clone())
-                .collect();
-            quest_store.append_timeline_event(
-                id,
-                "repair_plan",
-                &format!("Model produced Solo repair plan {repair_attempts}"),
-                serde_json::json!({
-                    "attempt": repair_attempts,
-                    "operations": planned_repair,
-                    "requires_write": repair_plan.requires_write,
-                }),
-            )?;
-            let repair_apply_started_at = Instant::now();
-            let repair_outcome = session.apply_plan(&repair_plan)?;
-            tool_call_latency_ms +=
-                repair_plan_latency_ms + elapsed_millis(repair_apply_started_at);
-            merge_agent_outcome(&mut outcome, repair_outcome);
-            save_project_context_scene(&session.context)?;
-            quest_store.append_timeline_event(
-                id,
-                "repair",
-                &format!("Solo repair attempt {repair_attempts} applied"),
-                serde_json::json!({
-                    "attempt": repair_attempts,
-                    "operations_performed": outcome.operations_performed,
-                    "trace": outcome.trace_entries.iter().map(|entry| serde_json::json!({
-                        "tool": entry.tool,
-                        "result": entry.result,
-                        "recovery_hint": entry.recovery_hint,
-                    })).collect::<Vec<_>>(),
-                }),
-            )?;
-            quest_store.transition(id, QuestStatus::Validating)?;
-            validations = validate_quest_workspace(&workspace_root);
-            append_validation_events(quest_store, id, &validations, Some(repair_attempts))?;
-        }
-        let baseline_validations = validate_quest_workspace(&baseline_workspace_root);
-        append_validation_events(quest_store, id, &baseline_validations, Some(0))?;
-        let validator_turnaround_ms = elapsed_millis(validation_started_at);
+        validations = validate_quest_workspace(&workspace_root);
+        append_validation_events(quest_store, id, &validations, Some(repair_attempts))?;
+    }
+    let baseline_validations = validate_quest_workspace(&baseline_workspace_root);
+    append_validation_events(quest_store, id, &baseline_validations, Some(0))?;
+    let validator_turnaround_ms = elapsed_millis(validation_started_at);
 
-        let after = collect_workspace_snapshot(&workspace_root)?;
-        let changed_files = diff_workspace_snapshots(&before, &after);
-        let baseline_after = collect_workspace_snapshot(&baseline_workspace_root)?;
-        let baseline_changed_files = diff_workspace_snapshots(&baseline_before, &baseline_after);
-        for file in &changed_files {
-            quest_store.append_timeline_event(
-                id,
-                "file_edit",
-                &format!("{} {}", file.status, file.path),
-                serde_json::json!({
-                    "path": file.path,
-                    "status": file.status,
-                    "additions": file.additions,
-                    "deletions": file.deletions,
-                }),
-            )?;
-        }
-        let has_failed_validation = validations
-            .iter()
-            .any(|validation| validation.status != "passed" && validation.status != "skipped");
-        let baseline_failed_validation = baseline_validations
-            .iter()
-            .any(|validation| validation.status != "passed" && validation.status != "skipped");
-        let exploration_summary = if has_failed_validation {
-            "Selected implementation attempt preserved with validation failures for repair or revision."
-        } else {
-            "Selected implementation attempt produced the current review bundle."
-        };
-        quest_store.write_exploration_attempt(
+    let after = collect_workspace_snapshot(&workspace_root)?;
+    let changed_files = diff_workspace_snapshots(&before, &after);
+    let baseline_after = collect_workspace_snapshot(&baseline_workspace_root)?;
+    let baseline_changed_files = diff_workspace_snapshots(&baseline_before, &baseline_after);
+    for file in &changed_files {
+        quest_store.append_timeline_event(
             id,
-            "selected-implementation",
-            "Selected implementation attempt",
-            exploration_summary,
-            true,
+            "file_edit",
+            &format!("{} {}", file.status, file.path),
+            serde_json::json!({
+                "path": file.path,
+                "status": file.status,
+                "additions": file.additions,
+                "deletions": file.deletions,
+            }),
         )?;
-        let baseline_summary = format!(
-            "Baseline comparison attempt preserved before applying model edits: {} changed file(s), {} validation issue(s).",
-            baseline_changed_files.len(),
-            baseline_validations
-                .iter()
-                .filter(|validation| validation.status == "failed")
-                .count()
-        );
-        quest_store.write_exploration_attempt(
-            id,
-            "baseline",
-            "Baseline comparison attempt",
-            &baseline_summary,
-            false,
-        )?;
-        let unresolved_issues = if has_failed_validation {
-            validations
-                .iter()
-                .filter(|validation| validation.status == "failed")
-                .map(|validation| format!("Validation failed: {}", validation.summary))
-                .collect()
-        } else if changed_files.is_empty() {
-            vec!["Quest execution completed without producing file changes.".to_owned()]
-        } else {
-            Vec::new()
-        };
-        let mut findings = Vec::new();
-        if has_failed_validation {
-            for (index, validation) in validations
-                .iter()
-                .filter(|validation| validation.status == "failed")
-                .enumerate()
-            {
-                findings.push(quest_store.write_review_finding(
-                    id,
-                    &format!("validation-failed-{index}"),
-                    &format!("Validation failed: {}", validation.name),
-                    &validation.summary,
-                    "high",
-                    Some("validation"),
-                )?);
-            }
-        } else if changed_files.is_empty() {
-            findings.push(quest_store.write_review_finding(
-                id,
-                "no-changes",
-                "Quest produced no file changes",
-                "Quest execution completed in the isolated workspace without producing changed files.",
-                "medium",
-                Some("review"),
-            )?);
-        }
-        let next_actions = quest_review_actions_for_result(
-            &unresolved_issues,
-            has_failed_validation,
-            changed_files.is_empty(),
-        );
-        let status = if has_failed_validation {
-            QuestStatus::Blocked
-        } else {
-            QuestStatus::ReadyForReview
-        };
-        let has_changes = !changed_files.is_empty();
-        let validation_count = validations.len() as u32;
-        let validation_failure_count = validations
+    }
+    let has_failed_validation = validations
+        .iter()
+        .any(|validation| validation.status != "passed" && validation.status != "skipped");
+    let baseline_failed_validation = baseline_validations
+        .iter()
+        .any(|validation| validation.status != "passed" && validation.status != "skipped");
+    let exploration_summary = if has_failed_validation {
+        "Selected implementation attempt preserved with validation failures for repair or revision."
+    } else {
+        "Selected implementation attempt produced the current review bundle."
+    };
+    quest_store.write_exploration_attempt(
+        id,
+        "selected-implementation",
+        "Selected implementation attempt",
+        exploration_summary,
+        true,
+    )?;
+    let baseline_summary = format!(
+        "Baseline comparison attempt preserved before applying model edits: {} changed file(s), {} validation issue(s).",
+        baseline_changed_files.len(),
+        baseline_validations
             .iter()
             .filter(|validation| validation.status == "failed")
-            .count() as u32;
-        let context_relevance = context_relevance_score(&detail);
-        let recovery_rate = failed_action_recovery_rate(&outcome.trace_entries);
-        let evidence_quality =
-            review_evidence_quality_score(has_changes, &validations, has_failed_validation);
-        let review = QuestReview {
-            summary: if changed_files.is_empty() {
-                "Quest executed in an isolated workspace but produced no file changes.".to_owned()
-            } else {
+            .count()
+    );
+    quest_store.write_exploration_attempt(
+        id,
+        "baseline",
+        "Baseline comparison attempt",
+        &baseline_summary,
+        false,
+    )?;
+    let unresolved_issues = if has_failed_validation {
+        validations
+            .iter()
+            .filter(|validation| validation.status == "failed")
+            .map(|validation| format!("Validation failed: {}", validation.summary))
+            .collect()
+    } else if changed_files.is_empty() {
+        vec!["Quest execution completed without producing file changes.".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let mut findings = Vec::new();
+    if has_failed_validation {
+        for (index, validation) in validations
+            .iter()
+            .filter(|validation| validation.status == "failed")
+            .enumerate()
+        {
+            findings.push(quest_store.write_review_finding(
+                id,
+                &format!("validation-failed-{index}"),
+                &format!("Validation failed: {}", validation.name),
+                &validation.summary,
+                "high",
+                Some("validation"),
+            )?);
+        }
+    } else if changed_files.is_empty() {
+        findings.push(quest_store.write_review_finding(
+            id,
+            "no-changes",
+            "Quest produced no file changes",
+            "Quest execution completed in the isolated workspace without producing changed files.",
+            "medium",
+            Some("review"),
+        )?);
+    }
+    let next_actions = quest_review_actions_for_result(
+        &unresolved_issues,
+        has_failed_validation,
+        changed_files.is_empty(),
+    );
+    let status = if has_failed_validation {
+        QuestStatus::Blocked
+    } else {
+        QuestStatus::ReadyForReview
+    };
+    let has_changes = !changed_files.is_empty();
+    let validation_count = validations.len() as u32;
+    let validation_failure_count = validations
+        .iter()
+        .filter(|validation| validation.status == "failed")
+        .count() as u32;
+    let context_relevance = context_relevance_score(&detail);
+    let recovery_rate = failed_action_recovery_rate(&outcome.trace_entries);
+    let evidence_quality =
+        review_evidence_quality_score(has_changes, &validations, has_failed_validation);
+    let review = QuestReview {
+        summary: if changed_files.is_empty() {
+            "Quest executed in an isolated workspace but produced no file changes.".to_owned()
+        } else {
+            format!(
+                "Quest executed in isolated workspace `{workspace_id}` and produced {} changed file(s).",
+                changed_files.len()
+            )
+        },
+        transaction_groups: transaction_groups_from_changed_files(&changed_files),
+        exploration_attempts: vec![
+            QuestExplorationAttempt {
+                id: "selected-implementation".to_owned(),
+                label: "Selected implementation attempt".to_owned(),
+                summary: exploration_summary.to_owned(),
+                outcome: if has_failed_validation {
+                    "needs_repair"
+                } else {
+                    "selected"
+                }
+                .to_owned(),
+                artifact_path: "explorations/selected-implementation.md".to_owned(),
+                selected: true,
+            },
+            QuestExplorationAttempt {
+                id: "baseline".to_owned(),
+                label: "Baseline comparison attempt".to_owned(),
+                summary: baseline_summary,
+                outcome: if baseline_failed_validation {
+                    "baseline_failed_validation"
+                } else {
+                    "baseline_reference"
+                }
+                .to_owned(),
+                artifact_path: "explorations/baseline.md".to_owned(),
+                selected: false,
+            },
+        ],
+        findings,
+        changed_files,
+        validations,
+        unresolved_issues,
+        next_actions,
+        project_fingerprint: Some(project_fingerprint(&project_root)?),
+        metrics: QuestReviewMetrics {
+            intent_to_first_action_ms: Some(elapsed_millis(quest_started_at)),
+            tool_call_latency_ms: Some(tool_call_latency_ms),
+            validator_turnaround_ms: Some(validator_turnaround_ms),
+            context_relevance_score: Some(context_relevance),
+            failed_action_recovery_rate: Some(recovery_rate),
+            review_evidence_quality_score: Some(evidence_quality),
+            isolated_attempt_count: 2,
+            validation_count,
+            validation_failure_count,
+            baseline_changed_file_count: baseline_changed_files.len() as u32,
+            notes: vec![
+                "Metrics are captured from the isolated Quest execution path.".to_owned(),
+                "Baseline attempt is preserved for comparison against the selected implementation."
+                    .to_owned(),
                 format!(
-                    "Quest executed in isolated workspace `{workspace_id}` and produced {} changed file(s).",
-                    changed_files.len()
-                )
-            },
-            transaction_groups: transaction_groups_from_changed_files(&changed_files),
-            exploration_attempts: vec![
-                QuestExplorationAttempt {
-                    id: "selected-implementation".to_owned(),
-                    label: "Selected implementation attempt".to_owned(),
-                    summary: exploration_summary.to_owned(),
-                    outcome: if has_failed_validation {
-                        "needs_repair"
-                    } else {
-                        "selected"
-                    }
-                    .to_owned(),
-                    artifact_path: "explorations/selected-implementation.md".to_owned(),
-                    selected: true,
-                },
-                QuestExplorationAttempt {
-                    id: "baseline".to_owned(),
-                    label: "Baseline comparison attempt".to_owned(),
-                    summary: baseline_summary,
-                    outcome: if baseline_failed_validation {
-                        "baseline_failed_validation"
-                    } else {
-                        "baseline_reference"
-                    }
-                    .to_owned(),
-                    artifact_path: "explorations/baseline.md".to_owned(),
-                    selected: false,
-                },
+                    "Solo repair attempts used: {repair_attempts}/{}.",
+                    SoloQuestRunner::REPAIR_LIMIT
+                ),
             ],
-            findings,
-            changed_files,
-            validations,
-            unresolved_issues,
-            next_actions,
-            project_fingerprint: Some(project_fingerprint(&project_root)?),
-                metrics: QuestReviewMetrics {
-                intent_to_first_action_ms: Some(elapsed_millis(quest_started_at)),
-                tool_call_latency_ms: Some(tool_call_latency_ms),
-                validator_turnaround_ms: Some(validator_turnaround_ms),
-                context_relevance_score: Some(context_relevance),
-                failed_action_recovery_rate: Some(recovery_rate),
-                review_evidence_quality_score: Some(evidence_quality),
-                isolated_attempt_count: 2,
-                validation_count,
-                validation_failure_count,
-                baseline_changed_file_count: baseline_changed_files.len() as u32,
-                notes: vec![
-                    "Metrics are captured from the isolated Quest execution path.".to_owned(),
-                    "Baseline attempt is preserved for comparison against the selected implementation.".to_owned(),
-                    format!(
-                        "Solo repair attempts used: {repair_attempts}/{}.",
-                        SoloQuestRunner::REPAIR_LIMIT
-                    ),
-                ],
-            },
-            risk: if has_failed_validation {
-                "medium"
-            } else {
-                "low"
-            }
-            .to_owned(),
-        };
-        let apply_decision = QuestApplyPolicy::classify(&review, &detail.record.autonomy);
-        let detail = quest_store.set_review(id, status, review)?;
-        quest_store.append_timeline_event(
+        },
+        risk: if has_failed_validation {
+            "medium"
+        } else {
+            "low"
+        }
+        .to_owned(),
+    };
+    let apply_decision = QuestApplyPolicy::classify(&review, &detail.record.autonomy);
+    let detail = quest_store.set_review(id, status, review)?;
+    quest_store.append_timeline_event(
             id,
             "apply_policy",
             "Quest apply policy classified Solo result",
@@ -2199,33 +2210,32 @@ fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineResult<Value> 
                 "changed_files": detail.record.review.as_ref().map(|review| review.changed_files.len()).unwrap_or_default(),
             }),
         )?;
+    quest_store.append_timeline_event(
+        id,
+        if status == QuestStatus::ReadyForReview {
+            "review_ready"
+        } else {
+            "blocked"
+        },
+        if status == QuestStatus::ReadyForReview {
+            "Quest is ready for review"
+        } else {
+            "Quest is blocked by validation failures"
+        },
+        serde_json::json!({ "workspace": workspace_root }),
+    )?;
+    if apply_decision == QuestApplyDecision::AutoApply && status == QuestStatus::ReadyForReview {
         quest_store.append_timeline_event(
             id,
-            if status == QuestStatus::ReadyForReview {
-                "review_ready"
-            } else {
-                "blocked"
-            },
-            if status == QuestStatus::ReadyForReview {
-                "Quest is ready for review"
-            } else {
-                "Quest is blocked by validation failures"
-            },
-            serde_json::json!({ "workspace": workspace_root }),
+            "apply_policy",
+            "Auto-apply deferred to the desktop thread",
+            serde_json::json!({
+                "reason": "background_execution_cannot_touch_active_project",
+            }),
         )?;
-        if apply_decision == QuestApplyDecision::AutoApply && status == QuestStatus::ReadyForReview
-        {
-            quest_store.append_timeline_event(
-                id,
-                "apply_policy",
-                "Auto-apply deferred to the desktop thread",
-                serde_json::json!({
-                    "reason": "background_execution_cannot_touch_active_project",
-                }),
-            )?;
-        }
-        serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
+    serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+}
 
 fn create_quest_model_from_prepared(
     prepared: PreparedQuestModelRequest,
@@ -7658,9 +7668,8 @@ fn start_quest_execution(
     let quest_store = prepared.quest_store.clone();
     let requests = requests.requests.clone();
     std::thread::spawn(move || {
-        let result = run_quest_execution(prepared).or_else(|error| {
-            record_quest_execution_failure(&quest_store, &id, started_at, error)
-        });
+        let result = run_quest_execution(prepared)
+            .or_else(|error| record_quest_execution_failure(&quest_store, &id, started_at, error));
         let mut request_state = requests.lock().expect("poisoned lock");
         if request_state.cancelled.remove(&request_id) {
             drop(request_state);
@@ -7670,9 +7679,10 @@ fn start_quest_execution(
             );
             return;
         }
-        request_state
-            .completed
-            .insert(request_id.clone(), result.map_err(|error| error.to_string()));
+        request_state.completed.insert(
+            request_id.clone(),
+            result.map_err(|error| error.to_string()),
+        );
         drop(request_state);
         let _ = app.emit(
             "quest-execution-complete",

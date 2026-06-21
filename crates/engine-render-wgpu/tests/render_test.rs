@@ -68,10 +68,13 @@ fn render_one_frame_with_debug_cube_succeeds() {
             material: "debug/default".to_string(),
             casts_shadows: true,
             receive_shadows: true,
+            bounds: engine_render::RenderBounds::default(),
+            lods: Vec::new(),
         }],
         sprites: vec![],
         lights: vec![],
         particles: vec![],
+        particle_emitters: vec![],
         skybox: None,
         fog: None,
     };

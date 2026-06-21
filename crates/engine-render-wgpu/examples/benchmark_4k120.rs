@@ -47,6 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             material: "debug/default".to_owned(),
             casts_shadows: true,
             receive_shadows: true,
+            bounds: engine_render::RenderBounds::default(),
+            lods: Vec::new(),
         }],
         ..RenderWorld::default()
     };

@@ -4,6 +4,199 @@ use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
 
 impl WgpuRenderDevice {
+    pub(crate) fn collect_gpu_frame_time(&mut self) {
+        let Some(receiver) = self.gpu_timestamp_receiver.as_ref() else {
+            return;
+        };
+        self.device.poll(wgpu::PollType::Poll).ok();
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        self.gpu_timestamp_receiver = None;
+        if result.is_err() {
+            return;
+        }
+        let Some(readback) = self.gpu_timestamp_readback.as_ref() else {
+            return;
+        };
+        let mapped = readback.slice(..).get_mapped_range();
+        if mapped.len() >= 16 {
+            let values = bytemuck::cast_slice::<u8, u64>(&mapped);
+            let ticks = values[1].wrapping_sub(values[0]);
+            let nanoseconds = ticks as f64 * f64::from(self.queue.get_timestamp_period());
+            if nanoseconds.is_finite() && nanoseconds >= 0.0 {
+                self.performance_metrics.gpu_frame_ms = Some((nanoseconds / 1_000_000.0) as f32);
+            }
+        }
+        drop(mapped);
+        readback.unmap();
+    }
+
+    pub(crate) fn encode_gpu_timestamps_begin(&self, encoder: &mut wgpu::CommandEncoder) -> bool {
+        let Some(query) = self.gpu_timestamp_query.as_ref() else {
+            return false;
+        };
+        if self.gpu_timestamp_receiver.is_some() {
+            return false;
+        }
+        encoder.write_timestamp(query, 0);
+        true
+    }
+
+    pub(crate) fn encode_gpu_timestamps_end(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        active: bool,
+    ) {
+        if !active {
+            return;
+        }
+        let (Some(query), Some(resolve), Some(readback)) = (
+            self.gpu_timestamp_query.as_ref(),
+            self.gpu_timestamp_resolve.as_ref(),
+            self.gpu_timestamp_readback.as_ref(),
+        ) else {
+            return;
+        };
+        encoder.write_timestamp(query, 1);
+        encoder.resolve_query_set(query, 0..2, resolve, 0);
+        encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, 16);
+    }
+
+    pub(crate) fn schedule_gpu_timestamp_readback(&mut self, active: bool) {
+        if !active {
+            return;
+        }
+        let Some(readback) = self.gpu_timestamp_readback.as_ref() else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.gpu_timestamp_receiver = Some(receiver);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_frame_pipeline(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FramePipelinePlan,
+        csm: &CsmUniform,
+        batches: &[(String, u32, String, bool)],
+        resources: &FrameResources,
+        output_view: &wgpu::TextureView,
+        ssao_enabled: bool,
+        ssgi_enabled: bool,
+        bloom_enabled: bool,
+    ) {
+        let mut composite_encoded = false;
+        for step in &plan.steps {
+            match step {
+                FramePipelineStep::Shadow => {
+                    self.encode_csm_shadow_passes(encoder, csm, batches);
+                }
+                FramePipelineStep::Forward => {
+                    self.encode_gpu_particle_compute(encoder);
+                    self.encode_hdr_forward_passes(encoder, batches);
+                }
+                FramePipelineStep::TemporalInputs | FramePipelineStep::Ui => {}
+                FramePipelineStep::Outline => {
+                    tracing::debug!(
+                        target: "engine",
+                        "outline Frame Pipeline pass has no WGPU implementation"
+                    );
+                }
+                FramePipelineStep::Upscale | FramePipelineStep::Post if !composite_encoded => {
+                    if ssao_enabled {
+                        self.encode_ssao_pass(encoder, resources);
+                    }
+                    if ssgi_enabled {
+                        self.encode_ssgi_pass(encoder, resources);
+                    }
+                    if bloom_enabled {
+                        let _ = self.encode_bloom_pass(encoder, resources);
+                    }
+                    self.encode_post_pass(encoder, resources, output_view);
+                    composite_encoded = true;
+                }
+                FramePipelineStep::Upscale | FramePipelineStep::Post => {}
+            }
+        }
+        if plan.forward && !composite_encoded {
+            if ssao_enabled {
+                self.encode_ssao_pass(encoder, resources);
+            }
+            if ssgi_enabled {
+                self.encode_ssgi_pass(encoder, resources);
+            }
+            if bloom_enabled {
+                let _ = self.encode_bloom_pass(encoder, resources);
+            }
+            self.encode_post_pass(encoder, resources, output_view);
+        }
+    }
+
+    pub(crate) fn update_render_submission_stats(
+        &mut self,
+        batches: &[(String, u32, String, bool)],
+        plan: &FramePipelinePlan,
+        ssao_enabled: bool,
+        ssgi_enabled: bool,
+        bloom_enabled: bool,
+    ) {
+        let batch_triangles = |mesh_name: &str, count: u32| {
+            let index_count = self
+                .mesh_cache
+                .get(mesh_name)
+                .map_or(CUBE_INDEX_COUNT, |mesh| mesh.index_count);
+            u64::from(index_count / 3) * u64::from(count)
+        };
+        let forward_triangles: u64 = batches
+            .iter()
+            .map(|(mesh, count, _, _)| batch_triangles(mesh, *count))
+            .sum();
+        let shadow_triangles: u64 = batches
+            .iter()
+            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
+            .map(|(mesh, count, _, _)| batch_triangles(mesh, *count))
+            .sum::<u64>()
+            * CSM_CASCADE_COUNT as u64;
+
+        let forward_draws = batches.iter().filter(|(_, count, _, _)| *count > 0).count() as u32;
+        let shadow_draws = batches
+            .iter()
+            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
+            .count() as u32
+            * CSM_CASCADE_COUNT as u32;
+        let bloom_draws = if bloom_enabled {
+            self.bloom_mip_views
+                .len()
+                .saturating_mul(2)
+                .saturating_sub(1) as u32
+        } else {
+            0
+        };
+
+        self.latest_draw_calls = u32::from(plan.forward) * (forward_draws + 2)
+            + u32::from(plan.shadow) * shadow_draws
+            + u32::from(ssao_enabled)
+            + u32::from(ssgi_enabled)
+            + bloom_draws
+            + u32::from(plan.post || plan.upscale);
+        self.latest_triangles = u64::from(plan.forward) * (forward_triangles + 1)
+            + u64::from(plan.shadow) * shadow_triangles
+            + u64::from(plan.post || plan.upscale);
+        if plan.forward && self.gpu_particles.instance_count() > 0 {
+            self.latest_draw_calls = self.latest_draw_calls.saturating_add(1);
+            self.latest_triangles = self
+                .latest_triangles
+                .saturating_add(u64::from(self.gpu_particles.instance_count()) * 2);
+        }
+    }
+
     pub(crate) fn finish_validation_scope(
         &self,
         scope: wgpu::ErrorScopeGuard,
@@ -15,8 +208,12 @@ impl WgpuRenderDevice {
     pub(crate) fn prepare_render_batches(
         &mut self,
         world: &RenderWorld,
+        aspect: f32,
     ) -> Vec<(String, u32, String, bool)> {
-        let batches = self.mesh_batches_from_world(world);
+        let (batches, visibility) = self.mesh_batches_from_world_visible(world, aspect);
+        self.latest_submitted_objects = world.objects.len() as u32;
+        self.latest_visible_objects = visibility.visible_indices.len() as u32;
+        self.latest_culled_objects = visibility.culled_objects as u32;
         let total_instances: usize = batches.iter().map(|(_, inst, _, _)| inst.len()).sum();
         if total_instances > self.instance_capacity {
             self.instance_capacity = total_instances.next_power_of_two();
@@ -217,8 +414,11 @@ impl WgpuRenderDevice {
         encoder_label: &str,
         missing_error: &str,
     ) -> EngineResult<()> {
+        self.collect_gpu_frame_time();
         let render_started = Instant::now();
-        let batches = self.prepare_render_batches(world);
+        let previous_gpu_frame_ms = self.performance_metrics.gpu_frame_ms;
+        let batches = self.prepare_render_batches(world, aspect);
+        self.prepare_gpu_particles(world);
         let total_instances: u32 = batches.iter().map(|(_, count, _, _)| *count).sum();
         tracing::debug!(
             target: "engine",
@@ -261,10 +461,13 @@ impl WgpuRenderDevice {
                 .ok_or_else(|| EngineError::invalid_handle(missing_error))?;
             target._desc.output_size()
         };
-        let (temporal_camera, reset_history) =
-            temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
-        self.latest_temporal_camera = temporal_camera;
-        self.reset_temporal_history = reset_history;
+        let plan = self.active_frame_plan.clone().unwrap_or_default();
+        if plan.temporal_inputs {
+            let (temporal_camera, reset_history) =
+                temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
+            self.latest_temporal_camera = temporal_camera;
+            self.reset_temporal_history = reset_history;
+        }
         let enable_ssao = self.ssao_compute_pipeline.is_some();
         let enable_ssgi = self.ssgi_compute_pipeline.is_some();
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
@@ -282,6 +485,13 @@ impl WgpuRenderDevice {
             enable_bloom,
             encoder_label,
         );
+        self.update_render_submission_stats(
+            &batches,
+            &plan,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+        );
 
         // Build resources in mutable phase, then get output_view immutably.
         let target = self
@@ -295,20 +505,22 @@ impl WgpuRenderDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some(encoder_label),
             });
-        self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
-        self.encode_hdr_forward_passes(&mut encoder, &batches);
-        if enable_ssao {
-            self.encode_ssao_pass(&mut encoder, &frame_res);
-        }
-        if enable_ssgi {
-            self.encode_ssgi_pass(&mut encoder, &frame_res);
-        }
-        if enable_bloom {
-            let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
-        }
-        self.encode_post_pass(&mut encoder, &frame_res, output_view);
+        let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
+        self.encode_frame_pipeline(
+            &mut encoder,
+            &plan,
+            &csm,
+            &batches,
+            &frame_res,
+            output_view,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+        );
+        self.encode_gpu_timestamps_end(&mut encoder, gpu_timestamps);
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.schedule_gpu_timestamp_readback(gpu_timestamps);
         self.finish_validation_scope(validation, encoder_label)?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
         self.performance_metrics = engine_render::RenderPerformanceMetrics {
@@ -320,6 +532,13 @@ impl WgpuRenderDevice {
             render_scale: self.dynamic_resolution.scale(),
             upscaler: self.active_upscaler,
             frame_generation_multiplier: 1,
+            draw_calls: self.latest_draw_calls,
+            triangles: self.latest_triangles,
+            submitted_objects: self.latest_submitted_objects,
+            visible_objects: self.latest_visible_objects,
+            culled_objects: self.latest_culled_objects,
+            pipeline_passes: plan.pass_count,
+            gpu_frame_ms: previous_gpu_frame_ms,
             ..Default::default()
         };
         tracing::trace!(target: "engine", submitted = self.submitted_worlds, "gpu submit ok");
@@ -501,7 +720,26 @@ impl WgpuRenderDevice {
             &self.index_buffer,
             &self.instance_buffer,
             batches,
+            false,
         );
+        encode_batched_forward_pass(
+            encoder,
+            &hdr.color_view,
+            self.hdr_normal_view.as_ref().unwrap(),
+            self.hdr_albedo_view.as_ref().unwrap(),
+            hdr.depth_view.as_ref(),
+            &self.transparent_pipeline,
+            &self.camera_bind_group,
+            &self.default_material_bind_group,
+            &self.material_gpu,
+            &self.mesh_cache,
+            &self.vertex_buffer,
+            &self.index_buffer,
+            &self.instance_buffer,
+            batches,
+            true,
+        );
+        self.encode_gpu_particle_render(encoder);
         encode_grid_pass(
             encoder,
             &hdr.color_view,

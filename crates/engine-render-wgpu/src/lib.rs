@@ -11,6 +11,7 @@ mod ibl;
 mod lifecycle;
 mod math;
 mod meshes;
+mod particles;
 mod passes;
 mod post;
 mod render;

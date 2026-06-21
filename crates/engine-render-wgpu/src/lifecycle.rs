@@ -36,10 +36,9 @@ impl WgpuRenderDevice {
             adapter_name: self.adapter.get_info().name,
             max_texture_dimension_2d: limits.max_texture_dimension_2d,
             supports_4k_render_targets: limits.max_texture_dimension_2d >= 4096,
-            supports_timestamp_queries: self
-                .adapter
-                .features()
-                .contains(wgpu::Features::TIMESTAMP_QUERY),
+            supports_timestamp_queries: self.device.features().contains(
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+            ),
             present_mode: self
                 .surface_config
                 .as_ref()

@@ -22,6 +22,15 @@ pub struct MeshBuffers {
     pub index_count: u32,
 }
 
+/// GPU buffers for a mesh carrying joint indices and weights.
+#[derive(Debug)]
+pub(crate) struct SkinnedMeshBuffers {
+    pub(crate) vertex_buffer: wgpu::Buffer,
+    pub(crate) index_buffer: wgpu::Buffer,
+    pub(crate) index_count: u32,
+    pub(crate) max_joint_index: u32,
+}
+
 pub(crate) fn mesh_name(mesh: &DebugMesh) -> String {
     match mesh {
         DebugMesh::Cube => "debug/cube".to_string(),

@@ -27,6 +27,25 @@ fn low_latency_present_mode_prefers_mailbox_then_immediate() {
 }
 
 #[test]
+fn frame_pipeline_plan_preserves_compiled_pass_order() {
+    let mut builder = engine_render::RenderGraphBuilder::new();
+    let shadow = builder.add_pass("shadow");
+    let forward = builder.add_pass("forward");
+    let post = builder.add_pass("post");
+    builder.order_before(shadow, forward);
+    builder.order_before(forward, post);
+    let plan = FramePipelinePlan::from_graph(&builder.build());
+    assert_eq!(
+        plan.steps,
+        vec![
+            FramePipelineStep::Shadow,
+            FramePipelineStep::Forward,
+            FramePipelineStep::Post,
+        ]
+    );
+}
+
+#[test]
 fn dynamic_resolution_preserves_4k_output_with_scaled_internal_target() {
     assert_eq!(scaled_render_size(3840, 2160, 1.0), (3840, 2160));
     assert_eq!(scaled_render_size(3840, 2160, 0.75), (2880, 1620));
@@ -219,6 +238,7 @@ fn packs_scene_lights_into_forward_uniform() {
         sprites: Vec::new(),
         lights: vec![light],
         particles: vec![],
+        particle_emitters: vec![],
         skybox: None,
         fog: None,
     };
@@ -243,6 +263,7 @@ fn mesh_batches_group_objects_without_per_object_mesh_names() {
         sprites: Vec::new(),
         lights: Vec::new(),
         particles: Vec::new(),
+        particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
     };
@@ -267,6 +288,7 @@ fn mesh_batches_merge_particles_with_plane_objects() {
             color: [1.0, 1.0, 1.0, 1.0],
             age_fraction: 0.5,
         }],
+        particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
     };
@@ -426,6 +448,8 @@ fn test_render_object(id: u128, mesh: &str) -> engine_render::RenderObject {
         material: "debug/material".to_owned(),
         casts_shadows: true,
         receive_shadows: true,
+        bounds: engine_render::RenderBounds::default(),
+        lods: Vec::new(),
     }
 }
 
@@ -495,6 +519,7 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
         sprites: Vec::new(),
         lights,
         particles: Vec::new(),
+        particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
     };

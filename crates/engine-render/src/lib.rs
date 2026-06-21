@@ -11,6 +11,7 @@ pub mod pipeline;
 pub mod resource;
 pub mod scaling;
 pub mod target;
+pub mod visibility;
 
 pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass, RenderStage};
 pub use performance::{
@@ -18,7 +19,8 @@ pub use performance::{
     RenderPerformanceMetrics,
 };
 pub use pipeline::{
-    GuiDrawList, GuiTextureId, MaterialHandle, PipelineDesc, ShaderHandle, ShaderStage,
+    GuiDrawCmd, GuiDrawList, GuiTextureId, GuiVertex, MaterialHandle, PipelineDesc, ShaderHandle,
+    ShaderStage,
 };
 pub use resource::{
     BufferDesc, BufferHandle, BufferUsage, ImageDesc, ImageFormat, ImageHandle, ImageUsage,
@@ -32,6 +34,7 @@ pub use scaling::{
     UpscalerKind, negotiate_render_scaling,
 };
 pub use target::{RenderTarget, RenderTargetDesc, ViewKind};
+pub use visibility::{RenderBounds, RenderLod, VisibilityResult, select_visibility};
 
 /// Render API selected by a concrete backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +112,10 @@ pub struct RenderObject {
     pub casts_shadows: bool,
     /// Whether this object receives real-time shadows.
     pub receive_shadows: bool,
+    /// Local-space conservative bounds used by visibility selection.
+    pub bounds: RenderBounds,
+    /// Optional distance-based mesh levels ordered from nearest to farthest.
+    pub lods: Vec<RenderLod>,
 }
 
 /// Texture handles for a PBR material, ready for GPU binding.
@@ -201,6 +208,39 @@ pub struct RenderParticle {
     pub age_fraction: f32,
 }
 
+/// GPU-simulatable particle emitter extracted from a scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderParticleEmitter {
+    /// Source emitter scene object.
+    pub object: EntityId,
+    /// Emitter world transform.
+    pub transform: Transform,
+    /// Maximum particles evaluated by the backend.
+    pub max_particles: u32,
+    /// Particles emitted per second.
+    pub emission_rate: f32,
+    /// Particle lifetime in seconds.
+    pub lifetime: f32,
+    /// Initial speed.
+    pub start_speed: f32,
+    /// Initial and final size.
+    pub size_range: [f32; 2],
+    /// Initial RGBA color.
+    pub start_color: [f32; 4],
+    /// Final RGBA color.
+    pub end_color: [f32; 4],
+    /// World-space acceleration.
+    pub gravity: engine_core::math::Vec3,
+    /// Direction spread in degrees.
+    pub spread_degrees: f32,
+    /// Whether emission repeats.
+    pub looping: bool,
+    /// Deterministic random seed.
+    pub seed: u32,
+    /// Current simulation time.
+    pub elapsed: f32,
+}
+
 /// Skybox configuration extracted from a scene for rendering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderSkybox {
@@ -250,6 +290,8 @@ pub struct RenderWorld {
     pub lights: Vec<RenderLight>,
     /// Queued particle instances.
     pub particles: Vec<RenderParticle>,
+    /// Particle emitters available for backend GPU simulation.
+    pub particle_emitters: Vec<RenderParticleEmitter>,
     /// Optional skybox configuration.
     pub skybox: Option<RenderSkybox>,
     /// Optional fog configuration.
@@ -263,6 +305,7 @@ impl RenderWorld {
             && (!self.objects.is_empty()
                 || !self.sprites.is_empty()
                 || !self.particles.is_empty()
+                || !self.particle_emitters.is_empty()
                 || self.skybox.is_some())
     }
 
@@ -326,6 +369,8 @@ impl RenderWorld {
                             material: material_name,
                             casts_shadows: mesh.casts_shadows,
                             receive_shadows: mesh.receive_shadows,
+                            bounds: RenderBounds::default(),
+                            lods: Vec::new(),
                         });
                     }
                     engine_ecs::ComponentData::Camera2D(camera) => {
@@ -371,6 +416,32 @@ impl RenderWorld {
                         });
                     }
                     engine_ecs::ComponentData::ParticleEmitter(emitter) => {
+                        world.particle_emitters.push(RenderParticleEmitter {
+                            object: obj.id,
+                            transform,
+                            max_particles: emitter.max_particles,
+                            emission_rate: emitter.emission_rate,
+                            lifetime: emitter.lifetime,
+                            start_speed: emitter.start_speed,
+                            size_range: [emitter.start_size, emitter.end_size],
+                            start_color: [
+                                emitter.start_color.x,
+                                emitter.start_color.y,
+                                emitter.start_color.z,
+                                1.0,
+                            ],
+                            end_color: [
+                                emitter.end_color.x,
+                                emitter.end_color.y,
+                                emitter.end_color.z,
+                                0.0,
+                            ],
+                            gravity: emitter.gravity,
+                            spread_degrees: emitter.spread_degrees,
+                            looping: emitter.looping,
+                            seed: emitter.seed,
+                            elapsed: emitter.elapsed,
+                        });
                         world.particles.extend(
                             engine_ecs::ParticleSystem::sample(emitter, transform)
                                 .into_iter()
@@ -435,6 +506,20 @@ pub trait RenderDevice {
     fn submit_render_world(&mut self, world: &RenderWorld, frame: RenderFrame) -> EngineResult<()> {
         let _ = world;
         self.render(frame)
+    }
+
+    /// Submits a Render World through a compiled Frame Pipeline.
+    ///
+    /// Backends that do not support graph-directed encoding preserve the legacy
+    /// behavior by rendering first and then executing the graph.
+    fn submit_render_world_with_graph(
+        &mut self,
+        world: &RenderWorld,
+        graph: &RenderGraph,
+        frame: RenderFrame,
+    ) -> EngineResult<()> {
+        self.submit_render_world(world, frame)?;
+        self.execute_graph(graph, frame)
     }
 
     /// Submits a scene extraction to a specific render target.
@@ -528,6 +613,25 @@ pub trait RenderDevice {
         _indices: &[u32],
     ) -> EngineResult<()> {
         Ok(())
+    }
+
+    /// Uploads a mesh with four joint indices and weights per vertex.
+    ///
+    /// Backends without GPU skinning support return an unsupported capability.
+    #[allow(clippy::too_many_arguments)]
+    fn upload_skinned_mesh_data(
+        &mut self,
+        _mesh_name: &str,
+        _positions: &[[f32; 3]],
+        _normals: &[[f32; 3]],
+        _texcoords: &[[f32; 2]],
+        _joint_indices: &[[u16; 4]],
+        _joint_weights: &[[f32; 4]],
+        _indices: &[u32],
+    ) -> EngineResult<()> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "gpu-skinning",
+        })
     }
 
     /// Flushes the delayed destruction queue for the given frame.

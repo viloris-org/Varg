@@ -1497,7 +1497,8 @@ impl QuestStore {
             "pause" => "Quest paused for manual intervention",
             _ => "User added Quest note",
         };
-        let next_status = if kind == "pause" && detail.record.status != QuestStatus::WaitingForUser {
+        let next_status = if kind == "pause" && detail.record.status != QuestStatus::WaitingForUser
+        {
             Some(QuestStatus::WaitingForUser)
         } else if kind == "clarify"
             && matches!(

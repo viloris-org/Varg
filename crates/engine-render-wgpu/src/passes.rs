@@ -17,6 +17,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     default_index_buffer: &'a wgpu::Buffer,
     instance_buffer: &wgpu::Buffer,
     batches: &[(String, u32, String, bool)],
+    transparent: bool,
 ) {
     let color_attachment = Some(wgpu::RenderPassColorAttachment {
         view: color_view,
@@ -79,8 +80,16 @@ pub(crate) fn encode_batched_forward_pass<'a>(
         if *count == 0 {
             continue;
         }
+        let is_transparent = material_name.starts_with("@sprite:") || material_name == "@particle";
+        if is_transparent != transparent {
+            instance_offset += count;
+            continue;
+        }
+        let material_lookup = material_name
+            .strip_prefix("@sprite:")
+            .unwrap_or(material_name);
         let mat_bg = material_gpu
-            .get(material_name)
+            .get(material_lookup)
             .map(|m| &m.bind_group)
             .unwrap_or(default_material_bind_group);
         pass.set_bind_group(1, mat_bg, &[]);

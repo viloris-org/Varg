@@ -1,10 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::meshes::MeshBuffers;
+use crate::meshes::{MeshBuffers, SkinnedMeshBuffers};
 use engine_core::{Handle, HandleAllocator};
 use engine_render::{
-    ImageDesc, RenderPerformanceConfig, RenderPerformanceMetrics, RenderTarget, RenderTargetDesc,
-    TemporalCameraData, TemporalFrameState,
+    ImageDesc, RenderGraph, RenderPerformanceConfig, RenderPerformanceMetrics, RenderStage,
+    RenderTarget, RenderTargetDesc, TemporalCameraData, TemporalFrameState,
 };
 
 /// Native output capabilities exposed by the selected graphics adapter.
@@ -63,6 +63,88 @@ pub(crate) struct GpuTarget {
     pub(crate) _desc: RenderTargetDesc,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FramePipelineStep {
+    Shadow,
+    Forward,
+    TemporalInputs,
+    Upscale,
+    Post,
+    Ui,
+    Outline,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FramePipelinePlan {
+    pub(crate) shadow: bool,
+    pub(crate) forward: bool,
+    pub(crate) temporal_inputs: bool,
+    pub(crate) upscale: bool,
+    pub(crate) post: bool,
+    pub(crate) ui: bool,
+    pub(crate) pass_count: u32,
+    pub(crate) steps: Vec<FramePipelineStep>,
+}
+
+impl Default for FramePipelinePlan {
+    fn default() -> Self {
+        Self {
+            shadow: true,
+            forward: true,
+            temporal_inputs: true,
+            upscale: true,
+            post: true,
+            ui: true,
+            pass_count: 6,
+            steps: vec![
+                FramePipelineStep::Shadow,
+                FramePipelineStep::Forward,
+                FramePipelineStep::TemporalInputs,
+                FramePipelineStep::Upscale,
+                FramePipelineStep::Post,
+                FramePipelineStep::Ui,
+            ],
+        }
+    }
+}
+
+impl FramePipelinePlan {
+    pub(crate) fn from_graph(graph: &RenderGraph) -> Self {
+        let steps = graph
+            .passes
+            .iter()
+            .filter_map(|pass| match pass.name.as_str() {
+                "shadow" => Some(FramePipelineStep::Shadow),
+                "forward" => Some(FramePipelineStep::Forward),
+                "temporal-inputs" => Some(FramePipelineStep::TemporalInputs),
+                "upscale" => Some(FramePipelineStep::Upscale),
+                "post" => Some(FramePipelineStep::Post),
+                "ui" | "gui" => Some(FramePipelineStep::Ui),
+                "outline" => Some(FramePipelineStep::Outline),
+                _ => match pass.stage {
+                    RenderStage::TemporalInputs => Some(FramePipelineStep::TemporalInputs),
+                    RenderStage::Upscale => Some(FramePipelineStep::Upscale),
+                    RenderStage::PostUpscale => Some(FramePipelineStep::Post),
+                    RenderStage::UiComposition => Some(FramePipelineStep::Ui),
+                    RenderStage::PreUpscale => None,
+                },
+            })
+            .collect();
+        Self {
+            shadow: graph.contains_pass("shadow"),
+            forward: graph.contains_pass("forward"),
+            temporal_inputs: graph.contains_stage(RenderStage::TemporalInputs),
+            upscale: graph.contains_stage(RenderStage::Upscale),
+            post: graph.contains_pass("post") || graph.contains_stage(RenderStage::PostUpscale),
+            ui: graph.contains_pass("ui")
+                || graph.contains_pass("gui")
+                || graph.contains_stage(RenderStage::UiComposition),
+            pass_count: graph.pass_count() as u32,
+            steps,
+        }
+    }
+}
+
 /// Real wgpu render device with an offscreen default target.
 pub struct WgpuRenderDevice {
     pub(crate) _instance: wgpu::Instance,
@@ -74,11 +156,13 @@ pub struct WgpuRenderDevice {
     pub(crate) target_allocator: HandleAllocator,
     pub(crate) images: HashMap<Handle, GpuImage>,
     pub(crate) buffers: HashMap<Handle, wgpu::Buffer>,
+    pub(crate) bone_palette_counts: HashMap<Handle, u32>,
     pub(crate) targets: HashMap<Handle, GpuTarget>,
     pub(crate) default_target: RenderTarget,
     pub(crate) game_target: RenderTarget,
     pub(crate) preview_target: RenderTarget,
     pub(crate) pipeline: wgpu::RenderPipeline,
+    pub(crate) transparent_pipeline: wgpu::RenderPipeline,
     pub(crate) camera_bind_group: wgpu::BindGroup,
     pub(crate) camera_uniform: wgpu::Buffer,
     pub(crate) lighting_uniform: wgpu::Buffer,
@@ -97,12 +181,25 @@ pub struct WgpuRenderDevice {
     pub(crate) instance_buffer: wgpu::Buffer,
     pub(crate) instance_capacity: usize,
     pub(crate) mesh_cache: HashMap<String, MeshBuffers>,
+    pub(crate) skinned_mesh_cache: HashMap<String, SkinnedMeshBuffers>,
+    pub(crate) skinned_pipeline: wgpu::RenderPipeline,
+    pub(crate) skinned_camera_bind_group: wgpu::BindGroup,
+    pub(crate) skinned_bone_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) surface: Option<wgpu::Surface<'static>>,
     pub(crate) surface_config: Option<wgpu::SurfaceConfiguration>,
     pub(crate) surface_depth: Option<wgpu::Texture>,
     pub(crate) surface_depth_view: Option<wgpu::TextureView>,
     pub(crate) surface_suspended: bool,
     pub(crate) next_gui_texture: u64,
+    pub(crate) gui_textures: HashMap<u64, Handle>,
+    pub(crate) gui_pipeline: wgpu::RenderPipeline,
+    pub(crate) gui_bind_group_layout: wgpu::BindGroupLayout,
+    pub(crate) gui_sampler: wgpu::Sampler,
+    pub(crate) gui_uniform: wgpu::Buffer,
+    pub(crate) gui_vertex_buffer: wgpu::Buffer,
+    pub(crate) gui_index_buffer: wgpu::Buffer,
+    pub(crate) gui_vertex_capacity: usize,
+    pub(crate) gui_index_capacity: usize,
     pub(crate) submitted_worlds: u64,
     pub(crate) grid_pipeline: wgpu::RenderPipeline,
     pub(crate) grid_bind_group: wgpu::BindGroup,
@@ -209,6 +306,18 @@ pub struct WgpuRenderDevice {
     pub(crate) temporal_state: TemporalFrameState,
     pub(crate) latest_temporal_camera: TemporalCameraData,
     pub(crate) reset_temporal_history: bool,
+    pub(crate) active_frame_plan: Option<FramePipelinePlan>,
+    pub(crate) latest_submitted_objects: u32,
+    pub(crate) latest_visible_objects: u32,
+    pub(crate) latest_culled_objects: u32,
+    pub(crate) latest_draw_calls: u32,
+    pub(crate) latest_triangles: u64,
+    pub(crate) gpu_particles: crate::particles::GpuParticlePipeline,
+    pub(crate) gpu_timestamp_query: Option<wgpu::QuerySet>,
+    pub(crate) gpu_timestamp_resolve: Option<wgpu::Buffer>,
+    pub(crate) gpu_timestamp_readback: Option<wgpu::Buffer>,
+    pub(crate) gpu_timestamp_receiver:
+        Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
 }
 pub(crate) struct FrameResources {
     pub(crate) ssao_bg: Option<Arc<wgpu::BindGroup>>,

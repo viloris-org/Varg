@@ -1,7 +1,11 @@
 use std::time::Instant;
 
 use crate::{
-    device::*, format::*, meshes::with_generated_tangents, render::*, scene_uniforms::*,
+    device::*,
+    format::*,
+    meshes::{SkinnedMeshBuffers, with_generated_tangents},
+    render::*,
+    scene_uniforms::*,
     uniforms::*,
 };
 use engine_core::{EngineError, EngineResult};
@@ -10,6 +14,7 @@ use engine_render::{
     RenderDevice, RenderFrame, RenderGraph, RenderMaterialTextures, RenderPerformanceMetrics,
     RenderTarget, RenderTargetDesc, RenderWorld,
 };
+use wgpu::util::DeviceExt;
 
 impl RenderDevice for WgpuRenderDevice {
     fn api(&self) -> RenderApi {
@@ -21,13 +26,17 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn submit_render_world(&mut self, world: &RenderWorld, frame: RenderFrame) -> EngineResult<()> {
+        self.collect_gpu_frame_time();
         let render_started = Instant::now();
-        let batches = self.prepare_render_batches(world);
+        let previous_gpu_frame_ms = self.performance_metrics.gpu_frame_ms;
         let aspect = self
             .surface_config
             .as_ref()
             .map(|cfg| cfg.width as f32 / cfg.height.max(1) as f32)
             .unwrap_or(16.0 / 9.0);
+        let batches = self.prepare_render_batches(world, aspect);
+        self.prepare_gpu_particles(world);
+        let plan = self.active_frame_plan.clone().unwrap_or_default();
         let uniform = camera_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
@@ -72,10 +81,12 @@ impl RenderDevice for WgpuRenderDevice {
             };
             let scale = self.dynamic_resolution.scale();
             let (rw, rh) = scaled_render_size(sw, sh, scale);
-            let (temporal_camera, reset_history) =
-                temporal_camera_from_world(world, aspect, (rw, rh), &mut self.temporal_state);
-            self.latest_temporal_camera = temporal_camera;
-            self.reset_temporal_history = reset_history || frame.frame_index == 0;
+            if plan.temporal_inputs {
+                let (temporal_camera, reset_history) =
+                    temporal_camera_from_world(world, aspect, (rw, rh), &mut self.temporal_state);
+                self.latest_temporal_camera = temporal_camera;
+                self.reset_temporal_history = reset_history || frame.frame_index == 0;
+            }
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let enable_ssao = self.ssao_compute_pipeline.is_some();
@@ -93,26 +104,35 @@ impl RenderDevice for WgpuRenderDevice {
                 enable_bloom,
                 "aster surface",
             );
+            self.update_render_submission_stats(
+                &batches,
+                &plan,
+                enable_ssao,
+                enable_ssgi,
+                enable_bloom,
+            );
 
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("aster surface render world encoder"),
                 });
-            self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
-            self.encode_hdr_forward_passes(&mut encoder, &batches);
-            if enable_ssao {
-                self.encode_ssao_pass(&mut encoder, &frame_res);
-            }
-            if enable_ssgi {
-                self.encode_ssgi_pass(&mut encoder, &frame_res);
-            }
-            if enable_bloom {
-                let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
-            }
-            self.encode_post_pass(&mut encoder, &frame_res, &output_view);
+            let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
+            self.encode_frame_pipeline(
+                &mut encoder,
+                &plan,
+                &csm,
+                &batches,
+                &frame_res,
+                &output_view,
+                enable_ssao,
+                enable_ssgi,
+                enable_bloom,
+            );
+            self.encode_gpu_timestamps_end(&mut encoder, gpu_timestamps);
 
             self.queue.submit(std::iter::once(encoder.finish()));
+            self.schedule_gpu_timestamp_readback(gpu_timestamps);
             self.finish_validation_scope(validation, "aster surface")?;
             surface_frame.present();
             self.submitted_worlds = self.submitted_worlds.saturating_add(1);
@@ -125,6 +145,13 @@ impl RenderDevice for WgpuRenderDevice {
                 render_scale: scale,
                 upscaler: self.active_upscaler,
                 frame_generation_multiplier: 1,
+                draw_calls: self.latest_draw_calls,
+                triangles: self.latest_triangles,
+                submitted_objects: self.latest_submitted_objects,
+                visible_objects: self.latest_visible_objects,
+                culled_objects: self.latest_culled_objects,
+                pipeline_passes: plan.pass_count,
+                gpu_frame_ms: previous_gpu_frame_ms,
                 ..RenderPerformanceMetrics::default()
             };
             return Ok(());
@@ -160,10 +187,19 @@ impl RenderDevice for WgpuRenderDevice {
             enable_bloom,
             "aster offscreen",
         );
-        let (temporal_camera, reset_history) =
-            temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
-        self.latest_temporal_camera = temporal_camera;
-        self.reset_temporal_history = reset_history || frame.frame_index == 0;
+        self.update_render_submission_stats(
+            &batches,
+            &plan,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+        );
+        if plan.temporal_inputs {
+            let (temporal_camera, reset_history) =
+                temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
+            self.latest_temporal_camera = temporal_camera;
+            self.reset_temporal_history = reset_history || frame.frame_index == 0;
+        }
 
         let target = self
             .targets
@@ -177,20 +213,22 @@ impl RenderDevice for WgpuRenderDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("aster render world encoder"),
             });
-        self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
-        self.encode_hdr_forward_passes(&mut encoder, &batches);
-        if enable_ssao {
-            self.encode_ssao_pass(&mut encoder, &frame_res);
-        }
-        if enable_ssgi {
-            self.encode_ssgi_pass(&mut encoder, &frame_res);
-        }
-        if enable_bloom {
-            let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
-        }
-        self.encode_post_pass(&mut encoder, &frame_res, output_view);
+        let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
+        self.encode_frame_pipeline(
+            &mut encoder,
+            &plan,
+            &csm,
+            &batches,
+            &frame_res,
+            output_view,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+        );
+        self.encode_gpu_timestamps_end(&mut encoder, gpu_timestamps);
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.schedule_gpu_timestamp_readback(gpu_timestamps);
         self.finish_validation_scope(validation, "aster offscreen")?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
         self.performance_metrics = RenderPerformanceMetrics {
@@ -202,6 +240,13 @@ impl RenderDevice for WgpuRenderDevice {
             render_scale: self.dynamic_resolution.scale(),
             upscaler: self.active_upscaler,
             frame_generation_multiplier: 1,
+            draw_calls: self.latest_draw_calls,
+            triangles: self.latest_triangles,
+            submitted_objects: self.latest_submitted_objects,
+            visible_objects: self.latest_visible_objects,
+            culled_objects: self.latest_culled_objects,
+            pipeline_passes: plan.pass_count,
+            gpu_frame_ms: previous_gpu_frame_ms,
             ..RenderPerformanceMetrics::default()
         };
         Ok(())
@@ -273,15 +318,47 @@ impl RenderDevice for WgpuRenderDevice {
         self.performance_metrics
     }
 
+    fn submit_render_world_with_graph(
+        &mut self,
+        world: &RenderWorld,
+        graph: &RenderGraph,
+        frame: RenderFrame,
+    ) -> EngineResult<()> {
+        self.execute_graph(graph, frame)?;
+        self.active_frame_plan = Some(FramePipelinePlan::from_graph(graph));
+        let result = self.submit_render_world(world, frame);
+        self.active_frame_plan = None;
+        result
+    }
+
     fn record_frame_time(&mut self, frame_ms: f32) {
-        if let Some(scale) = self.dynamic_resolution.record_frame(frame_ms) {
+        let feedback_ms = self.performance_metrics.gpu_frame_ms.unwrap_or(frame_ms);
+        if let Some(scale) = self.dynamic_resolution.record_frame(feedback_ms) {
             self.performance_metrics.render_scale = scale;
             self.update_offscreen_internal_sizes(scale);
         }
     }
 
-    /// Prepares instance buffer from mesh batches for rendering.
-    fn execute_graph(&mut self, _graph: &RenderGraph, _frame: RenderFrame) -> EngineResult<()> {
+    fn execute_graph(&mut self, graph: &RenderGraph, _frame: RenderFrame) -> EngineResult<()> {
+        for pass in &graph.passes {
+            let supported = matches!(
+                pass.name.as_str(),
+                "shadow"
+                    | "forward"
+                    | "temporal-inputs"
+                    | "upscale"
+                    | "post"
+                    | "ui"
+                    | "gui"
+                    | "outline"
+            );
+            if !supported {
+                return Err(EngineError::other(format!(
+                    "wgpu Frame Pipeline contains unsupported pass: {}",
+                    pass.name
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -323,7 +400,8 @@ impl RenderDevice for WgpuRenderDevice {
         Ok(ImageHandle::new(handle))
     }
 
-    fn upload_texture(&mut self, desc: ImageDesc, data: &[u8]) -> EngineResult<ImageHandle> {
+    fn upload_texture(&mut self, mut desc: ImageDesc, data: &[u8]) -> EngineResult<ImageHandle> {
+        desc.usage = desc.usage.or(engine_render::ImageUsage::TRANSFER_DST);
         let handle = self.image_allocator.allocate()?;
         let texture = self.device.create_texture(&texture_desc(&desc));
         if !data.is_empty() {
@@ -382,6 +460,7 @@ impl RenderDevice for WgpuRenderDevice {
 
     fn destroy_buffer(&mut self, handle: BufferHandle) {
         if let Some(buffer) = self.buffers.remove(&handle.raw()) {
+            self.bone_palette_counts.remove(&handle.raw());
             let _ = self.buffer_allocator.free(handle.raw());
             let frame = self.submitted_worlds;
             self.destroy_queue
@@ -389,7 +468,12 @@ impl RenderDevice for WgpuRenderDevice {
         }
     }
 
-    fn upload_gui_texture(&mut self, desc: ImageDesc, data: &[u8]) -> EngineResult<GuiTextureId> {
+    fn upload_gui_texture(
+        &mut self,
+        mut desc: ImageDesc,
+        data: &[u8],
+    ) -> EngineResult<GuiTextureId> {
+        desc.usage = desc.usage.or(engine_render::ImageUsage::TRANSFER_DST);
         let texture = self.device.create_texture(&texture_desc(&desc));
         if !data.is_empty() {
             self.queue.write_texture(
@@ -424,10 +508,138 @@ impl RenderDevice for WgpuRenderDevice {
         );
         let id = GuiTextureId(self.next_gui_texture);
         self.next_gui_texture = self.next_gui_texture.saturating_add(1);
+        self.gui_textures.insert(id.0, handle);
         Ok(id)
     }
 
-    fn draw_gui(&mut self, _draw_list: &GuiDrawList) -> EngineResult<()> {
+    fn draw_gui(&mut self, draw_list: &GuiDrawList) -> EngineResult<()> {
+        if draw_list.vertices.is_empty()
+            || draw_list.indices.is_empty()
+            || draw_list.commands.is_empty()
+        {
+            return Ok(());
+        }
+        if draw_list.vertices.len() > self.gui_vertex_capacity {
+            self.gui_vertex_capacity = draw_list.vertices.len().next_power_of_two();
+            self.gui_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster gui vertices"),
+                size: (self.gui_vertex_capacity * std::mem::size_of::<GpuGuiVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if draw_list.indices.len() > self.gui_index_capacity {
+            self.gui_index_capacity = draw_list.indices.len().next_power_of_two();
+            self.gui_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster gui indices"),
+                size: (self.gui_index_capacity * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let vertices: Vec<GpuGuiVertex> = draw_list
+            .vertices
+            .iter()
+            .map(|vertex| GpuGuiVertex {
+                position: vertex.pos,
+                uv: vertex.uv,
+                color: vertex.color,
+            })
+            .collect();
+        self.queue
+            .write_buffer(&self.gui_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        self.queue.write_buffer(
+            &self.gui_index_buffer,
+            0,
+            bytemuck::cast_slice(&draw_list.indices),
+        );
+
+        let (width, height) = self.default_target.size();
+        self.queue.write_buffer(
+            &self.gui_uniform,
+            0,
+            bytemuck::bytes_of(&GuiUniform {
+                screen_size: [width as f32, height as f32],
+                _pad: [0.0; 2],
+            }),
+        );
+        let target = self
+            .targets
+            .get(&self.default_target.handle)
+            .ok_or_else(|| EngineError::invalid_handle("default GUI target is missing"))?;
+        let mut bind_groups = Vec::with_capacity(draw_list.commands.len());
+        for command in &draw_list.commands {
+            let view = self
+                .gui_textures
+                .get(&command.texture.0)
+                .and_then(|handle| self.images.get(handle))
+                .map_or(&self.default_texture_view, |image| &image.view);
+            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aster gui draw bind group"),
+                layout: &self.gui_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gui_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.gui_sampler),
+                    },
+                ],
+            }));
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("aster gui encoder"),
+            });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("aster gui pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target.color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.gui_pipeline);
+        pass.set_vertex_buffer(0, self.gui_vertex_buffer.slice(..));
+        pass.set_index_buffer(self.gui_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        for (command, bind_group) in draw_list.commands.iter().zip(&bind_groups) {
+            let [x, y, command_width, command_height] = command.scissor;
+            let x = x.min(width);
+            let y = y.min(height);
+            let scissor_width = command_width.min(width.saturating_sub(x));
+            let scissor_height = command_height.min(height.saturating_sub(y));
+            let end = command.index_offset.saturating_add(command.index_count);
+            if scissor_width == 0 || scissor_height == 0 || end as usize > draw_list.indices.len() {
+                continue;
+            }
+            pass.set_scissor_rect(x, y, scissor_width, scissor_height);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw_indexed(command.index_offset..end, 0, 0..1);
+        }
+        drop(pass);
+        self.queue.submit(Some(encoder.finish()));
+        self.latest_draw_calls = self
+            .latest_draw_calls
+            .saturating_add(draw_list.commands.len() as u32);
+        self.latest_triangles = self
+            .latest_triangles
+            .saturating_add(draw_list.indices.len() as u64 / 3);
         Ok(())
     }
 
@@ -450,6 +662,180 @@ impl RenderDevice for WgpuRenderDevice {
             .collect();
         let vertices = with_generated_tangents(vertices, indices);
         self.upload_mesh(mesh_name, &vertices, indices);
+        Ok(())
+    }
+
+    fn upload_skinned_mesh_data(
+        &mut self,
+        mesh_name: &str,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        texcoords: &[[f32; 2]],
+        joint_indices: &[[u16; 4]],
+        joint_weights: &[[f32; 4]],
+        indices: &[u32],
+    ) -> EngineResult<()> {
+        let vertex_count = positions
+            .len()
+            .min(normals.len())
+            .min(texcoords.len())
+            .min(joint_indices.len())
+            .min(joint_weights.len());
+        if vertex_count == 0 || indices.is_empty() {
+            return Err(EngineError::other("skinned mesh data must not be empty"));
+        }
+        if indices.iter().any(|index| *index as usize >= vertex_count) {
+            return Err(EngineError::other(
+                "skinned mesh index references a missing vertex",
+            ));
+        }
+        let vertices: Vec<SkinnedVertex> = (0..vertex_count)
+            .map(|index| {
+                let mut weights = joint_weights[index];
+                let total = weights.iter().copied().sum::<f32>();
+                if total > 0.0 && total.is_finite() {
+                    for weight in &mut weights {
+                        *weight /= total;
+                    }
+                } else {
+                    weights = [1.0, 0.0, 0.0, 0.0];
+                }
+                SkinnedVertex {
+                    position: positions[index],
+                    normal: normals[index],
+                    uv: texcoords[index],
+                    joints: joint_indices[index].map(u32::from),
+                    weights,
+                }
+            })
+            .collect();
+        let max_joint_index = vertices
+            .iter()
+            .flat_map(|vertex| vertex.joints)
+            .max()
+            .unwrap_or(0);
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("aster skinned mesh vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("aster skinned mesh indices"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.skinned_mesh_cache.insert(
+            mesh_name.to_owned(),
+            SkinnedMeshBuffers {
+                vertex_buffer,
+                index_buffer,
+                index_count: indices.len() as u32,
+                max_joint_index,
+            },
+        );
+        Ok(())
+    }
+
+    fn upload_bone_matrices(&mut self, matrices: &[[f32; 16]]) -> EngineResult<BufferHandle> {
+        if matrices.is_empty() {
+            return Err(EngineError::other("bone palette must not be empty"));
+        }
+        let handle = self.buffer_allocator.allocate()?;
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("aster bone palette"),
+                contents: bytemuck::cast_slice(matrices),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+        self.buffers.insert(handle, buffer);
+        self.bone_palette_counts
+            .insert(handle, matrices.len().min(u32::MAX as usize) as u32);
+        Ok(BufferHandle::new(handle))
+    }
+
+    fn draw_skinned_mesh(
+        &mut self,
+        mesh_name: &str,
+        _material_name: &str,
+        bone_buffer: BufferHandle,
+        bone_count: u32,
+    ) -> EngineResult<()> {
+        if bone_count == 0 {
+            return Err(EngineError::other("bone count must be non-zero"));
+        }
+        let mesh = self.skinned_mesh_cache.get(mesh_name).ok_or_else(|| {
+            EngineError::other(format!("skinned mesh is not uploaded: {mesh_name}"))
+        })?;
+        if mesh.max_joint_index >= bone_count {
+            return Err(EngineError::other(format!(
+                "skinned mesh references joint {} but palette contains {bone_count} bones",
+                mesh.max_joint_index
+            )));
+        }
+        let bones = self
+            .buffers
+            .get(&bone_buffer.raw())
+            .ok_or_else(|| EngineError::invalid_handle("bone palette buffer is missing"))?;
+        let actual_bone_count = self
+            .bone_palette_counts
+            .get(&bone_buffer.raw())
+            .copied()
+            .ok_or_else(|| EngineError::invalid_handle("bone palette metadata is missing"))?;
+        if bone_count > actual_bone_count {
+            return Err(EngineError::other(format!(
+                "bone count {bone_count} exceeds uploaded palette size {actual_bone_count}"
+            )));
+        }
+        let bone_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aster bone palette bind group"),
+            layout: &self.skinned_bone_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bones.as_entire_binding(),
+            }],
+        });
+        let target = self
+            .targets
+            .get(&self.default_target.handle)
+            .ok_or_else(|| EngineError::invalid_handle("default skinned target is missing"))?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("aster skinned mesh encoder"),
+            });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("aster skinned mesh pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target.color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.skinned_pipeline);
+        pass.set_bind_group(0, &self.skinned_camera_bind_group, &[]);
+        pass.set_bind_group(1, &bone_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        drop(pass);
+        self.queue.submit(Some(encoder.finish()));
+        self.latest_draw_calls = self.latest_draw_calls.saturating_add(1);
+        self.latest_triangles = self
+            .latest_triangles
+            .saturating_add(u64::from(mesh.index_count / 3));
         Ok(())
     }
 

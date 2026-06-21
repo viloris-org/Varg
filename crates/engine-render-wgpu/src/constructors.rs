@@ -32,6 +32,19 @@ impl Default for WgpuOffscreenConfig {
 }
 
 impl WgpuRenderDevice {
+    fn requested_device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+        let mut descriptor = wgpu::DeviceDescriptor {
+            label: Some("aster wgpu device"),
+            ..Default::default()
+        };
+        let timestamp_features =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if adapter.features().contains(timestamp_features) {
+            descriptor.required_features |= timestamp_features;
+        }
+        descriptor
+    }
+
     /// Creates a wgpu device and an offscreen render target.
     pub fn new_offscreen(config: WgpuOffscreenConfig) -> EngineResult<Self> {
         pollster::block_on(Self::new_offscreen_async(config))
@@ -61,7 +74,7 @@ impl WgpuRenderDevice {
                 })?,
         };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&Self::requested_device_descriptor(&adapter))
             .await
             .map_err(|error| EngineError::other(format!("request wgpu device failed: {error}")))?;
 
@@ -138,7 +151,7 @@ impl WgpuRenderDevice {
                 })?,
         };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&Self::requested_device_descriptor(&adapter))
             .await
             .map_err(|error| EngineError::other(format!("request wgpu device failed: {error}")))?;
         let caps = surface.get_capabilities(&adapter);
@@ -209,7 +222,7 @@ impl WgpuRenderDevice {
                 })?,
         };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&Self::requested_device_descriptor(&adapter))
             .await
             .map_err(|error| EngineError::other(format!("request wgpu device failed: {error}")))?;
         let caps = surface.get_capabilities(&adapter);
@@ -287,6 +300,28 @@ impl WgpuRenderDevice {
         format: ImageFormat,
         surface_state: Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
     ) -> EngineResult<Self> {
+        let timestamp_features =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let timestamp_resources = device.features().contains(timestamp_features).then(|| {
+            let query = device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("aster frame timestamp query"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            });
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster frame timestamp resolve"),
+                size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster frame timestamp readback"),
+                size: 16,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            (query, resolve, readback)
+        });
         let mut target_allocator = HandleAllocator::default();
         let default_target = create_target(
             &device,
@@ -353,6 +388,7 @@ impl WgpuRenderDevice {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let gpu_particles = crate::particles::GpuParticlePipeline::new(&device, &camera_uniform);
         let lighting_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aster lighting uniform"),
             contents: bytemuck::bytes_of(&LightingUniform::default()),
@@ -1099,6 +1135,166 @@ impl WgpuRenderDevice {
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                 ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster transparent pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3,
+                            1 => Float32x3,
+                            2 => Float32x2,
+                            3 => Float32x4
+                        ],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Instance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            4 => Float32x3,
+                            5 => Float32x3,
+                            6 => Float32x4,
+                            7 => Float32x4,
+                            8 => Float32,
+                            9 => Float32,
+                            10 => Float32x3,
+                            11 => Float32
+                        ],
+                    },
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster skinned mesh shader"),
+            source: wgpu::ShaderSource::Wgsl(SKINNED_SHADER.into()),
+        });
+        let skinned_camera_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster skinned camera layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let skinned_bone_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster skinned bone layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let skinned_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aster skinned camera bind group"),
+            layout: &skinned_camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform.as_entire_binding(),
+            }],
+        });
+        let skinned_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("aster skinned pipeline layout"),
+                bind_group_layouts: &[
+                    Some(&skinned_camera_layout),
+                    Some(&skinned_bone_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+        let skinned_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster skinned mesh pipeline"),
+            layout: Some(&skinned_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &skinned_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<SkinnedVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Float32x2,
+                        3 => Uint32x4,
+                        4 => Float32x4
+                    ],
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &skinned_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: to_wgpu_format(format),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             multiview_mask: None,
             cache: None,
@@ -2078,6 +2274,115 @@ impl WgpuRenderDevice {
             ],
         });
 
+        let gui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster gui shader"),
+            source: wgpu::ShaderSource::Wgsl(GUI_SHADER.into()),
+        });
+        let gui_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster gui bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let gui_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("aster gui pipeline layout"),
+            bind_group_layouts: &[Some(&gui_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let gui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster gui pipeline"),
+            layout: Some(&gui_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &gui_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuGuiVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Uint32
+                    ],
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &gui_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: to_wgpu_format(format),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let gui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("aster gui sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let gui_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster gui uniform"),
+            contents: bytemuck::bytes_of(&GuiUniform {
+                screen_size: [width.max(1) as f32, height.max(1) as f32],
+                _pad: [0.0; 2],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let gui_vertex_capacity = 4;
+        let gui_index_capacity = 6;
+        let gui_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aster gui vertices"),
+            size: (gui_vertex_capacity * std::mem::size_of::<GpuGuiVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let gui_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aster gui indices"),
+            size: (gui_index_capacity * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let mut renderer = Self {
             _instance: instance,
             adapter,
@@ -2088,11 +2393,13 @@ impl WgpuRenderDevice {
             target_allocator,
             images: HashMap::new(),
             buffers: HashMap::new(),
+            bone_palette_counts: HashMap::new(),
             targets,
             default_target,
             game_target,
             preview_target,
             pipeline,
+            transparent_pipeline,
             camera_bind_group,
             camera_uniform,
             lighting_uniform,
@@ -2111,12 +2418,25 @@ impl WgpuRenderDevice {
             instance_buffer,
             instance_capacity,
             mesh_cache: HashMap::new(),
+            skinned_mesh_cache: HashMap::new(),
+            skinned_pipeline,
+            skinned_camera_bind_group,
+            skinned_bone_bind_group_layout,
             surface,
             surface_config,
             surface_depth: None,
             surface_depth_view: None,
             surface_suspended: false,
             next_gui_texture: 1,
+            gui_textures: HashMap::new(),
+            gui_pipeline,
+            gui_bind_group_layout,
+            gui_sampler,
+            gui_uniform,
+            gui_vertex_buffer,
+            gui_index_buffer,
+            gui_vertex_capacity,
+            gui_index_capacity,
             submitted_worlds: 0,
             grid_pipeline,
             grid_bind_group,
@@ -2217,6 +2537,21 @@ impl WgpuRenderDevice {
             temporal_state: engine_render::TemporalFrameState::default(),
             latest_temporal_camera: engine_render::TemporalCameraData::default(),
             reset_temporal_history: true,
+            active_frame_plan: None,
+            latest_submitted_objects: 0,
+            latest_visible_objects: 0,
+            latest_culled_objects: 0,
+            latest_draw_calls: 0,
+            latest_triangles: 0,
+            gpu_particles,
+            gpu_timestamp_query: timestamp_resources
+                .as_ref()
+                .map(|resources| resources.0.clone()),
+            gpu_timestamp_resolve: timestamp_resources
+                .as_ref()
+                .map(|resources| resources.1.clone()),
+            gpu_timestamp_readback: timestamp_resources.map(|resources| resources.2),
+            gpu_timestamp_receiver: None,
         };
         renderer.upload_debug_meshes();
         renderer.bake_ibl();
