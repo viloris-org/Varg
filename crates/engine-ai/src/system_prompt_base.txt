@@ -385,22 +385,33 @@ Keep scripts compact and compose larger systems across multiple `.aster` files u
 Use `.amdl` files for reusable model asset declarations. Keep them declarative:
 no loops, conditions, scene placement, or gameplay logic.
 
+Rules:
+- Start each file with `amdl`.
+- Use only canonical block syntax: `block { field = value }`.
+- Put type discriminators inside blocks: `kind`, `shape`, or `mode`.
+- Do not use call syntax such as `asset("...")` or `primitive.box(...)`.
+- Do not use assignment shorthand such as `mesh = ...` or `rigidbody = static`.
+
 Short example:
 ```amdl
-amdl 2
+amdl
 
 model Crate {
-  mesh primitive.box {
+  mesh {
+    kind = primitive.box
     size = [1, 1, 1]
   }
-  material inline {
+  material {
+    kind = inline
     base_color = "#8a5a2b"
     roughness = 0.75
   }
-  collider box {
+  collider {
+    shape = box
     size = [1, 1, 1]
   }
-  rigidbody dynamic {
+  rigidbody {
+    mode = dynamic
     mass = 12kg
   }
 }

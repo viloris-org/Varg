@@ -12,7 +12,7 @@ pub use amdl::{
     compile_amdl, diagnose_amdl, parse_amdl, AmdlColliderDecl, AmdlColliderShape, AmdlDiagnostic,
     AmdlDocument, AmdlLodDecl, AmdlMaterialDecl, AmdlMeshDecl, AmdlMeshSource, AmdlModelDecl,
     AmdlParserError, AmdlPrimitiveKind, AmdlRigidbodyDecl, AmdlRigidbodyMode, AmdlSocketDecl,
-    AmdlValidator, AmdlValue, AMDL_VERSION,
+    AmdlValidator, AmdlValue, AMDL_HEADER,
 };
 pub use registry::ResourceTypeRegistry;
 pub use resource_trait::{Resource, ResourceHandle as TypedResourceHandle};

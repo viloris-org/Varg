@@ -1,22 +1,21 @@
 //! Aster Model Language (`.amdl`) parser and diagnostics.
 //!
 //! AMDL is an AI-facing, system-parseable declaration language for reusable
-//! model assets. It intentionally has one canonical shape: explicit declarations
-//! with typed blocks. It does not support alternate call-style syntax, loops,
-//! conditions, scene placement, or gameplay logic.
+//! model assets. It intentionally has one canonical shape: explicit declaration
+//! blocks with discriminator fields such as `kind`, `shape`, and `mode`. It
+//! does not support alternate call-style syntax, loops, conditions, scene
+//! placement, or gameplay logic.
 
 use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
-/// Supported AMDL syntax/schema version.
-pub const AMDL_VERSION: u32 = 2;
+/// Required AMDL file header.
+pub const AMDL_HEADER: &str = "amdl";
 
 /// Parsed and validated AMDL document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AmdlDocument {
-    /// AMDL syntax/schema version. Currently always `2`.
-    pub version: u32,
     /// Declared models in source order.
     pub models: Vec<AmdlModelDecl>,
 }
@@ -267,17 +266,6 @@ impl AmdlValidator {
     /// Validates an already parsed typed AMDL document.
     pub fn validate(document: &AmdlDocument) -> Result<(), Vec<AmdlDiagnostic>> {
         let mut errors = Vec::new();
-        if document.version != AMDL_VERSION {
-            errors.push(AmdlDiagnostic {
-                code: "AMDL_VERSION".into(),
-                severity: "error".into(),
-                line: Some(1),
-                column: Some(1),
-                message: format!("unsupported AMDL version `{}`", document.version),
-                suggestion: format!("Start the file with `amdl {AMDL_VERSION}`."),
-                source_line: None,
-            });
-        }
         if document.models.is_empty() {
             errors.push(AmdlDiagnostic {
                 code: "AMDL_MODEL_REQUIRED".into(),
@@ -285,7 +273,8 @@ impl AmdlValidator {
                 line: None,
                 column: None,
                 message: "document must contain at least one model declaration".into(),
-                suggestion: "Add `model Name { mesh primitive.box { size = [1, 1, 1] } }`.".into(),
+                suggestion: "Add `model Name { mesh { kind = primitive.box size = [1, 1, 1] } }`."
+                    .into(),
                 source_line: None,
             });
         }
@@ -302,6 +291,7 @@ enum TokenKind {
     Ident(String),
     String(String),
     Number { value: f64, unit: Option<String> },
+    Unknown(char),
     LBrace,
     RBrace,
     LBracket,
@@ -333,13 +323,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_document(&mut self) -> Result<AmdlDocument, AmdlParserError> {
-        self.expect_ident_value("amdl")?;
-        let version = self.expect_version()?;
-        if version != AMDL_VERSION {
-            return Err(self.error_at_previous(
-                "AMDL_VERSION",
-                format!("unsupported AMDL version `{version}`"),
-                format!("Use `amdl {AMDL_VERSION}`."),
+        self.expect_ident_value(AMDL_HEADER)?;
+        if let Some(Token {
+            kind: TokenKind::Number { .. },
+            offset,
+        }) = self.peek()
+        {
+            return Err(AmdlParserError::new(
+                *offset,
+                "AMDL_HEADER",
+                "AMDL no longer uses a numeric version header",
+                "Start the file with `amdl`, then declare one or more `model` blocks.",
             ));
         }
 
@@ -352,11 +346,11 @@ impl<'a> Parser<'a> {
             return Err(self.error_here(
                 "AMDL_MODEL_REQUIRED",
                 "expected at least one `model` declaration",
-                "Add `model Name { mesh primitive.box { size = [1, 1, 1] } }`.",
+                "Add `model Name { mesh { kind = primitive.box size = [1, 1, 1] } }`.",
             ));
         }
 
-        Ok(AmdlDocument { version, models })
+        Ok(AmdlDocument { models })
     }
 
     fn parse_model(&mut self) -> Result<AmdlModelDecl, AmdlParserError> {
@@ -386,7 +380,7 @@ impl<'a> Parser<'a> {
                     "AMDL_LEGACY_SYNTAX",
                     format!("legacy assignment syntax is not supported for `{field}`"),
                     format!(
-                        "Use canonical AMDL v2 block syntax, for example `{field} kind {{ ... }}`."
+                        "Use canonical AMDL block syntax, for example `{field} {{ kind = ... }}`."
                     ),
                 ));
             }
@@ -452,7 +446,7 @@ impl<'a> Parser<'a> {
             self.error_at_previous(
                 "AMDL_MESH_REQUIRED",
                 format!("model `{name}` must declare a mesh"),
-                "Add `mesh primitive.box { size = [1, 1, 1] }` or `mesh asset { path = \"models/name.glb\" }`.",
+                "Add `mesh { kind = primitive.box size = [1, 1, 1] }` or `mesh { kind = asset path = \"models/name.glb\" }`.",
             )
         })?;
 
@@ -469,16 +463,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_mesh_decl(&mut self) -> Result<AmdlMeshDecl, AmdlParserError> {
-        let source = self.expect_path()?;
-        if source == ["asset"] {
-            let parameters = self.parse_record()?;
-            let path = take_required_string(parameters, "path", self.previous_offset())?;
+        if !self.check(TokenKindDiscriminant::LBrace) {
+            let offset = self
+                .peek()
+                .map(|token| token.offset)
+                .unwrap_or(self.previous_offset());
+            return Err(AmdlParserError::new(
+                offset,
+                "AMDL_CANONICAL_BLOCK",
+                "mesh must be declared as a block with a `kind` field",
+                "Write `mesh { kind = primitive.box size = [1, 1, 1] }` or `mesh { kind = asset path = \"models/foo.glb\" }`.",
+            ));
+        }
+        let mut parameters = self.parse_record()?;
+        let kind = take_required_symbol_path(&mut parameters, "kind", self.previous_offset())?;
+        if kind.len() == 1 && kind[0] == "asset" {
+            let path = take_required_string(&mut parameters, "path", self.previous_offset())?;
+            reject_unknown_fields(
+                &parameters,
+                self.previous_offset(),
+                "mesh asset",
+                &["kind", "path"],
+            )?;
             Ok(AmdlMeshDecl {
                 source: AmdlMeshSource::Asset { path },
             })
-        } else if source.len() == 2 && source[0] == "primitive" {
-            let kind = parse_primitive_kind(&source[1], self.previous_offset())?;
-            let parameters = self.parse_record()?;
+        } else if kind.len() == 2 && kind[0] == "primitive" {
+            let kind = parse_primitive_kind(&kind[1], self.previous_offset())?;
             Ok(AmdlMeshDecl {
                 source: AmdlMeshSource::Primitive {
                     primitive: kind,
@@ -488,47 +499,92 @@ impl<'a> Parser<'a> {
         } else {
             Err(self.error_at_previous(
                 "AMDL_MESH_KIND",
-                format!("unsupported mesh source `{}`", source.join(".")),
-                "Use `mesh asset { path = \"models/foo.glb\" }` or `mesh primitive.box { size = [1, 1, 1] }`.",
+                format!("unsupported mesh kind `{}`", kind.join(".")),
+                "Use `mesh { kind = asset path = \"models/foo.glb\" }` or `mesh { kind = primitive.box size = [1, 1, 1] }`.",
             ))
         }
     }
 
     fn parse_material_decl(&mut self) -> Result<AmdlMaterialDecl, AmdlParserError> {
-        let kind = self.expect_ident()?;
-        match kind.as_str() {
+        if !self.check(TokenKindDiscriminant::LBrace) {
+            let offset = self
+                .peek()
+                .map(|token| token.offset)
+                .unwrap_or(self.previous_offset());
+            return Err(AmdlParserError::new(
+                offset,
+                "AMDL_CANONICAL_BLOCK",
+                "material must be declared as a block with a `kind` field",
+                "Write `material { kind = inline ... }` or `material { kind = ref path = \"materials/foo.amat\" }`.",
+            ));
+        }
+        let mut parameters = self.parse_record()?;
+        let kind = take_required_symbol_path(&mut parameters, "kind", self.previous_offset())?;
+        if kind.len() != 1 {
+            return Err(self.error_at_previous(
+                "AMDL_MATERIAL_KIND",
+                format!("unsupported material kind `{}`", kind.join(".")),
+                "Use `material { kind = inline ... }` or `material { kind = ref path = \"materials/foo.amat\" }`.",
+            ));
+        }
+        match kind[0].as_str() {
             "inline" => Ok(AmdlMaterialDecl::Inline {
-                parameters: self.parse_record()?,
+                parameters,
             }),
             "ref" => {
-                let parameters = self.parse_record()?;
-                let path = take_required_string(parameters, "path", self.previous_offset())?;
+                let path = take_required_string(&mut parameters, "path", self.previous_offset())?;
+                reject_unknown_fields(
+                    &parameters,
+                    self.previous_offset(),
+                    "material ref",
+                    &["kind", "path"],
+                )?;
                 Ok(AmdlMaterialDecl::Ref { path })
             }
             _ => Err(self.error_at_previous(
                 "AMDL_MATERIAL_KIND",
-                format!("unsupported material kind `{kind}`"),
-                "Use `material inline { ... }` or `material ref { path = \"materials/foo.amat\" }`.",
+                format!("unsupported material kind `{}`", kind.join(".")),
+                "Use `material { kind = inline ... }` or `material { kind = ref path = \"materials/foo.amat\" }`.",
             )),
         }
     }
 
     fn parse_collider_decl(&mut self) -> Result<AmdlColliderDecl, AmdlParserError> {
-        let shape = self.expect_ident()?;
+        if !self.check(TokenKindDiscriminant::LBrace) {
+            let offset = self
+                .peek()
+                .map(|token| token.offset)
+                .unwrap_or(self.previous_offset());
+            return Err(AmdlParserError::new(
+                offset,
+                "AMDL_CANONICAL_BLOCK",
+                "collider must be declared as a block with a `shape` field",
+                "Write `collider { shape = box size = [1, 1, 1] }`.",
+            ));
+        }
+        let mut parameters = self.parse_record()?;
+        let shape = take_required_symbol(&mut parameters, "shape", self.previous_offset())?;
         let shape = parse_collider_shape(&shape, self.previous_offset())?;
-        Ok(AmdlColliderDecl {
-            shape,
-            parameters: self.parse_record()?,
-        })
+        Ok(AmdlColliderDecl { shape, parameters })
     }
 
     fn parse_rigidbody_decl(&mut self) -> Result<AmdlRigidbodyDecl, AmdlParserError> {
-        let mode = self.expect_ident()?;
+        if !self.check(TokenKindDiscriminant::LBrace) {
+            let offset = self
+                .peek()
+                .map(|token| token.offset)
+                .unwrap_or(self.previous_offset());
+            return Err(AmdlParserError::new(
+                offset,
+                "AMDL_CANONICAL_BLOCK",
+                "rigidbody must be declared as a block with a `mode` field",
+                "Write `rigidbody { mode = dynamic mass = 12kg }`.",
+            ));
+        }
+        let mut parameters = self.parse_record()?;
+        let mode = take_required_symbol(&mut parameters, "mode", self.previous_offset())?;
         let mode = parse_rigidbody_mode(&mode, self.previous_offset())?;
-        Ok(AmdlRigidbodyDecl {
-            mode,
-            parameters: self.parse_record()?,
-        })
+        Ok(AmdlRigidbodyDecl { mode, parameters })
     }
 
     fn parse_socket_decl(&mut self) -> Result<AmdlSocketDecl, AmdlParserError> {
@@ -567,7 +623,7 @@ impl<'a> Parser<'a> {
             self.error_at_previous(
                 "AMDL_LOD_MESH_REQUIRED",
                 "`lod` block requires a mesh declaration",
-                "Add `mesh asset { path = \"models/foo_lod.glb\" }` inside the LOD block.",
+                "Add `mesh { kind = asset path = \"models/foo_lod.glb\" }` inside the LOD block.",
             )
         })?;
         Ok(AmdlLodDecl {
@@ -625,12 +681,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(value) => {
                 self.advance();
-                match value.as_str() {
-                    "true" => Ok(AmdlValue::Bool(true)),
-                    "false" => Ok(AmdlValue::Bool(false)),
-                    _ => Ok(AmdlValue::Symbol(value)),
+                let mut symbol = value;
+                let mut had_dot = false;
+                while self.check(TokenKindDiscriminant::Dot) {
+                    self.advance();
+                    had_dot = true;
+                    symbol.push('.');
+                    symbol.push_str(&self.expect_ident()?);
+                }
+                match (symbol.as_str(), had_dot) {
+                    ("true", false) => Ok(AmdlValue::Bool(true)),
+                    ("false", false) => Ok(AmdlValue::Bool(false)),
+                    _ => Ok(AmdlValue::Symbol(symbol)),
                 }
             }
+            TokenKind::Unknown(ch) => Err(AmdlParserError::new(
+                token.offset,
+                "AMDL_INVALID_TOKEN",
+                format!("unsupported token `{ch}`"),
+                "Use only strict AMDL block syntax. Do not use function-call syntax such as `asset(...)` or `primitive.box(...)`.",
+            )),
             _ => Err(AmdlParserError::new(
                 token.offset,
                 "AMDL_VALUE",
@@ -659,15 +729,6 @@ impl<'a> Parser<'a> {
         Ok(AmdlValue::List(values))
     }
 
-    fn expect_path(&mut self) -> Result<Vec<String>, AmdlParserError> {
-        let mut path = vec![self.expect_ident()?];
-        while self.check(TokenKindDiscriminant::Dot) {
-            self.advance();
-            path.push(self.expect_ident()?);
-        }
-        Ok(path)
-    }
-
     fn expect_ident_value(&mut self, expected: &str) -> Result<(), AmdlParserError> {
         let token = self.peek().ok_or_else(|| {
             self.error_here(
@@ -686,35 +747,6 @@ impl<'a> Parser<'a> {
                 "AMDL_PARSE",
                 format!("expected `{expected}`"),
                 format!("Write `{expected}` here."),
-            )),
-        }
-    }
-
-    fn expect_version(&mut self) -> Result<u32, AmdlParserError> {
-        let token = self
-            .peek()
-            .ok_or_else(|| {
-                self.error_here(
-                    "AMDL_VERSION",
-                    "expected AMDL version",
-                    "Start the file with `amdl 2`.",
-                )
-            })?
-            .clone();
-        match token.kind {
-            TokenKind::Number { value, unit: None } if value == AMDL_VERSION as f64 => {
-                self.advance();
-                Ok(AMDL_VERSION)
-            }
-            TokenKind::Number { value, unit: None } if value.fract() == 0.0 => {
-                self.advance();
-                Ok(value as u32)
-            }
-            _ => Err(AmdlParserError::new(
-                token.offset,
-                "AMDL_VERSION",
-                "expected AMDL version number",
-                "Start the file with `amdl 2`.",
             )),
         }
     }
@@ -924,7 +956,7 @@ fn parse_collider_shape(shape: &str, offset: usize) -> Result<AmdlColliderShape,
             offset,
             "AMDL_COLLIDER_SHAPE",
             format!("unsupported collider shape `{shape}`"),
-            "Use `collider box`, `collider sphere`, `collider capsule`, `collider cylinder`, or `collider mesh`.",
+            "Use `collider { shape = box }`, `collider { shape = sphere }`, `collider { shape = capsule }`, `collider { shape = cylinder }`, or `collider { shape = mesh }`.",
         )),
     }
 }
@@ -938,13 +970,13 @@ fn parse_rigidbody_mode(mode: &str, offset: usize) -> Result<AmdlRigidbodyMode, 
             offset,
             "AMDL_RIGIDBODY_MODE",
             format!("unsupported rigidbody mode `{mode}`"),
-            "Use `rigidbody static`, `rigidbody dynamic`, or `rigidbody kinematic`.",
+            "Use `rigidbody { mode = static }`, `rigidbody { mode = dynamic }`, or `rigidbody { mode = kinematic }`.",
         )),
     }
 }
 
 fn take_required_string(
-    mut parameters: BTreeMap<String, AmdlValue>,
+    parameters: &mut BTreeMap<String, AmdlValue>,
     field: &str,
     offset: usize,
 ) -> Result<String, AmdlParserError> {
@@ -963,6 +995,54 @@ fn take_required_string(
             format!("Add `{field} = \"path/or/id\"`."),
         )),
     }
+}
+
+fn take_required_symbol(
+    parameters: &mut BTreeMap<String, AmdlValue>,
+    field: &str,
+    offset: usize,
+) -> Result<String, AmdlParserError> {
+    match parameters.remove(field) {
+        Some(AmdlValue::Symbol(value)) => Ok(value),
+        Some(_) => Err(AmdlParserError::new(
+            offset,
+            "AMDL_FIELD_TYPE",
+            format!("`{field}` must be a symbol"),
+            format!("Write `{field} = name`."),
+        )),
+        None => Err(AmdlParserError::new(
+            offset,
+            "AMDL_FIELD_REQUIRED",
+            format!("missing required field `{field}`"),
+            format!("Add `{field} = name`."),
+        )),
+    }
+}
+
+fn take_required_symbol_path(
+    parameters: &mut BTreeMap<String, AmdlValue>,
+    field: &str,
+    offset: usize,
+) -> Result<Vec<String>, AmdlParserError> {
+    let value = take_required_symbol(parameters, field, offset)?;
+    Ok(value.split('.').map(str::to_string).collect())
+}
+
+fn reject_unknown_fields(
+    parameters: &BTreeMap<String, AmdlValue>,
+    offset: usize,
+    block: &str,
+    allowed_fields: &[&str],
+) -> Result<(), AmdlParserError> {
+    if let Some(field) = parameters.keys().next() {
+        return Err(AmdlParserError::new(
+            offset,
+            "AMDL_UNKNOWN_FIELD",
+            format!("unsupported field `{field}` in `{block}`"),
+            format!("Use only `{}` in `{block}`.", allowed_fields.join("`, `")),
+        ));
+    }
+    Ok(())
 }
 
 fn diagnostic_from_parse_error(source: &str, error: AmdlParserError) -> AmdlDiagnostic {
@@ -1033,6 +1113,13 @@ fn lex(source: &str) -> Vec<Token> {
             b'=' => push_simple(&mut tokens, TokenKind::Equal, &mut cursor),
             b',' => push_simple(&mut tokens, TokenKind::Comma, &mut cursor),
             b'.' => push_simple(&mut tokens, TokenKind::Dot, &mut cursor),
+            b'(' | b')' | b':' => {
+                tokens.push(Token {
+                    kind: TokenKind::Unknown(byte as char),
+                    offset: cursor,
+                });
+                cursor += 1;
+            }
             b'"' => {
                 let offset = cursor;
                 cursor += 1;
@@ -1098,7 +1185,13 @@ fn lex(source: &str) -> Vec<Token> {
                     offset,
                 });
             }
-            _ => cursor += 1,
+            _ => {
+                tokens.push(Token {
+                    kind: TokenKind::Unknown(byte as char),
+                    offset: cursor,
+                });
+                cursor += 1;
+            }
         }
     }
     tokens
@@ -1127,24 +1220,28 @@ mod tests {
     #[test]
     fn parses_canonical_model() {
         let source = r##"
-amdl 2
+amdl
 
 model Crate {
-  mesh primitive.box {
+  mesh {
+    kind = primitive.box
     size = [1, 1, 1]
   }
 
-  material inline {
+  material {
+    kind = inline
     base_color = "#8a5a2b"
     roughness = 0.75
     metallic = 0.0
   }
 
-  collider box {
+  collider {
+    shape = box
     size = [1, 1, 1]
   }
 
-  rigidbody dynamic {
+  rigidbody {
+    mode = dynamic
     mass = 12kg
   }
 
@@ -1154,7 +1251,8 @@ model Crate {
   }
 
   lod 1 {
-    mesh asset {
+    mesh {
+      kind = asset
       path = "models/crate_low.glb"
     }
     distance = 25m
@@ -1165,7 +1263,6 @@ model Crate {
         let document = parse_amdl(source).unwrap();
         AmdlValidator::validate(&document).unwrap();
 
-        assert_eq!(document.version, AMDL_VERSION);
         assert_eq!(document.models[0].name, "Crate");
         assert_eq!(document.models[0].sockets[0].name, "Top");
         assert_eq!(document.models[0].lods[0].index, 1);
@@ -1174,7 +1271,7 @@ model Crate {
     #[test]
     fn rejects_legacy_call_syntax() {
         let source = r#"
-amdl 2
+amdl
 model Crate {
   mesh = primitive.box(size: [1, 1, 1])
 }
@@ -1187,9 +1284,10 @@ model Crate {
     #[test]
     fn diagnostics_include_location_and_source_line() {
         let source = r#"
-amdl 2
+amdl
 model Empty {
-  rigidbody dynamic {
+  rigidbody {
+    mode = dynamic
     mass = 12kg
   }
 }
@@ -1199,5 +1297,31 @@ model Empty {
         assert_eq!(diagnostics[0].code, "AMDL_MESH_REQUIRED");
         assert!(diagnostics[0].line.is_some());
         assert!(diagnostics[0].source_line.is_some());
+    }
+
+    #[test]
+    fn repository_examples_parse() {
+        let examples = [
+            (
+                "crate.amdl",
+                include_str!("../../../examples/project/models/crate.amdl"),
+            ),
+            (
+                "tree.amdl",
+                include_str!("../../../examples/project/models/tree.amdl"),
+            ),
+            (
+                "barrel.amdl",
+                include_str!("../../../examples/project/models/barrel.amdl"),
+            ),
+        ];
+
+        for (name, source) in examples {
+            let diagnostics = diagnose_amdl(source);
+            assert!(
+                diagnostics.is_empty(),
+                "{name} produced AMDL diagnostics: {diagnostics:?}"
+            );
+        }
     }
 }

@@ -1,13 +1,24 @@
-model Barrel {
-  mesh = asset("models/barrel.glb")
-  material = ref("materials/rusted_metal.amat")
+amdl
 
-  collider capsule {
+model Barrel {
+  mesh {
+    kind = asset
+    path = "models/barrel.glb"
+  }
+
+  material {
+    kind = ref
+    path = "materials/rusted_metal.amat"
+  }
+
+  collider {
+    shape = capsule
     radius = 0.45m
     height = 1.2m
   }
 
-  rigidbody dynamic {
+  rigidbody {
+    mode = dynamic
     mass = 18kg
     friction = 0.8
     restitution = 0.2
@@ -19,7 +30,10 @@ model Barrel {
   }
 
   lod 1 {
-    mesh = asset("models/barrel_low.glb")
+    mesh {
+      kind = asset
+      path = "models/barrel_low.glb"
+    }
     distance = 25m
   }
 }

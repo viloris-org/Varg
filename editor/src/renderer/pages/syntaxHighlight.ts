@@ -46,7 +46,7 @@ const PY_RULES: TokenRule[] = [
 
 // ─── Aster Model Language ──────────────────────────────────────────────────
 
-const AMDL_KEYWORDS = /\b(amdl|model|mesh|material|collider|rigidbody|socket|lod|metadata|asset|ref|inline|primitive|static|dynamic|kinematic|true|false)\b/g;
+const AMDL_KEYWORDS = /\b(amdl|model|mesh|material|collider|rigidbody|socket|lod|metadata|kind|shape|mode|path|asset|ref|inline|primitive|box|sphere|capsule|cylinder|plane|static|dynamic|kinematic|true|false)\b/g;
 const AMDL_CONSTRUCTORS = /\bprimitive\.[A-Za-z_][A-Za-z0-9_-]*\b/g;
 const AMDL_STRING = /"(?:[^"\\]|\\.)*"/g;
 const AMDL_NUMBER = /-?\b\d+(?:\.\d+)?(?:[a-zA-Z_%]+)?\b/g;

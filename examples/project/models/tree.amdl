@@ -1,11 +1,23 @@
-model Tree {
-  mesh = asset("models/tree.glb")
-  material = ref("materials/bark.amat")
+amdl
 
-  collider cylinder {
+model Tree {
+  mesh {
+    kind = asset
+    path = "models/tree.glb"
+  }
+
+  material {
+    kind = ref
+    path = "materials/bark.amat"
+  }
+
+  collider {
+    shape = cylinder
     radius = 0.4m
     height = 3.0m
   }
 
-  rigidbody = static
+  rigidbody {
+    mode = static
+  }
 }
