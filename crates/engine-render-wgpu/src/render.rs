@@ -4,6 +4,14 @@ use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
 
 impl WgpuRenderDevice {
+    pub(crate) fn finish_validation_scope(
+        &self,
+        scope: wgpu::ErrorScopeGuard,
+        context: &str,
+    ) -> EngineResult<()> {
+        finish_validation_scope(&self.device, scope, context)
+    }
+
     pub(crate) fn prepare_render_batches(
         &mut self,
         world: &RenderWorld,
@@ -109,23 +117,26 @@ impl WgpuRenderDevice {
         let bytes_per_row = unpadded + padding;
         let total_bytes = bytes_per_row * h as u64;
 
-        let target = self
-            .targets
-            .get(&handle)
-            .ok_or_else(|| EngineError::invalid_handle("readback target missing"))?;
-
-        // Reuse pre-allocated staging buffer if dimensions match
+        // Reuse pre-allocated staging buffer if dimensions match.
         if self.readback_staging_dims != (w, h) {
+            let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             self.readback_staging = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("aster viewport readback staging"),
                 size: total_bytes,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             }));
+            self.finish_validation_scope(validation, "viewport readback staging creation")?;
             self.readback_staging_dims = (w, h);
         }
+
+        let target = self
+            .targets
+            .get(&handle)
+            .ok_or_else(|| EngineError::invalid_handle("readback target missing"))?;
         let staging = self.readback_staging.as_ref().unwrap();
 
+        let copy_validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -154,14 +165,31 @@ impl WgpuRenderDevice {
             },
         );
 
-        self.queue.submit(Some(encoder.finish()));
-
         let buffer_slice = staging.slice(..);
+        self.queue.submit(Some(encoder.finish()));
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| {
+                EngineError::other(format!(
+                    "viewport readback copy: wait for GPU failed: {error}"
+                ))
+            })?;
+        self.finish_validation_scope(copy_validation, "viewport readback copy")?;
+
+        let map_validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        self.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| {
+                EngineError::other(format!(
+                    "viewport readback map: wait for GPU failed: {error}"
+                ))
+            })?;
+        self.finish_validation_scope(map_validation, "viewport readback map")?;
+
         receiver
             .recv()
             .map_err(|_| EngineError::other("viewport readback channel closed"))?
@@ -237,8 +265,23 @@ impl WgpuRenderDevice {
             temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
         self.latest_temporal_camera = temporal_camera;
         self.reset_temporal_history = reset_history;
-        let frame_res =
-            self.encode_frame_passes(&batches, &csm, tw, th, ow, oh, true, encoder_label);
+        let enable_ssao = self.ssao_compute_pipeline.is_some();
+        let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+        let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let frame_res = self.encode_frame_passes(
+            &batches,
+            &csm,
+            tw,
+            th,
+            ow,
+            oh,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+            encoder_label,
+        );
 
         // Build resources in mutable phase, then get output_view immutably.
         let target = self
@@ -254,12 +297,19 @@ impl WgpuRenderDevice {
             });
         self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
         self.encode_hdr_forward_passes(&mut encoder, &batches);
-        self.encode_ssao_pass(&mut encoder, &frame_res);
-        self.encode_ssgi_pass(&mut encoder, &frame_res);
-        let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+        if enable_ssao {
+            self.encode_ssao_pass(&mut encoder, &frame_res);
+        }
+        if enable_ssgi {
+            self.encode_ssgi_pass(&mut encoder, &frame_res);
+        }
+        if enable_bloom {
+            let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+        }
         self.encode_post_pass(&mut encoder, &frame_res, output_view);
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_validation_scope(validation, encoder_label)?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
         self.performance_metrics = engine_render::RenderPerformanceMetrics {
             render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
@@ -287,6 +337,8 @@ impl WgpuRenderDevice {
         output_width: u32,
         output_height: u32,
         ssao_enabled: bool,
+        ssgi_enabled: bool,
+        bloom_enabled: bool,
         _encoder_label: &str,
     ) -> FrameResources {
         self.queue.write_buffer(
@@ -302,14 +354,14 @@ impl WgpuRenderDevice {
                 inv_output_width: 1.0 / output_width.max(1) as f32,
                 inv_output_height: 1.0 / output_height.max(1) as f32,
                 exposure: 1.0,
-                bloom_intensity: 0.04,
+                bloom_intensity: if bloom_enabled { 0.04 } else { 0.0 },
                 ssao_enabled: if ssao_enabled { 1.0 } else { 0.0 },
                 upscale_sharpness: if tw != output_width || th != output_height {
                     self.upscale_sharpness
                 } else {
                     0.0
                 },
-                ssgi_enabled: 1.0,
+                ssgi_enabled: if ssgi_enabled { 1.0 } else { 0.0 },
                 ssgi_intensity: SSGI_INTENSITY,
                 _pad: [0.0; 2],
             }),
@@ -350,7 +402,9 @@ impl WgpuRenderDevice {
         if ssao_enabled {
             self.ensure_ssao_output();
         }
-        self.ensure_ssgi_output();
+        if ssgi_enabled {
+            self.ensure_ssgi_output();
+        }
 
         // Pre-write cascade VP data into pre-allocated buffers.
         for cascade_idx in 0..CSM_CASCADE_COUNT {
@@ -371,7 +425,7 @@ impl WgpuRenderDevice {
             None
         };
         let ssao_view = self.ssao_output_view.clone();
-        let ssgi_bg = if self.ssgi_compute_pipeline.is_some() {
+        let ssgi_bg = if ssgi_enabled && self.ssgi_compute_pipeline.is_some() {
             Some(self.ensure_ssgi_bind_group())
         } else {
             None

@@ -242,8 +242,7 @@ impl WgpuRenderDevice {
             cpass.dispatch_workgroups(wx, wy, 1);
         }
         // Upsample
-        for i in (1..self.bloom_mip_views.len()).rev() {
-            let up_idx = i - 1;
+        for (up_idx, i) in (1..self.bloom_mip_views.len()).rev().enumerate() {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("aster bloom up"),
                 timestamp_writes: None,

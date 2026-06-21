@@ -223,6 +223,8 @@ pub(crate) struct FrameResources {
 /// A GPU resource pending deferred destruction.
 #[allow(dead_code)]
 pub(crate) enum DestroyResource {
+    /// Full render target bundle.
+    Target(GpuTarget),
     /// wgpu Texture (dropped when all GPU command buffers referencing it have completed).
     Texture(wgpu::Texture),
     /// wgpu Buffer.

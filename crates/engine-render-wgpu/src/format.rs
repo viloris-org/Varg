@@ -1,5 +1,5 @@
 use crate::uniforms::Instance;
-use engine_core::{EngineResult, HandleAllocator};
+use engine_core::{EngineError, EngineResult, HandleAllocator};
 use engine_render::{
     BufferUsage, ImageDesc, ImageFormat, ImageUsage, RenderTarget, RenderTargetDesc,
 };
@@ -18,6 +18,7 @@ pub(crate) fn create_target(
     desc: RenderTargetDesc,
 ) -> EngineResult<CreatedTarget> {
     let handle = allocator.allocate()?;
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let color_desc = ImageDesc {
         width: desc.width.max(1),
         height: desc.height.max(1),
@@ -39,8 +40,24 @@ pub(crate) fn create_target(
     } else {
         (None, None)
     };
+    finish_validation_scope(device, validation, desc.label.unwrap_or("render target"))?;
     let target = RenderTarget { handle, desc };
     Ok(CreatedTarget(color, color_view, depth, depth_view, target))
+}
+
+pub(crate) fn finish_validation_scope(
+    device: &wgpu::Device,
+    scope: wgpu::ErrorScopeGuard,
+    context: &str,
+) -> EngineResult<()> {
+    let future = scope.pop();
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| EngineError::other(format!("{context}: wait for GPU failed: {error}")))?;
+    if let Some(error) = pollster::block_on(future) {
+        return Err(EngineError::other(format!("{context}: {error}")));
+    }
+    Ok(())
 }
 
 pub(crate) fn texture_desc(desc: &ImageDesc) -> wgpu::TextureDescriptor<'_> {

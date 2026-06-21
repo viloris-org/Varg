@@ -728,6 +728,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let coord = vec2<i32>(gid.xy);
     let tex_w = i32(params.width);
     let tex_h = i32(params.height);
+    if (coord.x >= tex_w || coord.y >= tex_h) {
+        return;
+    }
     if (coord.x < 1 || coord.y < 1 || coord.x >= tex_w - 1 || coord.y >= tex_h - 1) {
         textureStore(output_tex, coord, vec4<f32>(1.0, 0.0, 0.0, 1.0));
         return;
@@ -1052,18 +1055,18 @@ fn sharpen_hdr(center: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let scaling = post.render_width != post.output_width || post.render_height != post.output_height;
-    var hdr = textureSample(hdr_tex, lin_sampler, input.uv).rgb;
+    var hdr = textureSampleLevel(hdr_tex, lin_sampler, input.uv, 0.0).rgb;
     if (scaling) {
         hdr = sharpen_hdr(reconstruct_hdr(input.uv), input.uv);
     }
-    let bloom = textureSample(bloom_tex, lin_sampler, input.uv).rgb * post.bloom_intensity;
+    let bloom = textureSampleLevel(bloom_tex, lin_sampler, input.uv, 0.0).rgb * post.bloom_intensity;
     var color = hdr + bloom;
     if (post.ssgi_enabled > 0.5) {
-        color = color + textureSample(ssgi_tex, lin_sampler, input.uv).rgb * post.ssgi_intensity;
+        color = color + textureSampleLevel(ssgi_tex, lin_sampler, input.uv, 0.0).rgb * post.ssgi_intensity;
     }
     color = color * post.exposure;
     if (post.ssao_enabled > 0.5) {
-        let ao = textureSample(ssao_tex, lin_sampler, input.uv).r;
+        let ao = textureSampleLevel(ssao_tex, lin_sampler, input.uv, 0.0).r;
         color = color * (0.5 + ao * 0.5);
     }
     color = aces_tonemap(color);

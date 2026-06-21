@@ -168,7 +168,11 @@ impl WgpuRenderDevice {
     ) -> EngineResult<RenderTarget> {
         let CreatedTarget(color, color_view, depth, depth_view, new_target) =
             create_target(&self.device, &mut self.target_allocator, desc)?;
-        self.targets.remove(&old_handle);
+        if let Some(old_target) = self.targets.remove(&old_handle) {
+            let frame = self.submitted_worlds;
+            self.destroy_queue
+                .push((frame, DestroyResource::Target(old_target)));
+        }
         self.targets.insert(
             new_target.handle,
             GpuTarget {

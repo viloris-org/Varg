@@ -77,8 +77,22 @@ impl RenderDevice for WgpuRenderDevice {
             self.latest_temporal_camera = temporal_camera;
             self.reset_temporal_history = reset_history || frame.frame_index == 0;
 
-            let frame_res =
-                self.encode_frame_passes(&batches, &csm, rw, rh, sw, sh, true, "aster surface");
+            let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let enable_ssao = self.ssao_compute_pipeline.is_some();
+            let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+            let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+            let frame_res = self.encode_frame_passes(
+                &batches,
+                &csm,
+                rw,
+                rh,
+                sw,
+                sh,
+                enable_ssao,
+                enable_ssgi,
+                enable_bloom,
+                "aster surface",
+            );
 
             let mut encoder = self
                 .device
@@ -87,11 +101,19 @@ impl RenderDevice for WgpuRenderDevice {
                 });
             self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
             self.encode_hdr_forward_passes(&mut encoder, &batches);
-            self.encode_ssao_pass(&mut encoder, &frame_res);
-            let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+            if enable_ssao {
+                self.encode_ssao_pass(&mut encoder, &frame_res);
+            }
+            if enable_ssgi {
+                self.encode_ssgi_pass(&mut encoder, &frame_res);
+            }
+            if enable_bloom {
+                let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+            }
             self.encode_post_pass(&mut encoder, &frame_res, &output_view);
 
             self.queue.submit(std::iter::once(encoder.finish()));
+            self.finish_validation_scope(validation, "aster surface")?;
             surface_frame.present();
             self.submitted_worlds = self.submitted_worlds.saturating_add(1);
             self.performance_metrics = RenderPerformanceMetrics {
@@ -123,8 +145,21 @@ impl RenderDevice for WgpuRenderDevice {
             )
         };
 
-        let frame_res =
-            self.encode_frame_passes(&batches, &csm, tw, th, ow, oh, false, "aster offscreen");
+        let enable_ssao = false;
+        let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+        let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+        let frame_res = self.encode_frame_passes(
+            &batches,
+            &csm,
+            tw,
+            th,
+            ow,
+            oh,
+            enable_ssao,
+            enable_ssgi,
+            enable_bloom,
+            "aster offscreen",
+        );
         let (temporal_camera, reset_history) =
             temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
         self.latest_temporal_camera = temporal_camera;
@@ -136,6 +171,7 @@ impl RenderDevice for WgpuRenderDevice {
             .ok_or_else(|| EngineError::invalid_handle("default wgpu target is missing"))?;
         let output_view = &target.color_view;
 
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -143,11 +179,19 @@ impl RenderDevice for WgpuRenderDevice {
             });
         self.encode_csm_shadow_passes(&mut encoder, &csm, &batches);
         self.encode_hdr_forward_passes(&mut encoder, &batches);
-        self.encode_ssao_pass(&mut encoder, &frame_res);
-        let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+        if enable_ssao {
+            self.encode_ssao_pass(&mut encoder, &frame_res);
+        }
+        if enable_ssgi {
+            self.encode_ssgi_pass(&mut encoder, &frame_res);
+        }
+        if enable_bloom {
+            let _bloom_view = self.encode_bloom_pass(&mut encoder, &frame_res);
+        }
         self.encode_post_pass(&mut encoder, &frame_res, output_view);
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_validation_scope(validation, "aster offscreen")?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
         self.performance_metrics = RenderPerformanceMetrics {
             render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
@@ -257,7 +301,11 @@ impl RenderDevice for WgpuRenderDevice {
     }
 
     fn destroy_render_target(&mut self, target: RenderTarget) {
-        self.targets.remove(&target.handle);
+        if let Some(gpu_target) = self.targets.remove(&target.handle) {
+            let frame = self.submitted_worlds;
+            self.destroy_queue
+                .push((frame, DestroyResource::Target(gpu_target)));
+        }
     }
 
     fn create_image(&mut self, desc: ImageDesc) -> EngineResult<ImageHandle> {
