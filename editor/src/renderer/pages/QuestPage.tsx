@@ -32,7 +32,6 @@ import {
   requestQuestQuickFix,
   transitionQuest,
   updateQuestIntent,
-  updateQuestExecutionConfig,
   updateQuestKnowledgeContext,
   updateQuestSpec,
   updateQuestTasks,
@@ -85,6 +84,7 @@ interface Props {
 }
 
 type QuestPanel = 'overview' | 'intent' | 'spec' | 'review' | 'knowledge' | 'artifact';
+type QuestQueueGroup = 'needs_action' | 'running' | 'recent' | 'archived';
 type VoiceInputStatus = 'idle' | 'connecting' | 'recording';
 type QuestMenuAction = 'open' | 'rename' | 'open_editor' | 'branch' | 'export' | 'cancel' | 'archive' | 'reopen' | 'delete';
 type SpecMode = 'edit' | 'preview';
@@ -161,21 +161,6 @@ interface QuestArtifactSelection {
   path?: string;
 }
 
-const ACTIVE_STATUSES: QuestStatus[] = [
-  'draft',
-  'clarifying',
-  'specified',
-  'planning',
-  'prepared',
-  'running',
-  'waiting_for_user',
-  'validating',
-  'repairing',
-  'ready_for_review',
-  'applying',
-  'blocked',
-];
-
 function cn(...classes: Array<string | false | null | undefined>): string {
   return classes.filter(Boolean).join(' ');
 }
@@ -208,16 +193,11 @@ const questInputSuggestItemClass = (active: boolean) => cn(
   active && 'bg-[var(--bg-hover)] text-[var(--text-primary)]',
   '[&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_small]:text-[10px] [&_small]:text-[var(--text-muted)] [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_kbd]:font-mono [&_kbd]:text-[10px] [&_kbd]:text-[var(--text-muted)]',
 );
-const questInputTokenBoxClass = 'flex min-w-0 items-end gap-1.5';
+const questInputTokenBoxClass = 'grid min-w-0 gap-1.5';
+const questInputTextRowClass = 'flex min-w-0 items-end gap-1.5';
 const questInputFileTokenClass = 'inline-grid max-w-[220px] grid-cols-[14px_minmax(0,1fr)_16px] items-center gap-1.5 rounded-[6px] border border-[var(--border-light)] bg-[var(--bg-hover)] px-2 py-[5px] text-[11px] text-[var(--text-secondary)] [&_button]:grid [&_button]:h-4 [&_button]:w-4 [&_button]:cursor-pointer [&_button]:place-items-center [&_button]:rounded [&_button]:border-0 [&_button]:bg-transparent [&_button]:p-0 [&_button]:text-[var(--text-muted)] hover:[&_button]:text-[var(--text-primary)] [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap';
-const questInputTextareaClass = 'max-h-[150px] min-h-[30px] min-w-0 flex-1 resize-none border-0 bg-transparent py-[6px] text-[12px] leading-[1.45] text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]';
-const executionSelectClass = 'h-8 min-w-0 rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-2 text-[11px] text-[var(--text-primary)] outline-none disabled:cursor-default disabled:opacity-45';
+const questInputTextareaClass = 'max-h-[150px] min-h-[28px] min-w-0 flex-1 resize-none border-0 bg-transparent py-[5px] text-[12px] leading-[1.45] text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]';
 const executionToggleClass = 'inline-flex h-8 items-center gap-[7px] rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] text-[11px] font-medium text-[var(--text-secondary)] [&_input]:m-0 [&_input]:h-[13px] [&_input]:w-[13px]';
-const modeSwitchClass = 'inline-grid h-8 grid-cols-2 rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] p-0.5';
-const modeSwitchButtonClass = (active: boolean) => cn(
-  'cursor-pointer rounded-[4px] border-0 bg-transparent px-2 text-[11px] font-semibold text-[var(--text-muted)] disabled:cursor-default disabled:opacity-45',
-  active && 'bg-[var(--bg-active)] text-[var(--text-primary)] shadow-[var(--shadow-sm)]',
-);
 const markdownPreviewClass = [
   'min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--border-light)] bg-[var(--bg-base)] px-[26px] py-[22px] text-[12px] leading-[1.7] text-[var(--text-primary)]',
   '[&_h1]:mb-[0.65em] [&_h1]:mt-0 [&_h1]:text-[22px] [&_h1]:font-semibold [&_h1]:leading-[1.25]',
@@ -253,29 +233,27 @@ const questClasses = {
   introCard: 'mt-16 grid w-[min(640px,calc(100vw-440px))] grid-cols-[96px_minmax(0,1fr)] gap-[18px] rounded-lg border border-dashed border-[var(--border-light)] bg-[var(--bg-surface)] p-3 text-[var(--text-secondary)] max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:grid-cols-1 max-[900px]:min-w-0 [&>svg]:h-[70px] [&>svg]:w-24 [&>svg]:rounded-md [&>svg]:bg-[var(--brand-dim)] [&>svg]:p-4 [&>svg]:text-[var(--brand)] [&_p]:m-0 [&_p]:text-[12px] [&_p]:leading-[1.5] [&_p]:text-[var(--text-muted)] [&_strong]:mb-2 [&_strong]:mt-1 [&_strong]:block [&_strong]:text-[14px] [&_strong]:text-[var(--text-primary)]',
   liveActivityList: 'mt-4 w-[min(800px,calc(100vw-360px))] min-w-[min(800px,calc(100vw-360px))] border-l border-[var(--border)] py-1 pl-4 max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:min-w-0',
   liveActivityEntry: 'relative flex min-h-[22px] items-center gap-2 text-[11px] leading-none text-[var(--text-muted)] before:absolute before:-left-[19px] before:top-1/2 before:h-[7px] before:w-[7px] before:-translate-y-1/2 before:rounded-full before:border before:border-[var(--text-muted)] before:bg-[var(--bg-base)] [&_b]:font-medium [&_b]:text-[var(--text-secondary)] [&_span]:min-w-0 [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap [&_svg]:h-[13px] [&_svg]:w-[13px] [&_svg]:shrink-0',
-  workspace: 'grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--bg-surface)]',
-  header: 'flex min-h-[78px] items-center justify-between gap-[18px] border-b border-[var(--border)] bg-[var(--bg-surface)] px-[18px] py-[10px] max-[900px]:flex-col max-[900px]:items-start [&_h1]:mb-[3px] [&_h1]:mt-1 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h1]:text-[var(--text-primary)] [&_p]:m-0 [&_p]:max-w-[820px] [&_p]:text-[11px] [&_p]:leading-[1.45] [&_p]:text-[var(--text-secondary)]',
-  projectLine: 'flex items-center gap-[5px] font-mono text-[10px] text-[var(--text-muted)] [&_svg]:w-[9px]',
-  titleEdit: 'my-[7px] flex items-center gap-[6px] [&_button]:inline-flex [&_button]:h-[30px] [&_button]:cursor-pointer [&_button]:items-center [&_button]:gap-[5px] [&_button]:rounded-[5px] [&_button]:border [&_button]:border-[var(--border-light)] [&_button]:bg-[var(--bg-surface)] [&_button]:px-[9px] [&_button]:text-[9px] [&_button]:font-semibold [&_button]:text-[var(--text-secondary)] [&_button:disabled]:cursor-default [&_button:disabled]:opacity-40 [&_input]:h-[31px] [&_input]:w-[min(520px,50vw)] [&_input]:rounded-[5px] [&_input]:border [&_input]:border-[#52525b] [&_input]:bg-[#0d0e12] [&_input]:px-[10px] [&_input]:text-[15px] [&_input]:font-bold [&_input]:text-[#f1f5f9] [&_input]:outline-none',
-  headerActions: 'flex flex-wrap items-center justify-end gap-[6px] max-[900px]:justify-start',
-  cockpit: 'grid min-h-0 grid-cols-[minmax(420px,1fr)_minmax(380px,44%)] overflow-hidden bg-[var(--bg-surface)] max-[900px]:grid-cols-1 max-[900px]:grid-rows-[minmax(0,1fr)_minmax(360px,44vh)]',
-  runStream: 'grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_52px] border-r border-[var(--border)] bg-[var(--bg-base)] max-[900px]:border-b max-[900px]:border-r-0',
-  streamPrompt: 'mx-[22px] mb-2 mt-4 rounded-[7px] border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-[9px] text-[13px] text-[var(--text-primary)]',
+  workspace: 'grid min-h-0 min-w-0 overflow-hidden bg-[var(--bg-surface)]',
+  cockpit: 'grid min-h-0 grid-cols-[minmax(480px,1fr)_minmax(320px,36%)] overflow-hidden bg-[var(--bg-surface)] max-[900px]:grid-cols-1 max-[900px]:grid-rows-[minmax(0,1fr)_minmax(320px,42vh)]',
+  runStream: 'grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] border-r border-[var(--border)] bg-[var(--bg-base)] max-[900px]:border-b max-[900px]:border-r-0',
+  streamPrompt: 'mx-auto mb-4 mt-4 w-[min(720px,calc(100%-44px))] rounded-[7px] border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-[9px] text-[12px] leading-[1.45] text-[var(--text-secondary)]',
   streamList: 'min-h-0 overflow-auto px-[22px] pb-[22px]',
-  streamEntry: 'grid grid-cols-[16px_minmax(0,1fr)] gap-[9px] py-[3px] [&>div]:min-w-0 [&_button]:flex [&_button]:h-8 [&_button]:w-full [&_button]:cursor-default [&_button]:items-center [&_button]:gap-2 [&_button]:rounded-[5px] [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:text-left [&_button]:font-[inherit] [&_button]:outline-none [&_button:enabled]:cursor-pointer [&_button:enabled:hover]:bg-[var(--bg-hover)] [&_pre]:mt-1 [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:min-w-0 [&_small]:shrink-0 [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
+  streamEntry: 'grid grid-cols-[16px_minmax(0,1fr)] gap-[9px] py-[3px] [&>div]:min-w-0 [&_button]:flex [&_button]:min-h-8 [&_button]:w-full [&_button]:cursor-default [&_button]:items-center [&_button]:gap-2 [&_button]:rounded-[5px] [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:py-[6px] [&_button]:text-left [&_button]:font-[inherit] [&_button]:outline-none [&_button:enabled]:cursor-pointer [&_button:enabled:hover]:bg-[var(--bg-hover)] [&_pre]:mt-1 [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:min-w-0 [&_small]:shrink-0 [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
   streamArrow: 'ml-auto h-[13px] w-[13px] shrink-0 text-[var(--text-muted)] opacity-0 transition-[opacity,transform] duration-150 group-hover:opacity-100',
   streamEvidence: 'ml-2 mr-1 pb-2',
   nextEntry: '[&_strong]:text-[var(--brand)]',
-  liveEntry: '[&_strong]:text-[var(--brand)]',
+  liveEntry: 'rounded-[6px] bg-[linear-gradient(90deg,transparent,rgba(34,197,94,0.08),transparent)] bg-[length:220%_100%] [animation:quest-active-sheen_2.4s_linear_infinite] [&_strong]:text-[var(--brand)]',
   timelineDot: 'relative mt-4 h-[9px] w-[9px] rounded-full border border-[var(--text-muted)] bg-[var(--bg-surface)] after:absolute after:left-1 after:top-[10px] after:h-[calc(100%+34px)] after:w-px after:bg-[var(--border)] after:content-[""]',
   timelineDotLast: 'after:hidden',
   timelineDotNext: 'border-[var(--text-primary)]',
   timelineDotLive: 'border-[var(--brand)] bg-[var(--brand)] shadow-[0_0_0_3px_var(--brand-dim)] [animation:quest-live-pulse_1.7s_ease-out_infinite]',
   reviewChip: 'ml-6 mt-3 inline-flex w-max cursor-pointer items-center gap-[6px] rounded-md border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] py-[7px] text-[12px] text-[var(--success)] [&_span]:text-[var(--danger)]',
-  steerBar: 'relative grid grid-cols-[minmax(0,1fr)_34px] items-end gap-3 border-t border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[11px] text-[var(--text-muted)]',
+  steerBar: 'relative mx-auto mb-4 grid w-[min(720px,calc(100%-44px))] grid-cols-[minmax(0,1fr)_34px] items-end gap-3 rounded-[7px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-3 py-2 text-[11px] text-[var(--text-muted)] shadow-[var(--shadow-sm)]',
+  composerToolbar: 'flex min-w-0 items-center gap-1 pt-px text-[10px] text-[var(--text-muted)]',
   sendButton: 'grid h-[30px] w-[30px] cursor-pointer place-items-center rounded-[5px] border border-[var(--brand)] bg-[var(--brand)] text-[var(--bg-base)] shadow-[0_0_0_1px_var(--brand-dim)] hover:enabled:border-[var(--brand-hover)] hover:enabled:bg-[var(--brand-hover)] disabled:cursor-default disabled:opacity-45 [&_svg]:stroke-[2.25]',
-  rightPanel: 'grid min-h-0 min-w-0 grid-rows-[37px_minmax(0,1fr)] bg-[var(--bg-surface)]',
-  panelTabs: 'flex min-w-0 border-b border-[var(--border)] bg-[var(--bg-base)]',
+  rightPanel: 'grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] bg-[var(--bg-surface)]',
+  artifactHeader: 'grid gap-2 border-b border-[var(--border)] bg-[var(--bg-base)] px-3 py-3 [&_h2]:m-0 [&_h2]:text-[12px] [&_h2]:font-semibold [&_h2]:text-[var(--text-primary)] [&_p]:m-0 [&_p]:text-[10px] [&_p]:leading-[1.35] [&_p]:text-[var(--text-muted)]',
+  panelTabs: 'flex min-w-0 gap-1 overflow-x-auto',
   panelTab: 'inline-flex h-[37px] min-w-[42px] cursor-pointer items-center justify-center gap-[6px] border-0 border-r border-[var(--border)] border-b-2 border-b-transparent bg-transparent px-[12px] text-[12px] text-[var(--text-secondary)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_svg]:shrink-0',
   panelTabActive: 'min-w-[118px] border-b-[var(--brand)] bg-[var(--brand-dim)] text-[var(--brand)] shadow-[inset_0_-1px_0_var(--brand),inset_0_1px_0_rgba(255,255,255,0.04)]',
   overview: cn('min-h-0 overflow-auto p-4', panelSection),
@@ -295,7 +273,7 @@ const questClasses = {
   errorModal: 'fixed inset-0 z-[90] grid place-items-center bg-[rgba(15,23,42,0.42)] p-6 [&>div]:grid [&>div]:max-h-[min(520px,calc(100vh-48px))] [&>div]:w-[min(680px,100%)] [&>div]:grid-rows-[auto_minmax(0,1fr)_auto] [&>div]:rounded-lg [&>div]:border [&>div]:border-[var(--border-light)] [&>div]:bg-[var(--bg-surface)] [&>div]:text-[var(--text-primary)] [&>div]:shadow-[var(--shadow-lg)] [&_footer]:flex [&_footer]:items-center [&_footer]:justify-end [&_footer]:gap-[10px] [&_footer]:border-t [&_footer]:border-[var(--border)] [&_footer]:px-[14px] [&_footer]:py-3 [&_header]:flex [&_header]:items-center [&_header]:justify-between [&_header]:gap-[10px] [&_header]:border-b [&_header]:border-[var(--border)] [&_header]:px-[14px] [&_header]:py-3 [&_header_span]:flex [&_header_span]:items-center [&_header_span]:gap-2 [&_header_span]:text-[13px] [&_header_span]:font-bold [&_header_span]:text-[var(--danger)] [&_pre]:m-0 [&_pre]:overflow-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:bg-[var(--bg-base)] [&_pre]:p-[14px] [&_pre]:font-mono [&_pre]:text-[11px] [&_pre]:leading-[1.6] [&_pre]:text-[var(--text-secondary)]',
   modalButton: 'inline-flex h-[30px] cursor-pointer items-center gap-[6px] rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] text-[11px] font-semibold text-[var(--text-primary)]',
   group: 'select-none px-3 pb-[10px] pt-[6px] [&>header]:flex [&>header]:items-center [&>header]:justify-between [&>header]:px-1 [&>header]:pb-2 [&>header]:pt-[7px] [&>header]:text-[12px] [&>header]:font-medium [&>header]:text-[var(--text-secondary)] [&>header_b]:text-[10px] [&>header_b]:text-[var(--text-muted)] [&>p]:px-[22px] [&>p]:py-2 [&>p]:text-[11px] [&>p]:text-[var(--text-muted)]',
-  groupButton: 'mb-0.5 grid w-full select-none cursor-pointer grid-cols-[8px_minmax(0,1fr)] items-start gap-[9px] rounded-[7px] border border-transparent bg-transparent px-[7px] py-2 text-left text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)] [&_div]:min-w-0 [&_small]:block [&_small]:overflow-hidden [&_small]:select-none [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_small]:text-[10px] [&_small]:text-[var(--text-muted)] [&_strong]:mb-1 [&_strong]:block [&_strong]:overflow-hidden [&_strong]:select-none [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
+  groupButton: 'mb-0.5 grid w-full select-none cursor-pointer grid-cols-[8px_minmax(0,1fr)] items-start gap-[9px] rounded-[7px] border border-transparent bg-transparent px-[7px] py-2 text-left text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)] [&_div]:min-w-0 [&_em]:not-italic [&_em]:rounded-full [&_em]:bg-[var(--warning-dim)] [&_em]:px-1.5 [&_em]:py-[2px] [&_em]:text-[9px] [&_em]:font-medium [&_em]:text-[var(--warning)] [&_small]:block [&_small]:overflow-hidden [&_small]:select-none [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_small]:text-[10px] [&_small]:text-[var(--text-muted)] [&_strong]:mb-1 [&_strong]:block [&_strong]:overflow-hidden [&_strong]:select-none [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
   groupButtonActive: 'border-[var(--border-light)] bg-[var(--bg-hover)]',
   knowledgeRow: 'grid gap-2 rounded-md border border-[var(--border-light)] bg-[var(--bg-surface)] p-[10px] [&_footer]:flex [&_footer]:items-center [&_footer]:justify-start [&_footer]:gap-2 [&_footer_button]:inline-flex [&_footer_button]:h-7 [&_footer_button]:cursor-pointer [&_footer_button]:items-center [&_footer_button]:gap-[5px] [&_footer_button]:rounded-[5px] [&_footer_button]:border [&_footer_button]:border-[var(--border-light)] [&_footer_button]:bg-[var(--bg-base)] [&_footer_button]:px-[9px] [&_footer_button]:text-[10px] [&_footer_button]:text-[var(--text-secondary)] [&_header]:flex [&_header]:items-center [&_header]:justify-between [&_header]:gap-2 [&_header_b]:font-mono [&_header_b]:text-[9px] [&_header_b]:text-[var(--text-muted)] [&_header_span]:text-[10px] [&_header_span]:font-bold [&_header_span]:uppercase [&_header_span]:text-[var(--text-secondary)] [&_p]:m-0 [&_p]:text-[12px] [&_p]:leading-[1.45] [&_p]:text-[var(--text-primary)] [&_small]:text-[10px] [&_small]:text-[var(--text-muted)]',
 };
@@ -311,6 +289,15 @@ const panelTabs: Array<{
   { id: 'review', labelKey: 'quest_tab_review', icon: <IconCheck /> },
   { id: 'knowledge', labelKey: 'quest_tab_knowledge', icon: <IconSparkles /> },
 ];
+
+const queueGroupOrder: QuestQueueGroup[] = ['needs_action', 'running', 'recent', 'archived'];
+
+const queueGroupLabels: Record<QuestQueueGroup, string> = {
+  needs_action: 'Needs action',
+  running: 'Running',
+  recent: 'Recent',
+  archived: 'Archived',
+};
 
 function statusTextClass(status: QuestStatus | string): string {
   if (status === 'completed' || status === 'approved') return 'text-[#16a34a]';
@@ -349,6 +336,7 @@ function QuestDropdown({
   widthClass = 'w-full',
   menuWidthClass,
   align = 'left',
+  placement = 'bottom',
 }: {
   value: string;
   options: QuestSelectOption[];
@@ -358,6 +346,7 @@ function QuestDropdown({
   widthClass?: string;
   menuWidthClass?: string;
   align?: 'left' | 'right';
+  placement?: 'top' | 'bottom';
 }) {
   const [open, setOpen] = useState(false);
   const selectedOption = options.find(option => option.value === value) ?? options[0];
@@ -374,8 +363,8 @@ function QuestDropdown({
       <button
         type="button"
         className={cn(
-          'flex min-w-0 cursor-pointer items-center justify-between gap-2 rounded-[5px] border-0 bg-transparent text-left text-[11px] font-medium text-[var(--text-secondary)] outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-default disabled:opacity-45',
-          compact ? 'h-7 px-2' : 'h-8 w-full border border-[var(--border-light)] bg-[var(--bg-surface)] px-2',
+          'flex min-w-0 cursor-pointer items-center justify-between rounded-[5px] border-0 bg-transparent text-left text-[11px] font-medium text-[var(--text-secondary)] outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-default disabled:opacity-45',
+          compact ? 'h-[18px] gap-0.5 px-0.5 text-[9px]' : 'h-8 w-full gap-2 border border-[var(--border-light)] bg-[var(--bg-surface)] px-2',
         )}
         onClick={() => setOpen(current => !current)}
         disabled={disabled || options.length === 0}
@@ -383,11 +372,19 @@ function QuestDropdown({
         <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
           {selectedOption?.label ?? 'No options'}
         </span>
-        <IconChevronDown className={cn('shrink-0 text-[var(--text-muted)]', open && 'rotate-180')} size={compact ? 12 : 13} />
+        <IconChevronDown
+          className={cn(
+            'shrink-0 text-[var(--text-muted)]',
+            open && placement === 'bottom' && 'rotate-180',
+            !open && placement === 'top' && 'rotate-180',
+          )}
+          size={compact ? 8 : 13}
+        />
       </button>
       {open && (
         <div className={cn(
-          'absolute top-[calc(100%+4px)] z-30 flex max-h-[240px] min-w-full flex-col overflow-auto rounded-[7px] border border-[var(--border-light)] bg-[var(--bg-elevated)] p-1 shadow-[var(--shadow-md)]',
+          'absolute z-30 flex max-h-[240px] min-w-full flex-col overflow-auto rounded-[7px] border border-[var(--border-light)] bg-[var(--bg-elevated)] p-1 shadow-[var(--shadow-md)]',
+          placement === 'top' ? 'bottom-[calc(100%+4px)]' : 'top-[calc(100%+4px)]',
           align === 'right' ? 'right-0' : 'left-0',
           menuWidthClass,
         )}>
@@ -516,22 +513,32 @@ function toolCallLabel(delta: string): string | null {
   }
 }
 
-function statusAction(status: QuestStatus): { labelKey: string; next: QuestStatus } | null {
-  switch (status) {
-    case 'running':
-      return { labelKey: 'quest_action_pause', next: 'waiting_for_user' };
-    case 'waiting_for_user':
-    case 'blocked':
-      return { labelKey: 'quest_action_resume', next: 'running' };
-    case 'ready_for_review':
-      return { labelKey: 'quest_action_accept', next: 'completed' };
-    default:
-      return null;
-  }
+function defaultPanelForQuest(detail: QuestDetail): QuestPanel {
+  if (detail.status === 'draft' || detail.status === 'specified') return 'spec';
+  if (detail.status === 'ready_for_review' && detail.review) return 'review';
+  return 'overview';
 }
 
-function defaultPanelForQuest(detail: QuestDetail): QuestPanel {
-  return detail.status === 'draft' || detail.status === 'specified' ? 'spec' : 'overview';
+function queueGroupForQuest(status: QuestStatus): QuestQueueGroup {
+  if (['clarifying', 'waiting_for_user', 'blocked', 'ready_for_review', 'draft', 'specified'].includes(status)) {
+    return 'needs_action';
+  }
+  if (['planning', 'prepared', 'running', 'validating', 'repairing', 'applying'].includes(status)) {
+    return 'running';
+  }
+  if (['archived', 'canceled'].includes(status)) {
+    return 'archived';
+  }
+  return 'recent';
+}
+
+function statusBadgeLabel(status: QuestStatus): string {
+  if (status === 'ready_for_review') return 'Review';
+  if (status === 'waiting_for_user' || status === 'clarifying') return 'Action Required';
+  if (status === 'running' || status === 'validating' || status === 'repairing' || status === 'applying') return 'Running';
+  if (status === 'blocked') return 'Blocked';
+  if (status === 'completed') return 'Done';
+  return status.replaceAll('_', ' ');
 }
 
 function progressItems(
@@ -761,10 +768,21 @@ export default function QuestPage({
   }, [reportError]);
 
   const visibleQuests = useMemo(() => {
-    const active = quests.filter(quest => ACTIVE_STATUSES.includes(quest.status));
-    const history = quests.filter(quest => !ACTIVE_STATUSES.includes(quest.status));
-    return { active, history };
+    return quests.reduce<Record<QuestQueueGroup, QuestRecord[]>>((groups, quest) => {
+      groups[queueGroupForQuest(quest.status)].push(quest);
+      return groups;
+    }, {
+      needs_action: [],
+      running: [],
+      recent: [],
+      archived: [],
+    });
   }, [quests]);
+
+  const effectiveProjectPath = useMemo(
+    () => currentProjectPath ?? selected?.project.path ?? quests[0]?.project.path ?? null,
+    [currentProjectPath, quests, selected?.project.path],
+  );
 
   const modelSelectOptions = useMemo<QuestSelectOption[]>(() => {
     if (modelOptions.length === 0) {
@@ -814,6 +832,19 @@ export default function QuestPage({
     }
   }, [reportError, resetReviewSelection, syncQuestDrafts]);
 
+  const beginNewQuest = useCallback(async () => {
+    if (!effectiveProjectPath) return;
+    setError(null);
+    try {
+      if (!currentProjectPath || currentProjectPath !== effectiveProjectPath) {
+        await rpc('hub/open_project', { path: effectiveProjectPath });
+      }
+      setSelected(null);
+    } catch (reason) {
+      reportError(reason);
+    }
+  }, [currentProjectPath, effectiveProjectPath, reportError]);
+
   const create = useCallback(async () => {
     if (!goal.trim() || rewritingPrompt) return;
     setBusy(true);
@@ -828,6 +859,9 @@ export default function QuestPage({
       startedAt,
     }]);
     try {
+      if (effectiveProjectPath && (!currentProjectPath || currentProjectPath !== effectiveProjectPath)) {
+        await rpc('hub/open_project', { path: effectiveProjectPath });
+      }
       const detail = await createQuest('', goal.trim(), {
         mode: questMode,
         model_config: {
@@ -879,7 +913,7 @@ export default function QuestPage({
       setLiveQuestActivities([]);
       setBusy(false);
     }
-  }, [goal, modelConfig, modelOptions, questMode, refreshList, rewritingPrompt, syncQuestDrafts]);
+  }, [currentProjectPath, effectiveProjectPath, goal, modelConfig, modelOptions, questMode, refreshList, refreshKnowledge, reportError, resetReviewSelection, rewritingPrompt, syncQuestDrafts]);
 
   const rewritePrompt = useCallback(async () => {
     if (rewritingPrompt) {
@@ -928,7 +962,7 @@ export default function QuestPage({
       stopVoiceInput();
       return;
     }
-    if (!canUseOpenAIVoiceInput || !currentProjectPath) return;
+    if (!canUseOpenAIVoiceInput || !effectiveProjectPath) return;
     setError(null);
     setVoiceInputStatus('connecting');
     try {
@@ -1029,7 +1063,7 @@ export default function QuestPage({
       stopVoiceInput();
       reportError(reason);
     }
-  }, [canUseOpenAIVoiceInput, currentProjectPath, reportError, stopVoiceInput, voiceInputStatus]);
+  }, [canUseOpenAIVoiceInput, effectiveProjectPath, reportError, stopVoiceInput, voiceInputStatus]);
 
   const saveSpec = useCallback(async () => {
     if (!selected) return;
@@ -1095,33 +1129,6 @@ export default function QuestPage({
       setBusy(false);
     }
   }, [intentDraft, refreshList, selected]);
-
-  const saveExecutionConfig = useCallback(async () => {
-    if (!selected) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const detail = await updateQuestExecutionConfig(
-        selected.id,
-        questMode,
-        {
-          ...modelConfig,
-          provider: modelOptions.find(model => model.id === modelConfig.model)?.provider ?? modelConfig.provider,
-        },
-        {
-          ...selected.autonomy,
-          workspace_writes_automatic: true,
-          active_project_apply_requires_approval: true,
-        },
-      );
-      syncQuestDrafts(detail);
-      await refreshList(detail.id);
-    } catch (reason) {
-      reportError(reason);
-    } finally {
-      setBusy(false);
-    }
-  }, [modelConfig, modelOptions, questMode, refreshList, reportError, selected, syncQuestDrafts]);
 
   const execute = useCallback(async () => {
     if (!selected) return;
@@ -1316,7 +1323,6 @@ export default function QuestPage({
     }
   }, [deleteQuestById, onOpenEditor, refreshList, reportError, resetReviewSelection, selectQuestById, syncQuestDrafts]);
 
-  const action = selected ? statusAction(selected.status) : null;
   const artifactFor = useCallback((
     kind: QuestEditorArtifact['kind'],
     label: string,
@@ -1873,20 +1879,40 @@ export default function QuestPage({
           <button className={cn(questClasses.topNavButton, questClasses.topNavButtonActive)}>{t('quest_title')}</button>
         </nav>
         <div className={questClasses.globalActions}>
-          <button className={buttonBase} onClick={onCloseProject} title={t('quest_close_project')}><IconX /></button>
+          {selected ? (
+            <button
+              className={buttonBase}
+              onClick={() => onOpenEditor(
+                selected.project.path,
+                artifactFor('intent', t('quest_artifact_intent'), selected.intent_path),
+              )}
+            >
+              <IconCode /> {t('quest_open_editor')}
+            </button>
+          ) : (
+            <button className={buttonBase} onClick={onCloseProject} title={t('quest_close_project')}><IconX /></button>
+          )}
         </div>
       </header>
 
       <div className={questClasses.layout}>
         <aside className={questClasses.sidebar}>
           <div className={questClasses.sidebarHeading}>
-            <button className={questClasses.newButton} onClick={() => setSelected(null)} disabled={!currentProjectPath}>
+            <button className={questClasses.newButton} onClick={beginNewQuest} disabled={!effectiveProjectPath}>
               <IconPlus /> {t('quest_new')} <kbd>Ctrl N</kbd>
             </button>
           </div>
 
-          <QuestGroup label={t('quest_group_active')} quests={visibleQuests.active} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
-          <QuestGroup label={t('quest_group_history')} quests={visibleQuests.history} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
+          {queueGroupOrder.map(group => (
+            <QuestGroup
+              key={group}
+              label={queueGroupLabels[group]}
+              quests={visibleQuests[group]}
+              selectedId={selected?.id}
+              onSelect={selectQuest}
+              onMenuAction={runQuestMenuAction}
+            />
+          ))}
           <div className={questClasses.sidebarFooter}>
             <button onClick={() => setPanel('knowledge')}>{t('quest_knowledge')} <b>{knowledge.filter(entry => entry.status === 'pending').length}</b></button>
             <button disabled>{t('quest_marketplace')}</button>
@@ -1899,7 +1925,7 @@ export default function QuestPage({
             <h1 className="m-0 mb-3 text-[clamp(28px,3vw,40px)] font-[650] leading-[1.1] text-[var(--text-primary)]">{t('quest_home_title')}</h1>
             <div className={questClasses.startLine}>
               <span>{t('quest_start_in')}</span>
-              <b>{currentProjectPath ? 'Aster' : t('quest_no_project')}</b>
+              <b>{effectiveProjectPath ? 'Aster' : t('quest_no_project')}</b>
               <span>{t('quest_local')}</span>
               <span>main</span>
             </div>
@@ -1910,13 +1936,13 @@ export default function QuestPage({
                 onKeyDown={event => {
                   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                     event.preventDefault();
-                    if (!busy && !rewritingPrompt && goal.trim() && currentProjectPath) {
+                    if (!busy && !rewritingPrompt && goal.trim() && effectiveProjectPath) {
                       create();
                     }
                   }
                 }}
                 placeholder={t('quest_goal_placeholder')}
-                disabled={!currentProjectPath}
+                disabled={!effectiveProjectPath}
               />
               <footer>
                 <div className="flex min-w-0 flex-1 items-center gap-0 text-[12px] text-[var(--text-secondary)]">
@@ -1966,7 +1992,7 @@ export default function QuestPage({
                       voiceInputStatus === 'recording' && 'bg-[var(--danger-dim)] text-[var(--danger)]',
                     )}
                     onClick={startOpenAIVoiceInput}
-                    disabled={!canUseOpenAIVoiceInput || voiceInputStatus === 'connecting' || !currentProjectPath}
+                    disabled={!canUseOpenAIVoiceInput || voiceInputStatus === 'connecting' || !effectiveProjectPath}
                     title={
                       canUseOpenAIVoiceInput
                         ? voiceInputStatus === 'recording'
@@ -1978,7 +2004,7 @@ export default function QuestPage({
                   >
                     <VoiceInputIcon status={voiceInputStatus} />
                   </button>
-                <button className={questClasses.promptSubmit} onClick={create} disabled={busy || rewritingPrompt || !goal.trim() || !currentProjectPath} title={t('quest_create')}>
+                <button className={questClasses.promptSubmit} onClick={create} disabled={busy || rewritingPrompt || !goal.trim() || !effectiveProjectPath} title={t('quest_create')}>
                   {busy ? <QuestLoader /> : <IconSend />}
                 </button>
                 </div>
@@ -1995,68 +2021,10 @@ export default function QuestPage({
           </main>
         ) : (
           <main className={questClasses.workspace}>
-            <header className={questClasses.header}>
-              <div>
-                <div className={questClasses.projectLine}>
-                  <span>{selected.project.name}</span>
-                  <IconChevronRight />
-                  <span>{selected.id}</span>
-                  {selected.branch_of && (
-                    <>
-                      <IconChevronRight />
-                      <span>{t_fmt('quest_branched_from', { id: selected.branch_of })}</span>
-                    </>
-                  )}
-                </div>
-                {renaming ? (
-                  <div className={questClasses.titleEdit}>
-                    <input
-                      value={titleDraft}
-                      onChange={event => setTitleDraft(event.target.value)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter') rename();
-                        if (event.key === 'Escape') {
-                          setTitleDraft(selected.title);
-                          setRenaming(false);
-                        }
-                      }}
-                      autoFocus
-                    />
-                    <button onClick={rename} disabled={busy || !titleDraft.trim()}><IconCheck /> {t('btn_save')}</button>
-                    <button onClick={() => { setTitleDraft(selected.title); setRenaming(false); }}><IconX /></button>
-                  </div>
-                ) : (
-                  <h1>{selected.title}</h1>
-                )}
-                <p>{selected.goal}</p>
-              </div>
-              <div className={questClasses.headerActions}>
-                <span className={cn('rounded-full border border-current px-2 py-[5px] text-[10px] font-extrabold uppercase', statusTextClass(selected.status))}>{selected.status}</span>
-                <button className={buttonBase} onClick={() => onOpenEditor(
-                  selected.project.path,
-                  artifactFor('intent', t('quest_artifact_intent'), selected.intent_path),
-                )}><IconCode /> {t('quest_open_editor')}</button>
-                {action && (
-                  <button
-                    className={buttonBase}
-                    onClick={() => action.labelKey === 'quest_action_resume'
-                      ? continueSelectedQuest('Resume Quest from current evidence')
-                      : transition(action.next)}
-                    disabled={busy}
-                  >
-                    {t(action.labelKey)}
-                  </button>
-                )}
-                {selected.status === 'ready_for_review' && (
-                  <button className={buttonBase} onClick={rejectSelectedQuest} disabled={busy}>{t('quest_reject')}</button>
-                )}
-              </div>
-            </header>
-
             <section className={questClasses.cockpit}>
               <div className={questClasses.runStream}>
-                <div className={questClasses.streamPrompt}>{selected.goal}</div>
                 <div className={questClasses.streamList}>
+                  <div className={questClasses.streamPrompt}>{selected.goal}</div>
                   <article className={questClasses.streamEntry}>
                     <span className={questClasses.timelineDot} />
                     <div>
@@ -2143,7 +2111,7 @@ export default function QuestPage({
                     </article>
                   )}
                   {selected.review && (
-                    <button className={questClasses.reviewChip} onClick={() => setPanel('review')}>
+                    <button className={questClasses.reviewChip} onClick={() => { setArtifact(null); setPanel('review'); }}>
                       <IconCheck /> {t('quest_tab_review')} +{selected.review.changed_files.reduce((sum, file) => sum + file.additions, 0)}
                       <span>-{selected.review.changed_files.reduce((sum, file) => sum + file.deletions, 0)}</span>
                     </button>
@@ -2173,60 +2141,103 @@ export default function QuestPage({
                     </div>
                   )}
                   <div className={questInputTokenBoxClass}>
-                    {questInputFileTokens.map(token => (
-                      <span className={questInputFileTokenClass} key={token.path}>
-                        <IconFile />
-                        <span title={token.path}>{token.path}</span>
-                        <button
-                          type="button"
-                          onClick={() => setQuestInputFileTokens(tokens => tokens.filter(item => item.path !== token.path))}
-                          title="Remove file"
-                          aria-label={`Remove ${token.path}`}
-                          disabled={busy}
-                        >
-                          <IconX />
-                        </button>
-                      </span>
-                    ))}
-                    <textarea
-                      ref={questInputRef}
-                      rows={1}
-                      className={questInputTextareaClass}
-                      value={questInput}
-                      onChange={event => setQuestInput(event.target.value)}
-                      onKeyDown={event => {
-                        if (questInputSuggestions.length > 0 && ['ArrowDown', 'ArrowUp', 'Tab', 'Enter', 'Escape'].includes(event.key)) {
-                          if (event.key === 'Escape') {
+                    <div className={questInputTextRowClass}>
+                      {questInputFileTokens.map(token => (
+                        <span className={questInputFileTokenClass} key={token.path}>
+                          <IconFile />
+                          <span title={token.path}>{token.path}</span>
+                          <button
+                            type="button"
+                            onClick={() => setQuestInputFileTokens(tokens => tokens.filter(item => item.path !== token.path))}
+                            title="Remove file"
+                            aria-label={`Remove ${token.path}`}
+                            disabled={busy}
+                          >
+                            <IconX />
+                          </button>
+                        </span>
+                      ))}
+                      <textarea
+                        ref={questInputRef}
+                        rows={1}
+                        className={questInputTextareaClass}
+                        value={questInput}
+                        onChange={event => setQuestInput(event.target.value)}
+                        onKeyDown={event => {
+                          if (questInputSuggestions.length > 0 && ['ArrowDown', 'ArrowUp', 'Tab', 'Enter', 'Escape'].includes(event.key)) {
+                            if (event.key === 'Escape') {
+                              event.preventDefault();
+                              setQuestInputSuggestionMode(null);
+                              return;
+                            }
+                            if (event.key === 'ArrowDown') {
+                              event.preventDefault();
+                              setQuestInputSuggestionIndex(index => Math.min(index + 1, questInputSuggestions.length - 1));
+                              return;
+                            }
+                            if (event.key === 'ArrowUp') {
+                              event.preventDefault();
+                              setQuestInputSuggestionIndex(index => Math.max(index - 1, 0));
+                              return;
+                            }
                             event.preventDefault();
-                            setQuestInputSuggestionMode(null);
+                            chooseQuestInputSuggestion(questInputSuggestions[questInputSuggestionIndex]).catch(reportError);
                             return;
                           }
-                          if (event.key === 'ArrowDown') {
-                            event.preventDefault();
-                            setQuestInputSuggestionIndex(index => Math.min(index + 1, questInputSuggestions.length - 1));
+                          if (event.key === 'Backspace' && !questInput) {
+                            setQuestInputFileTokens(tokens => tokens.slice(0, -1));
                             return;
                           }
-                          if (event.key === 'ArrowUp') {
+                          if (event.key === 'Enter' && !event.shiftKey) {
                             event.preventDefault();
-                            setQuestInputSuggestionIndex(index => Math.max(index - 1, 0));
-                            return;
+                            submitQuestInput();
                           }
-                          event.preventDefault();
-                          chooseQuestInputSuggestion(questInputSuggestions[questInputSuggestionIndex]).catch(reportError);
-                          return;
-                        }
-                        if (event.key === 'Backspace' && !questInput) {
-                          setQuestInputFileTokens(tokens => tokens.slice(0, -1));
-                          return;
-                        }
-                        if (event.key === 'Enter' && !event.shiftKey) {
-                          event.preventDefault();
-                          submitQuestInput();
-                        }
-                      }}
-                      placeholder={questInputFileTokens.length === 0 ? `${t('quest_input_placeholder')}  @ file  / command` : 'Message'}
-                      disabled={busy || !selected}
-                    />
+                        }}
+                        placeholder={questInputFileTokens.length === 0
+                          ? selected.status === 'ready_for_review'
+                            ? 'Ask for revision or explain what to change  @ file  / command'
+                            : selected.status === 'blocked'
+                              ? 'Provide missing info  @ file  / command'
+                              : ['running', 'validating', 'repairing', 'applying'].includes(selected.status)
+                                ? 'Add instruction or context  @ file  / command'
+                                : `${t('quest_input_placeholder')}  @ file  / command`
+                          : 'Message'}
+                        disabled={busy || !selected}
+                      />
+                    </div>
+                    <div className={questClasses.composerToolbar}>
+                      <QuestDropdown
+                        value={questMode}
+                        options={[
+                          { value: 'solo', label: t('quest_mode_solo') },
+                          { value: 'extra', label: t('quest_mode_extra') },
+                        ]}
+                        onChange={value => setQuestMode(value as QuestMode)}
+                        disabled={busy || executionLockedStatuses.includes(selected.status)}
+                        compact
+                        widthClass="w-10"
+                        menuWidthClass="w-[116px]"
+                        placement="top"
+                      />
+                      <QuestDropdown
+                        value={modelConfig.model}
+                        options={modelSelectOptions}
+                        onChange={value => {
+                          const model = modelOptions.find(option => option.id === value);
+                          setModelConfig(prev => ({
+                            ...prev,
+                            model: value,
+                            provider: model?.provider ?? prev.provider,
+                            max_tokens: model?.default_max_tokens ?? prev.max_tokens,
+                          }));
+                        }}
+                        disabled={busy || executionLockedStatuses.includes(selected.status)}
+                        compact
+                        widthClass="w-[68px]"
+                        menuWidthClass="w-[240px]"
+                        placement="top"
+                      />
+                    </div>
                   </div>
                   <button className={questClasses.sendButton} onClick={submitQuestInput} disabled={busy || (!questInput.trim() && questInputFileTokens.length === 0)}>
                     <IconSend />
@@ -2235,23 +2246,53 @@ export default function QuestPage({
               </div>
 
               <aside className={questClasses.rightPanel}>
-                <div className={questClasses.panelTabs}>
-                  {panelTabs.map(tab => {
-                    const active = panel === tab.id;
-                    return (
+                <div className={questClasses.artifactHeader}>
+                  <div>
+                    <h2>Artifact workspace</h2>
+                    <p>
+                      {panel === 'artifact' && artifact
+                        ? `${artifact.kind.replace('_', ' ')} · ${artifact.label}`
+                        : panel === 'spec'
+                          ? 'Spec.md'
+                          : panel === 'intent'
+                            ? 'Intent record'
+                            : panel === 'review'
+                              ? 'Review bundle'
+                              : panel === 'knowledge'
+                                ? 'Knowledge references'
+                                : 'Quest evidence and controls'}
+                    </p>
+                  </div>
+                  <div className={questClasses.panelTabs}>
+                    {panelTabs.map(tab => {
+                      const active = panel === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          className={cn(questClasses.panelTab, active && questClasses.panelTabActive)}
+                          onClick={() => { setArtifact(null); setPanel(tab.id); }}
+                          title={t(tab.labelKey)}
+                          aria-label={t(tab.labelKey)}
+                          aria-current={active ? 'page' : undefined}
+                        >
+                          {tab.icon}
+                          {active && <span>{t(tab.labelKey)}</span>}
+                        </button>
+                      );
+                    })}
+                    {artifact && (
                       <button
-                        key={tab.id}
-                        className={cn(questClasses.panelTab, active && questClasses.panelTabActive)}
-                        onClick={() => setPanel(tab.id)}
-                        title={t(tab.labelKey)}
-                        aria-label={t(tab.labelKey)}
-                        aria-current={active ? 'page' : undefined}
+                        className={cn(questClasses.panelTab, panel === 'artifact' && questClasses.panelTabActive)}
+                        onClick={() => setPanel('artifact')}
+                        title={artifact.label}
+                        aria-label={artifact.label}
+                        aria-current={panel === 'artifact' ? 'page' : undefined}
                       >
-                        {tab.icon}
-                        {active && <span>{t(tab.labelKey)}</span>}
+                        <IconFile />
+                        {panel === 'artifact' && <span>{artifact.label}</span>}
                       </button>
-                    );
-                  })}
+                    )}
+                  </div>
                 </div>
 
                 {panel === 'overview' && (
@@ -2307,63 +2348,6 @@ export default function QuestPage({
                       </div>
                     </section>
 
-	                    <section>
-	                      <h2>{t('quest_execution')} <b>{selected.mode}</b></h2>
-	                      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
-	                        <div className={modeSwitchClass}>
-	                          {(['solo', 'extra'] as QuestMode[]).map(mode => (
-	                            <button
-	                              key={mode}
-	                              className={modeSwitchButtonClass(questMode === mode)}
-	                              onClick={() => setQuestMode(mode)}
-	                              disabled={busy || executionLockedStatuses.includes(selected.status)}
-	                            >
-	                              {mode === 'solo' ? t('quest_mode_solo') : t('quest_mode_extra')}
-	                            </button>
-	                          ))}
-	                        </div>
-	                        <QuestDropdown
-	                          value={modelConfig.model}
-	                          options={modelSelectOptions}
-	                          onChange={value => {
-	                            const model = modelOptions.find(option => option.id === value);
-	                            setModelConfig(prev => ({
-	                              ...prev,
-	                              model: value,
-	                              provider: model?.provider ?? prev.provider,
-	                              max_tokens: model?.default_max_tokens ?? prev.max_tokens,
-	                            }));
-	                          }}
-	                          disabled={busy || executionLockedStatuses.includes(selected.status)}
-	                          menuWidthClass="w-[260px]"
-	                        />
-	                        <QuestDropdown
-	                          value={modelConfig.thinking_effort}
-	                          options={thinkingOptions}
-	                          onChange={value => setModelConfig(prev => ({ ...prev, thinking_effort: value }))}
-	                          disabled={busy || executionLockedStatuses.includes(selected.status)}
-	                        />
-                        <input
-                          className={executionSelectClass}
-	                          type="number"
-	                          min={1}
-	                          value={modelConfig.max_tokens}
-	                          onChange={event => setModelConfig(prev => ({ ...prev, max_tokens: Number(event.target.value) || 4096 }))}
-	                          disabled={busy || executionLockedStatuses.includes(selected.status)}
-	                        />
-	                      </div>
-	                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
-	                        <span className="inline-flex h-8 items-center rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] px-[10px] text-[11px] text-[var(--text-muted)]">{t('quest_active_apply_approval')}</span>
-	                        <button
-	                          className={sectionHeadingButton}
-	                          onClick={saveExecutionConfig}
-	                          disabled={busy || (questMode === selected.mode && selected.autonomy.workspace_writes_automatic === true && JSON.stringify(modelConfig) === JSON.stringify(selected.model_config))}
-	                        >
-                          <IconEdit /> {t('quest_save_execution')}
-                        </button>
-                      </div>
-                    </section>
-
                     <section>
                       <h2>{t('quest_artifacts')}</h2>
                       <button className={artifactRowClass} onClick={() => { setArtifact(null); setPanel('intent'); }}>
@@ -2397,7 +2381,7 @@ export default function QuestPage({
                           <IconSparkles /><span><strong>{attempt.label}</strong><small>{attempt.outcome}{attempt.selected ? ` · ${t('quest_selected')}` : ''}</small></span>
                         </button>
                       ))}
-                      <button className={artifactRowClass} onClick={() => setPanel('review')} disabled={!selected.review}>
+                      <button className={artifactRowClass} onClick={() => { setArtifact(null); setPanel('review'); }} disabled={!selected.review}>
                         <IconCheck /><span><strong>{t('quest_review_bundle')}</strong><small>{selected.review ? t_fmt('quest_changed_files_count', { count: String(selected.review.changed_files.length) }) : t('quest_not_ready')}</small></span>
                       </button>
                     </section>
@@ -2443,7 +2427,7 @@ export default function QuestPage({
                       {selected.attached_knowledge.length === 0 ? (
                         <p className={mutedText}>{t('quest_no_knowledge_attached')}</p>
                       ) : selected.attached_knowledge.map(entry => (
-                        <button className={artifactRowClass} key={entry.id} onClick={() => setPanel('knowledge')}>
+                        <button className={artifactRowClass} key={entry.id} onClick={() => { setArtifact(null); setPanel('knowledge'); }}>
                           <IconSparkles /><span><strong>{entry.category}</strong><small>{entry.content}</small></span>
                         </button>
                       ))}
@@ -2569,7 +2553,7 @@ export default function QuestPage({
                 {panel === 'artifact' && artifact && (
                   <div className={questClasses.artifactViewer}>
                     <header>
-                      <button className={sectionHeadingButton} onClick={() => setPanel('overview')}><IconChevronRight /> {t('quest_tab_overview')}</button>
+                      <button className={sectionHeadingButton} onClick={() => { setArtifact(null); setPanel('overview'); }}><IconChevronRight /> {t('quest_tab_overview')}</button>
                       <button className={sectionHeadingButton} onClick={() => onOpenEditor(selected.project.path, artifactFor(artifact.kind, artifact.label, artifact.path))}><IconCode /> {t('quest_open_editor')}</button>
                     </header>
                     <div>
@@ -3019,7 +3003,7 @@ function QuestGroup({
           <span className={cn('mt-[3px] h-[6px] w-[6px] rounded-full', statusDotClass(quest.status))} />
           <div>
             <strong>{quest.title}</strong>
-            <small>{quest.project.name} · {formatTime(quest.updated_at_ms)}</small>
+            <small>{quest.project.name} · <em>{statusBadgeLabel(quest.status)}</em> · {formatTime(quest.updated_at_ms)}</small>
           </div>
         </button>
       ))}
