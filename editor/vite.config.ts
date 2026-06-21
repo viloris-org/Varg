@@ -14,5 +14,18 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    watch: {
+      usePolling: true,
+      interval: 500,
+      ignored: [
+        '**/.git/**',
+        '**/node_modules/**',
+        '**/target/**',
+        '**/dist/**',
+        '../../target/**',
+        '../../examples/**',
+        '../src-tauri/target/**',
+      ],
+    },
   },
 });

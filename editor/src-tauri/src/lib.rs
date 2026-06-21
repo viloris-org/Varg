@@ -42,7 +42,7 @@ mod scene_window;
 
 use quest::{
     ChangedFile, QuestExplorationAttempt, QuestMode, QuestModelConfig, QuestProject, QuestReview,
-    QuestReviewAction, QuestReviewFinding, QuestReviewMetrics, QuestStatus, QuestStore,
+    QuestReviewAction, QuestReviewFinding, QuestReviewMetrics, QuestStatus, QuestStore, QuestTask,
     ValidationResult, transaction_groups_from_changed_files,
 };
 
@@ -1075,6 +1075,7 @@ impl EditorHost {
             "quest/promote" => self.quest_promote(params),
             "quest/update_intent" => self.quest_update_intent(params),
             "quest/update_spec" => self.quest_update_spec(params),
+            "quest/update_tasks" => self.quest_update_tasks(params),
             "quest/update_execution_config" => self.quest_update_execution_config(params),
             "quest/update_knowledge_context" => self.quest_update_knowledge_context(params),
             "quest/add_note" => self.quest_add_note(params),
@@ -1199,7 +1200,7 @@ impl EditorHost {
             }
         };
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create the initial artifacts for an AI-led game-editor Quest by calling tools only. You must call `create_or_update_spec` exactly once. You may call `create_task` any number of times when concrete task slices are useful. Do not put the spec or task list in normal text. Do not force a generic workflow; choose the task shape that best fits the user's goal.".to_owned(),
+            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
@@ -1237,18 +1238,6 @@ impl EditorHost {
             mode,
             model_config,
         )?;
-        for task in generated.tasks {
-            self.quest_store.append_timeline_event(
-                &detail.record.id,
-                "task_created",
-                &task.title,
-                serde_json::json!({
-                    "summary": task.summary,
-                    "acceptance": task.acceptance,
-                    "source": "ai_tool",
-                }),
-            )?;
-        }
         let detail = self.quest_store.get(&detail.record.id)?;
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
@@ -1472,19 +1461,31 @@ impl EditorHost {
             },
         )?;
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create the initial artifacts for an AI-led game-editor Quest by calling tools only. You must call `create_or_update_spec` exactly once. You may call `create_task` any number of times when concrete task slices are useful. Do not put the spec or task list in normal text. Do not force a generic workflow; choose the task shape that best fits the user's goal.".to_owned(),
+            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
         request.tools = quest_creation_tool_definitions();
         let response = model.chat(request)?;
-        parse_generated_quest_tools(&response.tool_calls)
+        parse_generated_quest_response(&response.tool_calls, &response.content, goal)
     }
 
     fn quest_update_spec(&mut self, params: &Value) -> EngineResult<Value> {
         let id = required_string(params, "id")?;
         let spec = required_string(params, "spec")?;
         serde_json::to_value(self.quest_store.update_spec(id, spec)?)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_update_tasks(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let tasks_value = params
+            .get("tasks")
+            .cloned()
+            .ok_or_else(|| EngineError::config("missing 'tasks' parameter"))?;
+        let tasks: Vec<QuestTask> = serde_json::from_value(tasks_value)
+            .map_err(|error| EngineError::config(format!("invalid Quest tasks: {error}")))?;
+        serde_json::to_value(self.quest_store.replace_tasks(id, tasks)?)
             .map_err(|error| EngineError::other(error.to_string()))
     }
 
@@ -6724,8 +6725,10 @@ fn quest_validation_registry() -> Vec<QuestValidationCommand> {
     }]
 }
 
-fn parse_generated_quest_tools(
+fn parse_generated_quest_response(
     tool_calls: &[engine_ai::ToolCall],
+    text_content: &str,
+    goal: &str,
 ) -> EngineResult<GeneratedQuestSpec> {
     let mut spec_artifact: Option<(String, String)> = None;
     let mut tasks = Vec::new();
@@ -6809,12 +6812,55 @@ fn parse_generated_quest_tools(
             }
         }
     }
-    let Some((title, spec)) = spec_artifact else {
-        return Err(EngineError::config(
-            "Quest creation model must call `create_or_update_spec`; text-only responses are not accepted.",
-        ));
+    let (title, spec) = if let Some(spec_artifact) = spec_artifact {
+        spec_artifact
+    } else {
+        let spec = text_content.trim();
+        if spec.is_empty() {
+            (
+                quest_title_from_goal(goal),
+                format!(
+                    "# {}\n\n## Goal\n\n{}\n",
+                    quest_title_from_goal(goal),
+                    goal.trim()
+                ),
+            )
+        } else {
+            (
+                quest_title_from_markdown_or_goal(spec, goal),
+                spec.to_owned(),
+            )
+        }
     };
     Ok(GeneratedQuestSpec { title, spec, tasks })
+}
+
+fn quest_title_from_goal(goal: &str) -> String {
+    let title = goal
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Untitled Quest")
+        .trim()
+        .trim_matches(['"', '\'', '`', '.', ':', '#', '*'])
+        .trim()
+        .chars()
+        .take(96)
+        .collect::<String>();
+    if title.is_empty() {
+        "Untitled Quest".to_owned()
+    } else {
+        title
+    }
+}
+
+fn quest_title_from_markdown_or_goal(markdown: &str, goal: &str) -> String {
+    markdown
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(|title| title.chars().take(96).collect::<String>())
+        .unwrap_or_else(|| quest_title_from_goal(goal))
 }
 
 fn quest_creation_tool_definitions() -> Vec<engine_ai::ToolDefinition> {
@@ -7211,7 +7257,13 @@ fn start_quest_ai_request(
                     model_config,
                 } = prepared;
                 let generated = run_prepared_quest_model(model_request, emit_delta)
-                    .and_then(|response| parse_generated_quest_tools(&response.tool_calls))
+                    .and_then(|response| {
+                        parse_generated_quest_response(
+                            &response.tool_calls,
+                            &response.content,
+                            &goal,
+                        )
+                    })
                     .map_err(|error| error.to_string());
                 CompletedQuestAiRequest::Create {
                     generated,
@@ -7777,8 +7829,9 @@ mod tests {
         QuestProject, QuestReview, QuestReviewMetrics, QuestStatus, SoloQuestRunner,
         ValidationResult, asset_meta_path_for_source, copilot_execution_summary,
         extract_codex_account_id, model_detection_config, normalize_relative_path,
-        parse_generated_quest_tools, project_fingerprint, quest, quest_review_actions_for_result,
-        resolve_existing_relative_path, resolve_writable_relative_path, should_continue_copilot,
+        parse_generated_quest_response, project_fingerprint, quest,
+        quest_review_actions_for_result, resolve_existing_relative_path,
+        resolve_writable_relative_path, should_continue_copilot,
         transaction_groups_from_changed_files, validate_quest_workspace, validations_failed,
     };
     use base64::Engine as _;
@@ -7851,9 +7904,17 @@ mod tests {
     }
 
     #[test]
-    fn quest_creation_rejects_text_only_model_responses() {
-        let error = parse_generated_quest_tools(&[]).unwrap_err();
-        assert!(error.to_string().contains("create_or_update_spec"));
+    fn quest_creation_accepts_text_only_model_responses() {
+        let generated = parse_generated_quest_response(
+            &[],
+            "# Build Patrol Scene\n\nCreate a focused patrol prototype.",
+            "Build a patrol scene",
+        )
+        .unwrap();
+
+        assert_eq!(generated.title, "Build Patrol Scene");
+        assert!(generated.spec.contains("focused patrol"));
+        assert!(generated.tasks.is_empty());
     }
 
     #[test]
@@ -7920,25 +7981,29 @@ mod tests {
 
     #[test]
     fn quest_creation_accepts_native_spec_and_task_tool_calls() {
-        let generated = parse_generated_quest_tools(&[
-            engine_ai::ToolCall {
-                id: "call-spec".to_owned(),
-                name: "create_or_update_spec".to_owned(),
-                arguments: serde_json::json!({
-                    "title": "Build Patrol Scene",
-                    "markdown": "# Build Patrol Scene\n\nThe model chose this spec shape."
-                }),
-            },
-            engine_ai::ToolCall {
-                id: "call-task".to_owned(),
-                name: "create_task".to_owned(),
-                arguments: serde_json::json!({
-                    "title": "Create patrol behavior",
-                    "summary": "Author the behavior through available editor tools.",
-                    "acceptance": ["Behavior file exists", "Scene references it"]
-                }),
-            },
-        ])
+        let generated = parse_generated_quest_response(
+            &[
+                engine_ai::ToolCall {
+                    id: "call-spec".to_owned(),
+                    name: "create_or_update_spec".to_owned(),
+                    arguments: serde_json::json!({
+                        "title": "Build Patrol Scene",
+                        "markdown": "# Build Patrol Scene\n\nThe model chose this spec shape."
+                    }),
+                },
+                engine_ai::ToolCall {
+                    id: "call-task".to_owned(),
+                    name: "create_task".to_owned(),
+                    arguments: serde_json::json!({
+                        "title": "Create patrol behavior",
+                        "summary": "Author the behavior through available editor tools.",
+                        "acceptance": ["Behavior file exists", "Scene references it"]
+                    }),
+                },
+            ],
+            "",
+            "Build a patrol scene",
+        )
         .unwrap();
 
         assert_eq!(generated.title, "Build Patrol Scene");

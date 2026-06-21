@@ -397,6 +397,14 @@ pub struct QuestCheckpoint {
     pub project_fingerprint: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestTask {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KnowledgeEntry {
     pub id: String,
@@ -447,6 +455,8 @@ pub struct QuestRecord {
     pub decisions: Vec<QuestDecision>,
     #[serde(default)]
     pub checkpoints: Vec<QuestCheckpoint>,
+    #[serde(default)]
+    pub tasks: Vec<QuestTask>,
     #[serde(default)]
     pub next_action: QuestNextAction,
     pub review: Option<QuestReview>,
@@ -658,6 +668,7 @@ impl QuestStore {
             branch_ids: Vec::new(),
             decisions: Vec::new(),
             checkpoints: Vec::new(),
+            tasks: Vec::new(),
             next_action: QuestNextAction::default(),
             review: None,
         };
@@ -720,6 +731,7 @@ impl QuestStore {
             branch_ids: Vec::new(),
             decisions: Vec::new(),
             checkpoints: Vec::new(),
+            tasks: source.record.tasks.clone(),
             next_action: QuestNextAction::default(),
             review: None,
         };
@@ -927,6 +939,27 @@ impl QuestStore {
             "spec_updated",
             "Quest spec updated",
             serde_json::json!({ "bytes": spec.len() }),
+        )?;
+        self.get(id)
+    }
+
+    pub fn replace_tasks(&self, id: &str, tasks: Vec<QuestTask>) -> EngineResult<QuestDetail> {
+        let mut detail = self.get(id)?;
+        let mut normalized = normalize_quest_tasks(tasks);
+        detail.record.tasks.clear();
+        detail.record.tasks.append(&mut normalized);
+        detail.record.updated_at_ms = unix_time_ms();
+        normalize_record_metadata(&mut detail.record);
+        refresh_next_action(&mut detail.record);
+        self.save_snapshot(&detail.record)?;
+        self.append_event(
+            id,
+            "tasks_updated",
+            "Quest task list updated",
+            serde_json::json!({
+                "task_count": detail.record.tasks.len(),
+                "done_count": detail.record.tasks.iter().filter(|task| task.done).count(),
+            }),
         )?;
         self.get(id)
     }
@@ -1935,6 +1968,44 @@ fn normalize_record_metadata(record: &mut QuestRecord) {
     record
         .checkpoints
         .dedup_by(|left, right| left.id == right.id);
+    record.tasks = normalize_quest_tasks(std::mem::take(&mut record.tasks));
+}
+
+fn normalize_quest_tasks(tasks: Vec<QuestTask>) -> Vec<QuestTask> {
+    let mut normalized = Vec::new();
+    for (index, task) in tasks.into_iter().enumerate() {
+        let title = task.title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let id = task.id.trim();
+        let id = if !id.is_empty()
+            && id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            id.to_owned()
+        } else {
+            format!("task-{}", index + 1)
+        };
+        if normalized
+            .iter()
+            .any(|existing: &QuestTask| existing.id == id)
+        {
+            normalized.push(QuestTask {
+                id: format!("task-{}", index + 1),
+                title: title.chars().take(160).collect(),
+                done: task.done,
+            });
+        } else {
+            normalized.push(QuestTask {
+                id,
+                title: title.chars().take(160).collect(),
+                done: task.done,
+            });
+        }
+    }
+    normalized
 }
 
 fn normalize_model_config(mut config: QuestModelConfig) -> QuestModelConfig {

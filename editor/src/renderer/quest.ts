@@ -99,8 +99,15 @@ export interface QuestRecord {
     artifact_path?: string | null;
     project_fingerprint?: string | null;
   }>;
+  tasks: QuestTask[];
   next_action: QuestNextAction;
   review: QuestReview | null;
+}
+
+export interface QuestTask {
+  id: string;
+  title: string;
+  done: boolean;
 }
 
 export interface QuestEvent {
@@ -197,6 +204,11 @@ export interface KnowledgeEntry {
   updated_at_ms: number;
 }
 
+export interface QuestProjectFile {
+  path: string;
+  kind: string;
+}
+
 export function listQuests(): Promise<{ quests: QuestRecord[] }> {
   return rpc('quest/list');
 }
@@ -205,9 +217,11 @@ export function getQuest(id: string): Promise<QuestDetail> {
   return rpc('quest/get', { id });
 }
 
+export type QuestAiStreamKind = 'text' | 'thinking' | 'tool_call';
+
 interface QuestAiStreamEvent {
   request_id: string;
-  kind: 'text' | 'thinking' | 'tool_call';
+  kind: QuestAiStreamKind;
   delta: string;
 }
 
@@ -221,7 +235,7 @@ let nextQuestAiRequestId = 1;
 function streamQuestAiRequest<T>(
   kind: 'create' | 'rewrite',
   params: Record<string, unknown>,
-  onDelta?: (delta: string, kind: QuestAiStreamEvent['kind']) => void,
+  onDelta?: (delta: string, kind: QuestAiStreamKind) => void,
 ): QuestAiStreamHandle<T> {
   const requestId = `${Date.now()}-${nextQuestAiRequestId++}`;
   let rejectCancelled: ((reason?: unknown) => void) | undefined;
@@ -269,8 +283,9 @@ export function createQuest(
   title: string,
   goal: string,
   options?: { mode?: QuestMode; model_config?: QuestModelConfig },
+  onDelta?: (delta: string, kind: QuestAiStreamKind) => void,
 ): Promise<QuestDetail> {
-  return streamQuestAiRequest<QuestDetail>('create', { title, goal, ...options }).promise;
+  return streamQuestAiRequest<QuestDetail>('create', { title, goal, ...options }, onDelta).promise;
 }
 
 export interface OpenAIRealtimeTranscriptionSession {
@@ -292,7 +307,7 @@ export function createOpenAIRealtimeTranscriptionSession(): Promise<OpenAIRealti
 export function rewriteQuestPrompt(
   prompt: string,
   modelConfig?: QuestModelConfig,
-  onDelta?: (delta: string, kind: QuestAiStreamEvent['kind']) => void,
+  onDelta?: (delta: string, kind: QuestAiStreamKind) => void,
 ): QuestAiStreamHandle<{ prompt: string }> {
   return streamQuestAiRequest('rewrite', { prompt, model_config: modelConfig }, onDelta);
 }
@@ -303,6 +318,10 @@ export function promoteQuest(prompt: string, context: string): Promise<QuestDeta
 
 export function updateQuestSpec(id: string, spec: string): Promise<QuestDetail> {
   return rpc('quest/update_spec', { id, spec });
+}
+
+export function updateQuestTasks(id: string, tasks: QuestTask[]): Promise<QuestDetail> {
+  return rpc('quest/update_tasks', { id, tasks });
 }
 
 export function updateQuestIntent(id: string, intent: string): Promise<QuestDetail> {
@@ -320,6 +339,22 @@ export function updateQuestExecutionConfig(
 
 export function updateQuestKnowledgeContext(id: string, knowledgeIds: string[]): Promise<QuestDetail> {
   return rpc('quest/update_knowledge_context', { id, knowledge_ids: knowledgeIds });
+}
+
+export async function listQuestProjectFiles(): Promise<QuestProjectFile[]> {
+  const result = await rpc<{
+    entries?: QuestProjectFile[];
+    assets?: Array<{ source_path?: string; kind?: string }>;
+  }>('project/list_assets');
+  const files = [
+    ...(result.entries ?? []),
+    ...(result.assets ?? []).map(asset => ({
+      path: asset.source_path ?? '',
+      kind: asset.kind ?? 'Asset',
+    })),
+  ].filter(file => file.path.trim().length > 0);
+  return Array.from(new Map(files.map(file => [file.path, file])).values())
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 export function addQuestNote(id: string, kind: string, message: string): Promise<QuestDetail> {

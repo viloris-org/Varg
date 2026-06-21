@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   addQuestNote,
   branchQuest,
@@ -15,6 +17,7 @@ import {
   executeQuest,
   exportQuest,
   getQuest,
+  listQuestProjectFiles,
   listKnowledge,
   listQuests,
   renameQuest,
@@ -32,14 +35,18 @@ import {
   updateQuestExecutionConfig,
   updateQuestKnowledgeContext,
   updateQuestSpec,
+  updateQuestTasks,
   type KnowledgeEntry,
   type QuestDetail,
   type QuestAiStreamHandle,
+  type QuestAiStreamKind,
   type QuestMode,
   type QuestModelConfig,
+  type QuestProjectFile,
   type QuestRecord,
   type QuestReviewAction,
   type QuestStatus,
+  type QuestTask,
 } from '../quest';
 import { rpc } from '../api';
 import { useTranslation } from '../i18n';
@@ -78,9 +85,35 @@ interface Props {
 }
 
 type QuestPanel = 'overview' | 'intent' | 'spec' | 'review' | 'knowledge' | 'artifact';
-type QuestInputMode = 'steer' | 'clarify' | 'manual_intervention' | 'pause';
 type VoiceInputStatus = 'idle' | 'connecting' | 'recording';
 type QuestMenuAction = 'open' | 'rename' | 'open_editor' | 'branch' | 'export' | 'cancel' | 'archive' | 'reopen' | 'delete';
+type SpecMode = 'edit' | 'preview';
+type LiveQuestActivity = {
+  id: string;
+  kind: QuestAiStreamKind | 'status';
+  label: string;
+  detail?: string;
+  startedAt: number;
+};
+type SpecSelection = {
+  text: string;
+  top: number;
+  left: number;
+  mode: 'button' | 'input';
+};
+type QuestInputSuggestionMode = 'file' | 'command';
+type QuestInputSuggestion = {
+  id: string;
+  label: string;
+  detail: string;
+  value: string;
+  mode: QuestInputSuggestionMode;
+  run?: () => void | Promise<void>;
+};
+type QuestInputFileToken = {
+  path: string;
+  kind: string;
+};
 
 const defaultQuestModelConfig: QuestModelConfig = {
   provider: 'inherit',
@@ -163,6 +196,21 @@ const clearIssueClass = 'border-[#14532d] bg-[rgba(20,83,45,0.14)] text-[#86efac
 const issueOpenClass = 'flex min-w-0 flex-1 cursor-pointer items-start gap-2 border-0 bg-transparent p-0 text-left font-[inherit] text-inherit hover:underline hover:underline-offset-2';
 const reviewActionButtonClass = 'h-[30px] cursor-pointer rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-hover)] px-[10px] text-[9px] font-bold text-[var(--text-primary)] disabled:cursor-default disabled:opacity-40';
 const decisionButtonClass = 'inline-flex h-8 cursor-pointer items-center gap-[6px] rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-[11px] text-[9px] font-bold text-[var(--text-secondary)] disabled:cursor-default disabled:opacity-40';
+const askAiSelectionButtonClass = 'absolute z-20 inline-flex min-h-8 cursor-pointer items-center gap-[7px] rounded-[var(--radius-md)] border border-[var(--brand)] bg-[var(--brand)] px-3 text-[11px] font-semibold text-[var(--bg-base)] shadow-[0_0_0_1px_var(--brand-dim),0_8px_18px_rgba(34,197,94,0.24)] hover:border-[var(--brand-hover)] hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-60 [&_svg]:stroke-[2.25]';
+const askAiSelectionPromptClass = 'absolute z-20 grid w-[min(360px,calc(100%-24px))] gap-2 rounded-[var(--radius-md)] border border-[var(--brand)] bg-[var(--bg-elevated)] p-2 shadow-[0_0_0_1px_var(--brand-dim),0_14px_34px_rgba(0,0,0,0.38)]';
+const askAiSelectionPromptInputClass = 'min-h-[68px] resize-none rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-base)] px-2.5 py-2 text-[12px] leading-[1.45] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]';
+const askAiSelectionPromptActionsClass = 'flex items-center justify-end gap-1.5 [&_button]:inline-flex [&_button]:h-7 [&_button]:cursor-pointer [&_button]:items-center [&_button]:gap-1.5 [&_button]:rounded-[5px] [&_button]:border [&_button]:px-2.5 [&_button]:text-[10px] [&_button]:font-semibold [&_button:disabled]:cursor-default [&_button:disabled]:opacity-45';
+const taskChecklistClass = 'grid gap-2 [&_input[type="text"]]:min-w-0 [&_input[type="text"]]:flex-1 [&_input[type="text"]]:rounded-[5px] [&_input[type="text"]]:border [&_input[type="text"]]:border-[var(--border)] [&_input[type="text"]]:bg-[var(--bg-base)] [&_input[type="text"]]:px-2 [&_input[type="text"]]:py-[7px] [&_input[type="text"]]:text-[11px] [&_input[type="text"]]:text-[var(--text-primary)] [&_input[type="text"]]:outline-none [&_input[type="text"]:focus]:border-[var(--accent)]';
+const taskChecklistRowClass = 'flex min-w-0 items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--bg-surface)] px-2 py-1.5 [&_button]:grid [&_button]:h-7 [&_button]:w-7 [&_button]:shrink-0 [&_button]:cursor-pointer [&_button]:place-items-center [&_button]:rounded-[5px] [&_button]:border [&_button]:border-[var(--border)] [&_button]:bg-transparent [&_button]:text-[var(--text-muted)] hover:[&_button]:border-[var(--border-light)] hover:[&_button]:text-[var(--text-primary)]';
+const questInputSuggestClass = 'absolute bottom-[44px] left-3 z-30 grid max-h-[240px] w-[min(520px,calc(100%-24px))] overflow-auto rounded-[7px] border border-[var(--border-light)] bg-[var(--bg-elevated)] py-1 shadow-[var(--shadow-lg)]';
+const questInputSuggestItemClass = (active: boolean) => cn(
+  'grid cursor-pointer grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 border-0 bg-transparent px-3 py-2 text-left text-[11px] text-[var(--text-secondary)]',
+  active && 'bg-[var(--bg-hover)] text-[var(--text-primary)]',
+  '[&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_small]:text-[10px] [&_small]:text-[var(--text-muted)] [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_kbd]:font-mono [&_kbd]:text-[10px] [&_kbd]:text-[var(--text-muted)]',
+);
+const questInputTokenBoxClass = 'flex min-w-0 items-end gap-1.5';
+const questInputFileTokenClass = 'inline-grid max-w-[220px] grid-cols-[14px_minmax(0,1fr)_16px] items-center gap-1.5 rounded-[6px] border border-[var(--border-light)] bg-[var(--bg-hover)] px-2 py-[5px] text-[11px] text-[var(--text-secondary)] [&_button]:grid [&_button]:h-4 [&_button]:w-4 [&_button]:cursor-pointer [&_button]:place-items-center [&_button]:rounded [&_button]:border-0 [&_button]:bg-transparent [&_button]:p-0 [&_button]:text-[var(--text-muted)] hover:[&_button]:text-[var(--text-primary)] [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap';
+const questInputTextareaClass = 'max-h-[150px] min-h-[30px] min-w-0 flex-1 resize-none border-0 bg-transparent py-[6px] text-[12px] leading-[1.45] text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]';
 const executionSelectClass = 'h-8 min-w-0 rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-2 text-[11px] text-[var(--text-primary)] outline-none disabled:cursor-default disabled:opacity-45';
 const executionToggleClass = 'inline-flex h-8 items-center gap-[7px] rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] text-[11px] font-medium text-[var(--text-secondary)] [&_input]:m-0 [&_input]:h-[13px] [&_input]:w-[13px]';
 const modeSwitchClass = 'inline-grid h-8 grid-cols-2 rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] p-0.5';
@@ -170,6 +218,19 @@ const modeSwitchButtonClass = (active: boolean) => cn(
   'cursor-pointer rounded-[4px] border-0 bg-transparent px-2 text-[11px] font-semibold text-[var(--text-muted)] disabled:cursor-default disabled:opacity-45',
   active && 'bg-[var(--bg-active)] text-[var(--text-primary)] shadow-[var(--shadow-sm)]',
 );
+const markdownPreviewClass = [
+  'min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--border-light)] bg-[var(--bg-base)] px-[26px] py-[22px] text-[12px] leading-[1.7] text-[var(--text-primary)]',
+  '[&_h1]:mb-[0.65em] [&_h1]:mt-0 [&_h1]:text-[22px] [&_h1]:font-semibold [&_h1]:leading-[1.25]',
+  '[&_h2]:mb-[0.55em] [&_h2]:mt-[1.15em] [&_h2]:text-[16px] [&_h2]:font-semibold',
+  '[&_h3]:mb-[0.45em] [&_h3]:mt-[1em] [&_h3]:text-[13px] [&_h3]:font-semibold',
+  '[&_p]:my-[0.55em] [&_ul]:my-[0.55em] [&_ol]:my-[0.55em] [&_ul]:pl-[1.45em] [&_ol]:pl-[1.45em] [&_li]:my-[0.2em]',
+  '[&_code:not(pre_code)]:rounded [&_code:not(pre_code)]:bg-[var(--bg-hover)] [&_code:not(pre_code)]:px-[5px] [&_code:not(pre_code)]:py-px [&_code:not(pre_code)]:font-mono [&_code:not(pre_code)]:text-[0.92em]',
+  '[&_pre]:overflow-auto [&_pre]:rounded-md [&_pre]:bg-[var(--bg-hover)] [&_pre]:p-3 [&_pre]:text-[11px]',
+  '[&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-light)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-secondary)]',
+  '[&_table]:my-3 [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_table]:border-collapse',
+  '[&_th]:border [&_th]:border-[var(--border)] [&_th]:bg-[var(--bg-hover)] [&_th]:px-2 [&_th]:py-1',
+  '[&_td]:border [&_td]:border-[var(--border)] [&_td]:px-2 [&_td]:py-1',
+].join(' ');
 
 const questClasses = {
   shell: 'grid h-screen w-screen grid-rows-[48px_minmax(0,1fr)_24px] overflow-hidden bg-[var(--bg-base)] font-[Inter,var(--font-sans)] text-[var(--text-primary)]',
@@ -190,6 +251,8 @@ const questClasses = {
   promptIconButton: 'grid h-[30px] w-[30px] cursor-pointer place-items-center rounded-[7px] border-0 bg-transparent text-[var(--text-muted)] hover:enabled:bg-[var(--bg-hover)] hover:enabled:text-[var(--text-primary)] disabled:cursor-default disabled:opacity-35',
   promptSubmit: 'grid h-[30px] w-[30px] cursor-pointer place-items-center rounded-[7px] border border-[var(--brand)] bg-[var(--brand)] text-[var(--bg-base)] shadow-[0_0_0_1px_var(--brand-dim),0_8px_18px_rgba(34,197,94,0.24)] hover:enabled:border-[var(--brand-hover)] hover:enabled:bg-[var(--brand-hover)] disabled:cursor-default disabled:opacity-45 [&_svg]:stroke-[2.25]',
   introCard: 'mt-16 grid w-[min(640px,calc(100vw-440px))] grid-cols-[96px_minmax(0,1fr)] gap-[18px] rounded-lg border border-dashed border-[var(--border-light)] bg-[var(--bg-surface)] p-3 text-[var(--text-secondary)] max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:grid-cols-1 max-[900px]:min-w-0 [&>svg]:h-[70px] [&>svg]:w-24 [&>svg]:rounded-md [&>svg]:bg-[var(--brand-dim)] [&>svg]:p-4 [&>svg]:text-[var(--brand)] [&_p]:m-0 [&_p]:text-[12px] [&_p]:leading-[1.5] [&_p]:text-[var(--text-muted)] [&_strong]:mb-2 [&_strong]:mt-1 [&_strong]:block [&_strong]:text-[14px] [&_strong]:text-[var(--text-primary)]',
+  liveActivityList: 'mt-4 w-[min(800px,calc(100vw-360px))] min-w-[min(800px,calc(100vw-360px))] border-l border-[var(--border)] py-1 pl-4 max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:min-w-0',
+  liveActivityEntry: 'relative flex min-h-[22px] items-center gap-2 text-[11px] leading-none text-[var(--text-muted)] before:absolute before:-left-[19px] before:top-1/2 before:h-[7px] before:w-[7px] before:-translate-y-1/2 before:rounded-full before:border before:border-[var(--text-muted)] before:bg-[var(--bg-base)] [&_b]:font-medium [&_b]:text-[var(--text-secondary)] [&_span]:min-w-0 [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap [&_svg]:h-[13px] [&_svg]:w-[13px] [&_svg]:shrink-0',
   workspace: 'grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-[var(--bg-surface)]',
   header: 'flex min-h-[78px] items-center justify-between gap-[18px] border-b border-[var(--border)] bg-[var(--bg-surface)] px-[18px] py-[10px] max-[900px]:flex-col max-[900px]:items-start [&_h1]:mb-[3px] [&_h1]:mt-1 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h1]:text-[var(--text-primary)] [&_p]:m-0 [&_p]:max-w-[820px] [&_p]:text-[11px] [&_p]:leading-[1.45] [&_p]:text-[var(--text-secondary)]',
   projectLine: 'flex items-center gap-[5px] font-mono text-[10px] text-[var(--text-muted)] [&_svg]:w-[9px]',
@@ -199,15 +262,17 @@ const questClasses = {
   runStream: 'grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_52px] border-r border-[var(--border)] bg-[var(--bg-base)] max-[900px]:border-b max-[900px]:border-r-0',
   streamPrompt: 'mx-[22px] mb-2 mt-4 rounded-[7px] border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-[9px] text-[13px] text-[var(--text-primary)]',
   streamList: 'min-h-0 overflow-auto px-[22px] pb-[22px]',
-  streamEntry: 'grid grid-cols-[16px_minmax(0,1fr)] gap-[9px] my-[6px] [&>div]:min-w-0 [&>div]:rounded-[5px] [&>div]:border [&>div]:border-[var(--border)] [&>div]:bg-[var(--bg-surface)] [&>div]:px-[10px] [&>div]:py-2 [&_details]:mt-[6px] [&_details]:text-[10px] [&_details]:text-[var(--text-secondary)] [&_header]:flex [&_header]:items-center [&_header]:justify-between [&_header]:gap-[10px] [&_pre]:mt-[7px] [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-base)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:mt-1 [&_small]:block [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)] [&_summary]:cursor-pointer [&_time]:shrink-0 [&_time]:font-mono [&_time]:text-[10px] [&_time]:text-[var(--text-muted)]',
-  nextEntry: '[&>div]:border-[var(--border-light)] [&_time]:font-bold [&_time]:text-[var(--text-primary)]',
-  liveEntry: '[&>div]:border-[var(--border-light)] [&>div]:bg-[var(--bg-hover)] [&_time]:font-bold [&_time]:text-[var(--text-primary)]',
+  streamEntry: 'grid grid-cols-[16px_minmax(0,1fr)] gap-[9px] py-[3px] [&>div]:min-w-0 [&_button]:flex [&_button]:h-8 [&_button]:w-full [&_button]:cursor-default [&_button]:items-center [&_button]:gap-2 [&_button]:rounded-[5px] [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:text-left [&_button]:font-[inherit] [&_button]:outline-none [&_button:enabled]:cursor-pointer [&_button:enabled:hover]:bg-[var(--bg-hover)] [&_pre]:mt-1 [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:min-w-0 [&_small]:shrink-0 [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
+  streamArrow: 'ml-auto h-[13px] w-[13px] shrink-0 text-[var(--text-muted)] opacity-0 transition-[opacity,transform] duration-150 group-hover:opacity-100',
+  streamEvidence: 'ml-2 mr-1 pb-2',
+  nextEntry: '[&_strong]:text-[var(--brand)]',
+  liveEntry: '[&_strong]:text-[var(--brand)]',
   timelineDot: 'relative mt-4 h-[9px] w-[9px] rounded-full border border-[var(--text-muted)] bg-[var(--bg-surface)] after:absolute after:left-1 after:top-[10px] after:h-[calc(100%+34px)] after:w-px after:bg-[var(--border)] after:content-[""]',
   timelineDotLast: 'after:hidden',
   timelineDotNext: 'border-[var(--text-primary)]',
   timelineDotLive: 'border-[var(--brand)] bg-[var(--brand)] shadow-[0_0_0_3px_var(--brand-dim)] [animation:quest-live-pulse_1.7s_ease-out_infinite]',
   reviewChip: 'ml-6 mt-3 inline-flex w-max cursor-pointer items-center gap-[6px] rounded-md border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] py-[7px] text-[12px] text-[var(--success)] [&_span]:text-[var(--danger)]',
-  steerBar: 'grid grid-cols-[118px_minmax(0,1fr)_34px] items-center gap-3 border-t border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[11px] text-[var(--text-muted)] [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:text-[12px] [&_input]:text-[var(--text-secondary)] [&_input]:outline-none [&_input::placeholder]:text-[var(--text-muted)] [&_select]:h-7 [&_select]:min-w-0 [&_select]:rounded-[5px] [&_select]:border [&_select]:border-[var(--border-light)] [&_select]:bg-[var(--bg-surface)] [&_select]:px-[6px] [&_select]:text-[11px] [&_select]:text-[var(--text-primary)] [&_select]:outline-none',
+  steerBar: 'relative grid grid-cols-[minmax(0,1fr)_34px] items-end gap-3 border-t border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[11px] text-[var(--text-muted)]',
   sendButton: 'grid h-[30px] w-[30px] cursor-pointer place-items-center rounded-[5px] border border-[var(--brand)] bg-[var(--brand)] text-[var(--bg-base)] shadow-[0_0_0_1px_var(--brand-dim)] hover:enabled:border-[var(--brand-hover)] hover:enabled:bg-[var(--brand-hover)] disabled:cursor-default disabled:opacity-45 [&_svg]:stroke-[2.25]',
   rightPanel: 'grid min-h-0 min-w-0 grid-rows-[37px_minmax(0,1fr)] bg-[var(--bg-surface)]',
   panelTabs: 'flex min-w-0 border-b border-[var(--border)] bg-[var(--bg-base)]',
@@ -424,6 +489,33 @@ function formatMetricScore(value?: number | null): string {
   return `${Math.round(value * 100)}%`;
 }
 
+function formatElapsed(startedAt: number, now: number): string {
+  return `${Math.max(0, Math.round((now - startedAt) / 1000))}s`;
+}
+
+function compactStreamText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 140);
+}
+
+function activeQuestInputTrigger(value: string): { mode: QuestInputSuggestionMode; query: string; start: number } | null {
+  const match = value.match(/(^|\s)([@/])([^\s@/]*)$/);
+  if (!match) return null;
+  return {
+    mode: match[2] === '@' ? 'file' : 'command',
+    query: match[3] ?? '',
+    start: value.length - (match[2].length + (match[3]?.length ?? 0)),
+  };
+}
+
+function toolCallLabel(delta: string): string | null {
+  try {
+    const parsed = JSON.parse(delta) as { name?: string };
+    return parsed.name ? `Tool call ${parsed.name}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function statusAction(status: QuestStatus): { labelKey: string; next: QuestStatus } | null {
   switch (status) {
     case 'running':
@@ -482,6 +574,8 @@ export default function QuestPage({
 }: Props) {
   const { t, t_fmt } = useTranslation();
   const voiceInputRef = React.useRef<RealtimeTranscriptionHandle | null>(null);
+  const questInputRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const specAskInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const [quests, setQuests] = useState<QuestRecord[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
   const [selected, setSelected] = useState<QuestDetail | null>(null);
@@ -489,10 +583,12 @@ export default function QuestPage({
   const [artifact, setArtifact] = useState<QuestArtifactSelection | null>(null);
   const [intentDraft, setIntentDraft] = useState('');
   const [specDraft, setSpecDraft] = useState('');
+  const [specMode, setSpecMode] = useState<SpecMode>('preview');
+  const [specSelection, setSpecSelection] = useState<SpecSelection | null>(null);
+  const [specSelectionQuestion, setSpecSelectionQuestion] = useState('');
   const [goal, setGoal] = useState('');
   const [questMode, setQuestMode] = useState<QuestMode>('solo');
   const [modelConfig, setModelConfig] = useState<QuestModelConfig>(defaultQuestModelConfig);
-  const [workspaceAutoWrite, setWorkspaceAutoWrite] = useState(true);
   const [modelOptions, setModelOptions] = useState<QuestModelOption[]>([]);
   const [voiceInputStatus, setVoiceInputStatus] = useState<VoiceInputStatus>('idle');
   const [canUseOpenAIVoiceInput, setCanUseOpenAIVoiceInput] = useState(false);
@@ -502,10 +598,16 @@ export default function QuestPage({
   const [titleDraft, setTitleDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [executingQuestId, setExecutingQuestId] = useState<string | null>(null);
+  const [liveQuestActivities, setLiveQuestActivities] = useState<LiveQuestActivity[]>([]);
+  const [liveNow, setLiveNow] = useState(() => Date.now());
   const [selectedReviewFiles, setSelectedReviewFiles] = useState<Set<string>>(new Set());
   const [selectedReviewGroups, setSelectedReviewGroups] = useState<Set<string>>(new Set());
+  const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
   const [questInput, setQuestInput] = useState('');
-  const [questInputMode, setQuestInputMode] = useState<QuestInputMode>('steer');
+  const [questInputFileTokens, setQuestInputFileTokens] = useState<QuestInputFileToken[]>([]);
+  const [questProjectFiles, setQuestProjectFiles] = useState<QuestProjectFile[]>([]);
+  const [questInputSuggestionMode, setQuestInputSuggestionMode] = useState<QuestInputSuggestionMode | null>(null);
+  const [questInputSuggestionIndex, setQuestInputSuggestionIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [errorOpen, setErrorOpen] = useState(false);
 
@@ -513,8 +615,14 @@ export default function QuestPage({
     setSelected(null);
     setIntentDraft('');
     setSpecDraft('');
+    setSpecMode('preview');
+    setSpecSelection(null);
+    setSpecSelectionQuestion('');
     setSelectedReviewFiles(new Set());
     setSelectedReviewGroups(new Set());
+    setExpandedEventIds(new Set());
+    setQuestInput('');
+    setQuestInputFileTokens([]);
     setTitleDraft('');
     setArtifact(null);
     setRenaming(false);
@@ -548,9 +656,11 @@ export default function QuestPage({
     setSelected(detail);
     setIntentDraft(detail.intent);
     setSpecDraft(detail.spec);
+    setSpecMode('preview');
+    setSpecSelection(null);
+    setSpecSelectionQuestion('');
     setQuestMode(detail.mode);
     setModelConfig(detail.model_config ?? defaultQuestModelConfig);
-    setWorkspaceAutoWrite(detail.autonomy?.workspace_writes_automatic ?? true);
     setTitleDraft(detail.title);
   }, []);
 
@@ -567,9 +677,11 @@ export default function QuestPage({
       setSelected(null);
       setIntentDraft('');
       setSpecDraft('');
+      setSpecMode('preview');
+      setSpecSelection(null);
+      setSpecSelectionQuestion('');
       setQuestMode('solo');
       setModelConfig(defaultQuestModelConfig);
-      setWorkspaceAutoWrite(true);
       setSelectedReviewFiles(new Set());
       setSelectedReviewGroups(new Set());
     }
@@ -584,6 +696,35 @@ export default function QuestPage({
     refreshList(initialQuestId).catch(reportError);
     refreshKnowledge().catch(reportError);
   }, []); // Load the cross-project registry once on entry.
+
+  useEffect(() => {
+    if (!currentProjectPath) return;
+    listQuestProjectFiles()
+      .then(files => setQuestProjectFiles(files))
+      .catch(() => setQuestProjectFiles([]));
+  }, [currentProjectPath]);
+
+  useEffect(() => {
+    if (!busy && !executingQuestId && liveQuestActivities.length === 0) return;
+    const timer = window.setInterval(() => setLiveNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy, executingQuestId, liveQuestActivities.length]);
+
+  useEffect(() => {
+    if (!executingQuestId) return;
+    const timer = window.setInterval(() => {
+      getQuest(executingQuestId)
+        .then(detail => {
+          setSelected(current => current?.id === detail.id ? detail : current);
+          setIntentDraft(detail.intent);
+          setSpecDraft(detail.spec);
+          setTitleDraft(detail.title);
+          resetReviewSelection(detail);
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [executingQuestId, resetReviewSelection]);
 
   useEffect(() => {
     let canceled = false;
@@ -677,6 +818,15 @@ export default function QuestPage({
     if (!goal.trim() || rewritingPrompt) return;
     setBusy(true);
     setError(null);
+    const startedAt = Date.now();
+    setLiveNow(startedAt);
+    setLiveQuestActivities([{
+      id: 'quest-create-start',
+      kind: 'status',
+      label: 'Planning Quest',
+      detail: goal.trim(),
+      startedAt,
+    }]);
     try {
       const detail = await createQuest('', goal.trim(), {
         mode: questMode,
@@ -684,6 +834,37 @@ export default function QuestPage({
           ...modelConfig,
           provider: modelOptions.find(model => model.id === modelConfig.model)?.provider ?? modelConfig.provider,
         },
+      }, (delta, kind) => {
+        const now = Date.now();
+        setLiveNow(now);
+        setLiveQuestActivities(prev => {
+          if (kind === 'tool_call') {
+            const label = toolCallLabel(delta);
+            if (!label) return prev;
+            return [...prev, {
+              id: `tool-${now}-${prev.length}`,
+              kind,
+              label,
+              startedAt: now,
+            }].slice(-8);
+          }
+          const detail = compactStreamText(delta);
+          if (!detail) return prev;
+          const last = prev[prev.length - 1];
+          if (last?.kind === kind) {
+            return [
+              ...prev.slice(0, -1),
+              { ...last, detail: compactStreamText(`${last.detail ?? ''} ${detail}`) },
+            ];
+          }
+          return [...prev, {
+            id: `${kind}-${now}-${prev.length}`,
+            kind,
+            label: kind === 'thinking' ? 'Thought' : 'Drafting',
+            detail,
+            startedAt: now,
+          }].slice(-8);
+        });
       });
       setGoal('');
       syncQuestDrafts(detail);
@@ -695,6 +876,7 @@ export default function QuestPage({
     } catch (reason) {
       reportError(reason);
     } finally {
+      setLiveQuestActivities([]);
       setBusy(false);
     }
   }, [goal, modelConfig, modelOptions, questMode, refreshList, rewritingPrompt, syncQuestDrafts]);
@@ -865,6 +1047,37 @@ export default function QuestPage({
     }
   }, [refreshList, selected, specDraft]);
 
+  const persistTasks = useCallback(async (tasks: QuestTask[]) => {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const detail = await updateQuestTasks(selected.id, tasks);
+      setSelected(detail);
+      await refreshList(detail.id);
+    } catch (reason) {
+      reportError(reason);
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshList, reportError, selected]);
+
+  const addTask = useCallback(() => {
+    if (!selected) return;
+    const id = `task-${Date.now()}`;
+    persistTasks([...selected.tasks, { id, title: 'New task', done: false }]);
+  }, [persistTasks, selected]);
+
+  const updateTask = useCallback((taskId: string, patch: Partial<QuestTask>) => {
+    if (!selected) return;
+    persistTasks(selected.tasks.map(task => task.id === taskId ? { ...task, ...patch } : task));
+  }, [persistTasks, selected]);
+
+  const deleteTask = useCallback((taskId: string) => {
+    if (!selected) return;
+    persistTasks(selected.tasks.filter(task => task.id !== taskId));
+  }, [persistTasks, selected]);
+
   const saveIntent = useCallback(async () => {
     if (!selected) return;
     setBusy(true);
@@ -897,7 +1110,7 @@ export default function QuestPage({
         },
         {
           ...selected.autonomy,
-          workspace_writes_automatic: workspaceAutoWrite,
+          workspace_writes_automatic: true,
           active_project_apply_requires_approval: true,
         },
       );
@@ -908,22 +1121,50 @@ export default function QuestPage({
     } finally {
       setBusy(false);
     }
-  }, [modelConfig, modelOptions, questMode, refreshList, reportError, selected, syncQuestDrafts, workspaceAutoWrite]);
+  }, [modelConfig, modelOptions, questMode, refreshList, reportError, selected, syncQuestDrafts]);
 
   const execute = useCallback(async () => {
     if (!selected) return;
     setBusy(true);
     setExecutingQuestId(selected.id);
     setError(null);
+    const startedAt = Date.now();
+    setLiveNow(startedAt);
+    setLiveQuestActivities([{
+      id: 'quest-execute-start',
+      kind: 'status',
+      label: 'Starting workspace',
+      detail: selected.mode,
+      startedAt,
+    }]);
     try {
       if (intentDraft !== selected.intent) {
+        setLiveQuestActivities(prev => [...prev, {
+          id: `status-intent-${Date.now()}`,
+          kind: 'status',
+          label: 'Saving intent',
+          startedAt: Date.now(),
+        }].slice(-8));
         await updateQuestIntent(selected.id, intentDraft);
       }
       if (specDraft !== selected.spec) {
+        setLiveQuestActivities(prev => [...prev, {
+          id: `status-spec-${Date.now()}`,
+          kind: 'status',
+          label: 'Saving spec',
+          startedAt: Date.now(),
+        }].slice(-8));
         await updateQuestSpec(selected.id, specDraft);
       }
       setSelected(prev => prev && prev.id === selected.id ? { ...prev, status: 'running' } : prev);
       setPanel('overview');
+      setLiveQuestActivities(prev => [...prev, {
+        id: `status-run-${Date.now()}`,
+        kind: 'status',
+        label: 'Running agent',
+        detail: 'watching timeline',
+        startedAt: Date.now(),
+      }].slice(-8));
       const detail = await executeQuest(selected.id);
       setSelected(detail);
       setIntentDraft(detail.intent);
@@ -937,6 +1178,7 @@ export default function QuestPage({
       reportError(reason);
     } finally {
       setExecutingQuestId(null);
+      setLiveQuestActivities([]);
       setBusy(false);
     }
   }, [intentDraft, refreshList, resetReviewSelection, selected, specDraft]);
@@ -1091,6 +1333,95 @@ export default function QuestPage({
     setArtifact(nextArtifact);
     setPanel(nextPanel);
   }, []);
+
+  const askAiAboutSpecSelection = useCallback(() => {
+    if (!specSelection?.text.trim()) return;
+    setSpecSelection(current => current ? { ...current, mode: 'input' } : current);
+    setSpecSelectionQuestion('');
+    requestAnimationFrame(() => {
+      specAskInputRef.current?.focus();
+    });
+  }, [specSelection]);
+
+  const submitSpecSelectionQuestion = useCallback(async () => {
+    if (!selected || !specSelection?.text.trim() || !specSelectionQuestion.trim()) return;
+    const message = [
+      specSelectionQuestion.trim(),
+      '',
+      'Selected spec context:',
+      specSelection.text.trim(),
+    ].join('\n');
+    setBusy(true);
+    setError(null);
+    try {
+      const detail = await addQuestNote(selected.id, 'steer', message);
+      setSelected(detail);
+      setIntentDraft(detail.intent);
+      setSpecDraft(detail.spec);
+      setTitleDraft(detail.title);
+      setSpecSelection(null);
+      setSpecSelectionQuestion('');
+      await refreshList(detail.id);
+    } catch (reason) {
+      reportError(reason);
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshList, reportError, selected, specSelection, specSelectionQuestion]);
+
+  const captureSpecTextareaSelection = useCallback((target: HTMLTextAreaElement) => {
+    const text = target.value.slice(target.selectionStart, target.selectionEnd).trim();
+    if (!text) {
+      setSpecSelection(null);
+      return;
+    }
+    setSpecSelection({
+      text,
+      top: 66,
+      left: 18,
+      mode: 'button',
+    });
+    setSpecSelectionQuestion('');
+  }, []);
+
+  const captureSpecPreviewSelection = useCallback((container: HTMLDivElement) => {
+    const selection = window.getSelection();
+    const text = selection?.toString().trim() ?? '';
+    if (!selection || selection.rangeCount === 0 || !text) {
+      setSpecSelection(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) {
+      setSpecSelection(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    setSpecSelection({
+      text,
+      top: Math.max(12, rect.top - containerRect.top - 42),
+      left: Math.min(Math.max(12, rect.left - containerRect.left), Math.max(12, containerRect.width - 112)),
+      mode: 'button',
+    });
+    setSpecSelectionQuestion('');
+  }, []);
+
+  const renderLiveActivities = useCallback((compact = false) => {
+    if (liveQuestActivities.length === 0) return null;
+    return (
+      <div className={compact ? 'mt-2 border-l border-[var(--border)] py-1 pl-4' : questClasses.liveActivityList}>
+        {liveQuestActivities.map(activity => (
+          <div key={activity.id} className={questClasses.liveActivityEntry}>
+            {activity.kind === 'thinking' || activity.kind === 'status' ? <IconLoader /> : activity.kind === 'tool_call' ? <IconCode /> : <IconFile />}
+            <b>{activity.label}</b>
+            <span>{activity.detail}</span>
+            <time>{formatElapsed(activity.startedAt, liveNow)}</time>
+          </div>
+        ))}
+      </div>
+    );
+  }, [liveNow, liveQuestActivities]);
 
   const applySelectedQuest = useCallback(async (files?: string[], transactionGroupIds?: string[]) => {
     if (!selected) return;
@@ -1305,23 +1636,28 @@ export default function QuestPage({
   }, [refreshList, reportError, selected]);
 
   const submitQuestInput = useCallback(async () => {
-    if (!selected || !questInput.trim()) return;
+    const message = [
+      ...questInputFileTokens.map(token => `@${token.path}`),
+      questInput.trim(),
+    ].filter(Boolean).join(' ');
+    if (!selected || !message) return;
     setBusy(true);
     setError(null);
     try {
-      const detail = await addQuestNote(selected.id, questInputMode, questInput.trim());
+      const detail = await addQuestNote(selected.id, 'steer', message);
       setSelected(detail);
       setIntentDraft(detail.intent);
       setSpecDraft(detail.spec);
       setTitleDraft(detail.title);
       setQuestInput('');
+      setQuestInputFileTokens([]);
       await refreshList(detail.id);
     } catch (reason) {
       reportError(reason);
     } finally {
       setBusy(false);
     }
-  }, [questInput, questInputMode, refreshList, reportError, selected]);
+  }, [questInput, questInputFileTokens, refreshList, reportError, selected]);
 
   const requestQuickFix = useCallback(async (issue: string) => {
     if (!selected) return;
@@ -1422,6 +1758,110 @@ export default function QuestPage({
     transition,
   ]);
 
+  const questInputCommands = useMemo<QuestInputSuggestion[]>(() => {
+    if (!selected) return [];
+    return [
+      {
+        id: 'execute',
+        label: 'Run Quest',
+        detail: 'Execute the current spec',
+        value: '/run',
+        mode: 'command',
+        run: execute,
+      },
+      {
+        id: 'continue',
+        label: 'Continue',
+        detail: 'Resume from current evidence',
+        value: '/continue',
+        mode: 'command',
+        run: () => continueSelectedQuest(),
+      },
+      {
+        id: 'review',
+        label: 'Open review',
+        detail: 'Show changed files and validation evidence',
+        value: '/review',
+        mode: 'command',
+        run: () => setPanel('review'),
+      },
+      {
+        id: 'spec',
+        label: 'Open spec',
+        detail: 'Show the Quest specification',
+        value: '/spec',
+        mode: 'command',
+        run: () => setPanel('spec'),
+      },
+      {
+        id: 'cancel',
+        label: 'Cancel Quest',
+        detail: 'Mark the Quest as canceled',
+        value: '/cancel',
+        mode: 'command',
+        run: cancelSelectedQuest,
+      },
+      {
+        id: 'reopen',
+        label: 'Reopen Quest',
+        detail: 'Return an archived or canceled Quest to editing',
+        value: '/reopen',
+        mode: 'command',
+        run: reopenSelectedQuest,
+      },
+    ];
+  }, [cancelSelectedQuest, continueSelectedQuest, execute, reopenSelectedQuest, selected]);
+
+  const questInputTrigger = useMemo(() => activeQuestInputTrigger(questInput), [questInput]);
+  const questInputSuggestions = useMemo<QuestInputSuggestion[]>(() => {
+    if (!questInputTrigger) return [];
+    const query = questInputTrigger.query.toLowerCase();
+    if (questInputTrigger.mode === 'file') {
+      return questProjectFiles
+        .filter(file => file.path.toLowerCase().includes(query))
+        .slice(0, 8)
+        .map(file => ({
+          id: `file:${file.path}`,
+          label: file.path.split('/').pop() ?? file.path,
+          detail: file.path,
+          value: `@${file.path}`,
+          mode: 'file',
+        }));
+    }
+    return questInputCommands
+      .filter(command => command.value.slice(1).includes(query) || command.label.toLowerCase().includes(query))
+      .slice(0, 8);
+  }, [questInputCommands, questInputTrigger, questProjectFiles]);
+
+  useEffect(() => {
+    setQuestInputSuggestionIndex(0);
+    setQuestInputSuggestionMode(questInputTrigger?.mode ?? null);
+  }, [questInputTrigger?.mode, questInputTrigger?.query]);
+
+  useEffect(() => {
+    const input = questInputRef.current;
+    if (!input) return;
+    input.style.height = '30px';
+    input.style.height = `${Math.min(150, Math.max(30, input.scrollHeight))}px`;
+  }, [questInput]);
+
+  const chooseQuestInputSuggestion = useCallback(async (suggestion: QuestInputSuggestion) => {
+    if (!questInputTrigger) return;
+    if (suggestion.mode === 'command' && suggestion.run) {
+      setQuestInput('');
+      setQuestInputSuggestionMode(null);
+      await suggestion.run();
+      return;
+    }
+    const prefix = questInput.slice(0, questInputTrigger.start);
+    const path = suggestion.value.slice(1);
+    setQuestInput(prefix.trimEnd());
+    setQuestInputFileTokens(tokens => tokens.some(token => token.path === path)
+      ? tokens
+      : [...tokens, { path, kind: suggestion.detail === path ? 'Asset' : suggestion.detail }]);
+    setQuestInputSuggestionMode(null);
+  }, [questInput, questInputTrigger]);
+
   return (
     <div className={questClasses.shell}>
       <header className={questClasses.globalHeader}>
@@ -1479,7 +1919,7 @@ export default function QuestPage({
                 disabled={!currentProjectPath}
               />
               <footer>
-                <div className="flex min-w-0 flex-1 items-center gap-1 text-[12px] text-[var(--text-secondary)]">
+                <div className="flex min-w-0 flex-1 items-center gap-0 text-[12px] text-[var(--text-secondary)]">
                   <QuestDropdown
                     value={questMode}
                     options={[
@@ -1489,18 +1929,9 @@ export default function QuestPage({
                     onChange={value => setQuestMode(value as QuestMode)}
                     disabled={busy}
                     compact
-                    widthClass="w-[92px]"
+                    widthClass="w-[64px]"
                     menuWidthClass="w-[120px]"
                   />
-                  <label className="inline-flex items-center gap-[6px] rounded-[5px] px-1 py-[5px] text-[11px] font-medium text-[var(--text-secondary)]">
-                    <input
-                      type="checkbox"
-                      checked={workspaceAutoWrite}
-                      onChange={event => setWorkspaceAutoWrite(event.target.checked)}
-                      disabled={busy}
-                    />
-                    {t('quest_auto')}
-                  </label>
                   <QuestDropdown
                     value={modelConfig.model}
                     options={modelSelectOptions}
@@ -1553,6 +1984,7 @@ export default function QuestPage({
                 </div>
               </footer>
             </div>
+            {renderLiveActivities()}
             <div className={questClasses.introCard}>
               <IconSparkles />
               <div>
@@ -1628,38 +2060,73 @@ export default function QuestPage({
                   <article className={questClasses.streamEntry}>
                     <span className={questClasses.timelineDot} />
                     <div>
-                      <header><strong>{t('quest_goal_accepted')}</strong><time>{formatTime(selected.created_at_ms)}</time></header>
-                      <small>{t('quest_user_prompt')}</small>
+                      <button type="button" disabled>
+                        <strong>{t('quest_goal_accepted')}</strong>
+                        <small>{t('quest_user_prompt')}</small>
+                      </button>
                     </div>
                   </article>
-                  {selected.events.map((event, index) => (
-                    <article key={event.id} className={questClasses.streamEntry}>
-                      <span className={cn(questClasses.timelineDot, index === selected.events.length - 1 && 'after:hidden')} />
-                      <div>
-                        <header><strong>{event.summary}</strong><time>{formatTime(event.timestamp_ms)}</time></header>
-                        <small>{event.kind.replaceAll('_', ' ')}</small>
-                        {hasEventDetails(event.details) && (
-                          <details>
-                            <summary>{t('quest_evidence')}</summary>
-                            <pre>{formatEventDetails(event.details)}</pre>
-                          </details>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                  {selected.events.map((event, index) => {
+                    const hasDetails = hasEventDetails(event.details);
+                    const expanded = expandedEventIds.has(event.id);
+                    return (
+                      <article key={event.id} className={questClasses.streamEntry}>
+                        <span className={cn(
+                          questClasses.timelineDot,
+                          index === selected.events.length - 1
+                            && selected.status !== 'draft'
+                            && !['draft', 'specified'].includes(selected.status)
+                            && executingQuestId !== selected.id
+                            && 'after:hidden',
+                        )} />
+                        <div>
+                          <button
+                            className="group"
+                            type="button"
+                            disabled={!hasDetails}
+                            onClick={() => {
+                              if (!hasDetails) return;
+                              setExpandedEventIds(ids => {
+                                const next = new Set(ids);
+                                if (next.has(event.id)) {
+                                  next.delete(event.id);
+                                } else {
+                                  next.add(event.id);
+                                }
+                                return next;
+                              });
+                            }}
+                          >
+                            <strong>{event.summary}</strong>
+                            <small>{event.kind.replaceAll('_', ' ')}</small>
+                            {hasDetails && (
+                              <IconChevronRight className={cn(questClasses.streamArrow, expanded && 'rotate-90 opacity-100')} />
+                            )}
+                          </button>
+                          {hasDetails && expanded && (
+                            <pre className={questClasses.streamEvidence}>{formatEventDetails(event.details)}</pre>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
                   <article className={cn(questClasses.streamEntry, questClasses.nextEntry)}>
                     <span className={cn(questClasses.timelineDot, questClasses.timelineDotNext)} />
                     <div>
-                      <header><strong>{selected.next_action.label}</strong><time>{t('quest_time_next')}</time></header>
-                      <small>{selected.next_action.reason}</small>
+                      <button type="button" disabled>
+                        <strong>{selected.next_action.label}</strong>
+                        <small>{selected.next_action.reason}</small>
+                      </button>
                     </div>
                   </article>
                   {['draft', 'specified'].includes(selected.status) && (
                     <article className={cn(questClasses.streamEntry, questClasses.nextEntry)}>
                       <span className={cn(questClasses.timelineDot, questClasses.timelineDotNext)} />
                       <div>
-                        <header><strong>{t('quest_spec_ready')}</strong><time>{t('quest_time_next')}</time></header>
-                        <small>{t('quest_spec_ready_desc')}</small>
+                        <button type="button" disabled>
+                          <strong>{t('quest_spec_ready')}</strong>
+                          <small>{t('quest_spec_ready_desc')}</small>
+                        </button>
                       </div>
                     </article>
                   )}
@@ -1667,8 +2134,11 @@ export default function QuestPage({
                     <article className={cn(questClasses.streamEntry, questClasses.liveEntry)}>
                       <span className={cn(questClasses.timelineDot, questClasses.timelineDotLive, questClasses.timelineDotLast)} />
                       <div>
-                        <header><strong>{t('quest_execution_running')}</strong><time>{t('quest_time_live')}</time></header>
-                        <small>{t('quest_execution_running_desc')}</small>
+                        <button type="button" disabled>
+                          <strong>{t('quest_execution_running')}</strong>
+                          <small>{t('quest_execution_running_desc')}</small>
+                        </button>
+                        {renderLiveActivities(true)}
                       </div>
                     </article>
                   )}
@@ -1680,26 +2150,85 @@ export default function QuestPage({
                   )}
                 </div>
                 <div className={questClasses.steerBar}>
-                  <select
-                    value={questInputMode}
-                    onChange={event => setQuestInputMode(event.target.value as QuestInputMode)}
-                    disabled={busy}
-                  >
-                    <option value="steer">{t('quest_input_steer')}</option>
-                    <option value="clarify">{t('quest_input_clarify')}</option>
-                    <option value="manual_intervention">{t('quest_input_manual')}</option>
-                    <option value="pause">{t('quest_input_pause')}</option>
-                  </select>
-                  <input
-                    value={questInput}
-                    onChange={event => setQuestInput(event.target.value)}
-                    onKeyDown={event => {
-                      if (event.key === 'Enter') submitQuestInput();
-                    }}
-                    placeholder={t('quest_input_placeholder')}
-                    disabled={busy || !selected}
-                  />
-                  <button className={questClasses.sendButton} onClick={submitQuestInput} disabled={busy || !questInput.trim()}>
+                  {questInputSuggestionMode && questInputSuggestions.length > 0 && (
+                    <div className={questInputSuggestClass}>
+                      {questInputSuggestions.map((suggestion, index) => (
+                        <button
+                          key={suggestion.id}
+                          type="button"
+                          className={questInputSuggestItemClass(index === questInputSuggestionIndex)}
+                          onMouseDown={event => {
+                            event.preventDefault();
+                            chooseQuestInputSuggestion(suggestion).catch(reportError);
+                          }}
+                        >
+                          {suggestion.mode === 'file' ? <IconFile /> : <IconCode />}
+                          <span>
+                            <strong>{suggestion.label}</strong>
+                            <small>{suggestion.detail}</small>
+                          </span>
+                          <kbd>{suggestion.value}</kbd>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className={questInputTokenBoxClass}>
+                    {questInputFileTokens.map(token => (
+                      <span className={questInputFileTokenClass} key={token.path}>
+                        <IconFile />
+                        <span title={token.path}>{token.path}</span>
+                        <button
+                          type="button"
+                          onClick={() => setQuestInputFileTokens(tokens => tokens.filter(item => item.path !== token.path))}
+                          title="Remove file"
+                          aria-label={`Remove ${token.path}`}
+                          disabled={busy}
+                        >
+                          <IconX />
+                        </button>
+                      </span>
+                    ))}
+                    <textarea
+                      ref={questInputRef}
+                      rows={1}
+                      className={questInputTextareaClass}
+                      value={questInput}
+                      onChange={event => setQuestInput(event.target.value)}
+                      onKeyDown={event => {
+                        if (questInputSuggestions.length > 0 && ['ArrowDown', 'ArrowUp', 'Tab', 'Enter', 'Escape'].includes(event.key)) {
+                          if (event.key === 'Escape') {
+                            event.preventDefault();
+                            setQuestInputSuggestionMode(null);
+                            return;
+                          }
+                          if (event.key === 'ArrowDown') {
+                            event.preventDefault();
+                            setQuestInputSuggestionIndex(index => Math.min(index + 1, questInputSuggestions.length - 1));
+                            return;
+                          }
+                          if (event.key === 'ArrowUp') {
+                            event.preventDefault();
+                            setQuestInputSuggestionIndex(index => Math.max(index - 1, 0));
+                            return;
+                          }
+                          event.preventDefault();
+                          chooseQuestInputSuggestion(questInputSuggestions[questInputSuggestionIndex]).catch(reportError);
+                          return;
+                        }
+                        if (event.key === 'Backspace' && !questInput) {
+                          setQuestInputFileTokens(tokens => tokens.slice(0, -1));
+                          return;
+                        }
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          submitQuestInput();
+                        }
+                      }}
+                      placeholder={questInputFileTokens.length === 0 ? `${t('quest_input_placeholder')}  @ file  / command` : 'Message'}
+                      disabled={busy || !selected}
+                    />
+                  </div>
+                  <button className={questClasses.sendButton} onClick={submitQuestInput} disabled={busy || (!questInput.trim() && questInputFileTokens.length === 0)}>
                     <IconSend />
                   </button>
                 </div>
@@ -1738,6 +2267,45 @@ export default function QuestPage({
                         ))}
                       </ol>
 	                    </section>
+
+                    <section>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <h2 className="m-0">Tasks <b>{selected.tasks.filter(task => task.done).length}/{selected.tasks.length}</b></h2>
+                        <button className={sectionHeadingButton} onClick={addTask} disabled={busy}>
+                          <IconPlus /> Add
+                        </button>
+                      </div>
+                      <div className={taskChecklistClass}>
+                        {selected.tasks.length === 0 ? (
+                          <p className={mutedText}>No tasks yet.</p>
+                        ) : selected.tasks.map(task => (
+                          <div className={taskChecklistRowClass} key={task.id}>
+                            <input
+                              type="checkbox"
+                              checked={task.done}
+                              onChange={event => updateTask(task.id, { done: event.target.checked })}
+                              disabled={busy}
+                            />
+                            <input
+                              type="text"
+                              value={task.title}
+                              onChange={event => {
+                                const title = event.target.value;
+                                setSelected(current => current && current.id === selected.id
+                                  ? { ...current, tasks: current.tasks.map(item => item.id === task.id ? { ...item, title } : item) }
+                                  : current);
+                              }}
+                              onBlur={event => updateTask(task.id, { title: event.target.value })}
+                              disabled={busy}
+                              className={task.done ? 'line-through opacity-60' : ''}
+                            />
+                            <button onClick={() => deleteTask(task.id)} disabled={busy} title="Delete" aria-label="Delete">
+                              <IconX />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
 
 	                    <section>
 	                      <h2>{t('quest_execution')} <b>{selected.mode}</b></h2>
@@ -1785,20 +2353,11 @@ export default function QuestPage({
 	                        />
 	                      </div>
 	                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
-	                        <label className={executionToggleClass}>
-	                          <input
-	                            type="checkbox"
-	                            checked={workspaceAutoWrite}
-	                            onChange={event => setWorkspaceAutoWrite(event.target.checked)}
-	                            disabled={busy || executionLockedStatuses.includes(selected.status)}
-	                          />
-	                          {t('quest_workspace_auto_write')}
-	                        </label>
 	                        <span className="inline-flex h-8 items-center rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] px-[10px] text-[11px] text-[var(--text-muted)]">{t('quest_active_apply_approval')}</span>
 	                        <button
 	                          className={sectionHeadingButton}
 	                          onClick={saveExecutionConfig}
-	                          disabled={busy || (questMode === selected.mode && workspaceAutoWrite === selected.autonomy.workspace_writes_automatic && JSON.stringify(modelConfig) === JSON.stringify(selected.model_config))}
+	                          disabled={busy || (questMode === selected.mode && selected.autonomy.workspace_writes_automatic === true && JSON.stringify(modelConfig) === JSON.stringify(selected.model_config))}
 	                        >
                           <IconEdit /> {t('quest_save_execution')}
                         </button>
@@ -1913,17 +2472,97 @@ export default function QuestPage({
                     <div className={questClasses.sectionHeading}>
                       <div><span>{t('quest_ai_tool_spec')}</span><strong>{t('quest_ai_tool_spec_desc')}</strong></div>
                       <div>
+                        <button className={sectionHeadingButton} onClick={() => { setSpecMode(specMode === 'edit' ? 'preview' : 'edit'); setSpecSelection(null); setSpecSelectionQuestion(''); }}>
+                          {specMode === 'edit' ? 'Preview' : 'Edit'}
+                        </button>
                         <button className={sectionHeadingButton} onClick={saveSpec} disabled={busy || specDraft === selected.spec}><IconEdit /> {t('btn_save')}</button>
                         <button className={cn(sectionHeadingButton, primaryButton)} onClick={execute} disabled={busy || selected.status === 'archived'}>
                           {busy ? <QuestLoader /> : <IconPlay />} {t('quest_approve')}
                         </button>
                       </div>
                     </div>
-                    <textarea
-                      value={specDraft}
-                      onChange={event => setSpecDraft(event.target.value)}
-                      disabled={!['draft', 'clarifying', 'specified', 'planning', 'waiting_for_user', 'blocked'].includes(selected.status)}
-                    />
+                    <div className="relative flex min-h-0 flex-1">
+                      {specSelection && (
+                        specSelection.mode === 'button' ? (
+                          <button
+                            className={askAiSelectionButtonClass}
+                            style={{ top: specSelection.top, left: specSelection.left }}
+                            onClick={askAiAboutSpecSelection}
+                            type="button"
+                          >
+                            <IconSparkles /> Ask AI
+                          </button>
+                        ) : (
+                          <div
+                            className={askAiSelectionPromptClass}
+                            style={{ top: specSelection.top, left: specSelection.left }}
+                          >
+                            <textarea
+                              ref={specAskInputRef}
+                              className={askAiSelectionPromptInputClass}
+                              value={specSelectionQuestion}
+                              onChange={event => setSpecSelectionQuestion(event.target.value)}
+                              onKeyDown={event => {
+                                if (event.key === 'Escape') {
+                                  event.preventDefault();
+                                  setSpecSelection(null);
+                                  setSpecSelectionQuestion('');
+                                  return;
+                                }
+                                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                                  event.preventDefault();
+                                  submitSpecSelectionQuestion();
+                                }
+                              }}
+                              placeholder="Ask about this selection..."
+                              disabled={busy}
+                            />
+                            <div className={askAiSelectionPromptActionsClass}>
+                              <button
+                                className="border-[var(--border-light)] bg-transparent text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:text-[var(--text-primary)]"
+                                type="button"
+                                onClick={() => {
+                                  setSpecSelection(null);
+                                  setSpecSelectionQuestion('');
+                                }}
+                                disabled={busy}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                className="border-[var(--brand)] bg-[var(--brand)] text-[var(--bg-base)] hover:border-[var(--brand-hover)] hover:bg-[var(--brand-hover)]"
+                                type="button"
+                                onClick={submitSpecSelectionQuestion}
+                                disabled={busy || !specSelectionQuestion.trim()}
+                              >
+                                <IconSend /> Ask
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      )}
+                      {specMode === 'edit' ? (
+                        <textarea
+                          value={specDraft}
+                          onChange={event => {
+                            setSpecDraft(event.target.value);
+                            setSpecSelection(null);
+                          }}
+                          onSelect={event => captureSpecTextareaSelection(event.currentTarget)}
+                          disabled={!['draft', 'clarifying', 'specified', 'planning', 'waiting_for_user', 'blocked'].includes(selected.status)}
+                        />
+                      ) : (
+                        <div
+                          className={markdownPreviewClass}
+                          onMouseUp={event => captureSpecPreviewSelection(event.currentTarget)}
+                          onKeyUp={event => captureSpecPreviewSelection(event.currentTarget)}
+                        >
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {specDraft || selected.spec}
+                          </ReactMarkdown>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 

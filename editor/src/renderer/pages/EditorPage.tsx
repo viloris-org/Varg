@@ -260,6 +260,8 @@ const workspaceClass = {
   resizeHandle: 'relative z-10 w-1 shrink-0 cursor-col-resize hover:bg-[var(--accent)] hover:opacity-30 active:bg-[var(--accent)] active:opacity-30 focus-visible:bg-[var(--accent-dim)] focus-visible:outline focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-[var(--accent)]',
 };
 
+const askAiButtonClass = 'inline-flex min-h-[30px] cursor-pointer items-center gap-1.5 rounded-md border border-[var(--brand)] bg-[var(--brand)] px-2.5 text-[10px] font-semibold text-[var(--bg-base)] shadow-[0_0_0_1px_var(--brand-dim),0_8px_18px_rgba(34,197,94,0.24)] hover:border-[var(--brand-hover)] hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:stroke-[2.25]';
+
 const prdClass = {
   document: 'mx-auto mt-[34px] mb-16 w-[min(820px,calc(100%_-_64px))] text-[var(--text-secondary)]',
   header: 'border-b border-[var(--border)] pb-7',
@@ -402,7 +404,7 @@ const diagnosticsClass = {
 
 const artifactPopoverClass = {
   root: 'fixed z-[90] translate-x-2.5 translate-y-2.5 drop-shadow-[0_10px_24px_rgba(0,0,0,0.42)]',
-  button: 'flex h-[30px] cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border-light)] bg-[var(--bg-elevated)] px-2.5 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:bg-[var(--bg-hover)]',
+  button: askAiButtonClass,
   panel: 'w-[310px] overflow-hidden rounded-lg border border-[var(--border-light)] bg-[var(--bg-elevated)]',
   header: 'flex h-8 items-center justify-between gap-2 border-b border-[var(--border)] px-[9px] font-mono text-[10px] text-[var(--text-secondary)]',
   label: 'overflow-hidden text-ellipsis whitespace-nowrap',
@@ -1370,7 +1372,7 @@ function SelectionOverlay({ sceneTree, selectedId, camera, width, height, viewMo
         cy={screenPos.y}
         r={18}
         fill="none"
-        stroke="var(--accent, #A1A1AA)"
+        stroke="var(--brand, #22C55E)"
         strokeWidth={2}
         strokeDasharray="4 3"
         opacity={0.9}
@@ -2359,7 +2361,7 @@ export default function EditorPage({
                       </button>
                     )}
                     <button
-                      className={taskClass.artifactButton}
+                      className={askAiButtonClass}
                       onClick={() => setContextualRequest({
                         id: Date.now(),
                         prompt: `Inspect this Quest artifact and suggest the next local editor check.\n\n${openedQuestArtifact.title}\n${openedQuestArtifact.description}\n${openedQuestArtifact.focusPath ?? ''}`,
