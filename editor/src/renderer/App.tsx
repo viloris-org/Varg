@@ -192,7 +192,7 @@ export default function App() {
 
   // ── Render ──
 
-  const locale = hubState?.locale ?? 'en';
+  const locale = hubState?.locale ?? 'zh';
 
   if (screen === 'loading') {
     return (

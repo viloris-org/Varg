@@ -23,7 +23,7 @@ interface I18nContextValue {
 // ─── Context ─────────────────────────────────────────────────────────────────
 
 const I18nContext = createContext<I18nContextValue>({
-  locale: 'en',
+  locale: 'zh',
   t: (key: string) => key,
   t_fmt: (key: string) => key,
   loading: true,

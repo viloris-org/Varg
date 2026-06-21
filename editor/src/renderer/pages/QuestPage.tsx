@@ -257,7 +257,7 @@ function statusTextClass(status: QuestStatus | string): string {
   return 'text-[#64748b]';
 }
 
-function statusDotClass(status: QuestStatus): string {
+function statusDotClass(status: QuestStatus | string): string {
   if (status === 'completed') return 'bg-[#22c55e]';
   if (status === 'running' || status === 'applying' || status === 'validating' || status === 'repairing') return 'bg-[#52525b] shadow-[0_0_7px_rgba(82,82,91,0.35)]';
   if (status === 'ready_for_review') return 'bg-[#3f3f46]';

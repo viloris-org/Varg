@@ -85,10 +85,9 @@ fn csm_uniform_exposes_shadow_sampling_params() {
 
 #[test]
 fn csm_bounds_snap_to_shadow_texel_grid() {
-    let (min_x, max_x, min_y, max_y) =
-        snap_csm_bounds_to_texel_grid(-3.217, 8.911, -2.603, 4.119);
-    let texel_size = ((8.911_f32 + 3.217).max(4.119 + 2.603) / CSM_SHADOW_RESOLUTION as f32)
-        .max(f32::EPSILON);
+    let (min_x, max_x, min_y, max_y) = snap_csm_bounds_to_texel_grid(-3.217, 8.911, -2.603, 4.119);
+    let texel_size =
+        ((8.911_f32 + 3.217).max(4.119 + 2.603) / CSM_SHADOW_RESOLUTION as f32).max(f32::EPSILON);
 
     for value in [min_x, max_x, min_y, max_y] {
         let snapped = value / texel_size;

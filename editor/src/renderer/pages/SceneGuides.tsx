@@ -76,14 +76,6 @@ export default function SceneGuides({
       : createPerspectiveMatrix(fovRadians, aspect, 0.01, 1000),
     [vpW, vpH, viewMode, distance]
   );
-  const fovRadians = 60 * Math.PI / 180;
-
-  const vpW = Math.max(viewportWidth, 1);
-  const vpH = Math.max(viewportHeight, 1);
-  const projMatrix = useMemo(() =>
-    createPerspectiveMatrix(fovRadians, vpW / vpH, 0.01, 1000),
-    [vpW, vpH]
-  );
 
   const projected = useMemo(() => {
     return guides.map(guide => {
@@ -91,7 +83,7 @@ export default function SceneGuides({
       if (!screen) return null;
       return { ...guide, screen };
     }).filter(Boolean) as (GuideEntity & { screen: { x: number; y: number; depth: number } })[];
-  }, [guides, viewMatrix, projMatrix]);
+  }, [guides, viewMatrix, projMatrix, vpW, vpH]);
 
   if (projected.length === 0) return null;
 

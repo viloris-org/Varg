@@ -96,3 +96,6 @@ prompts.local.md
 
 # Generated bundle files
 /usr/
+
+# Tauri generates this platform-specific schema during macOS dev runs
+/editor/src-tauri/gen/schemas/macOS-schema.json

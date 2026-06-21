@@ -688,7 +688,7 @@ function ComponentFieldEditor({ componentType, fieldName, value, onCommit }: {
         <span>{componentFieldLabel(componentType, fieldName)}</span>
         <select
           className={inspectorClass.select}
-          value={value}
+          value={typeof value === 'string' ? value : ''}
           onChange={event => onCommit(fieldName, event.currentTarget.value)}
         >
           {options.map(option => (

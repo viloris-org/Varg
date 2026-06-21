@@ -252,16 +252,18 @@ resource_scene = "씬"
 
 # Hub projects page
 hub_projects_title = "프로젝트"
-hub_launch = "▶  실행"
+hub_launch = "에디터 열기"
 hub_delete = "삭제"
-hub_new_project = "+ 새 프로젝트"
+hub_new_project = "새 프로젝트"
 hub_search = "프로젝트 검색…"
 hub_search_no_matches = "일치하는 항목 없음"
 hub_search_no_matches_desc = "검색과 일치하는 프로젝트가 없습니다. 다른 이름을 시도해 보세요."
 hub_no_projects = "프로젝트가 없습니다"
-hub_no_projects_desc = "프로젝트를 만들거나 열어서 Aster를 시작하세요."
-hub_empty = "프로젝트가 없습니다. '+ 새 프로젝트'를 클릭하여 만드세요."
+hub_no_projects_desc = "먼저 프로젝트를 만들거나 열고, 씬·에셋·스크립트·인스펙터·저장/실행/패키징 흐름을 진행하세요."
+hub_empty = "프로젝트가 없습니다. ‘새 프로젝트’를 클릭하여 만드세요."
 hub_open_folder = "폴더 열기"
+hub_open_project = "기존 프로젝트 열기"
+hub_prototype_notice = "인수 메모: Aster는 아직 초기 게임 에디터 프로토타입입니다. 우선 프로젝트, 씬 뷰포트, 에셋, 스크립트, 인스펙터, 저장/실행/패키징 루프에 집중하고 Quest Mode는 실험 기능으로 둡니다."
 
 # Hub installs page
 hub_installs_title = "설치"

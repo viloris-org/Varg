@@ -252,16 +252,18 @@ resource_scene = "場景"
 
 # Hub projects page
 hub_projects_title = "專案"
-hub_launch = "▶  啟動"
+hub_launch = "打開編輯器"
 hub_delete = "刪除"
-hub_new_project = "+ 新增專案"
+hub_new_project = "新增專案"
 hub_search = "搜尋專案…"
 hub_search_no_matches = "無符合結果"
 hub_search_no_matches_desc = "沒有與搜尋相符的專案，請嘗試其他名稱。"
 hub_no_projects = "暫無專案"
-hub_no_projects_desc = "建立或開啟一個專案以開始使用 Aster。"
-hub_empty = "暫無專案。點擊 '+ 新增專案' 建立一個。"
+hub_no_projects_desc = "先新增或開啟專案，再進入場景、資源、腳本、檢視器、儲存 / 執行 / 打包工作區。"
+hub_empty = "暫無專案。點擊「新增專案」建立一個。"
 hub_open_folder = "開啟資料夾"
+hub_open_project = "開啟既有專案"
+hub_prototype_notice = "接手說明：目前 Aster 仍是早期遊戲編輯器原型。建議先圍繞專案、場景視埠、資源、腳本、檢視器、儲存 / 執行 / 打包閉環推進；Quest Mode 已降級為實驗功能。"
 
 # Hub installs page
 hub_installs_title = "引擎版本"

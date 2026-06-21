@@ -4,8 +4,8 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Locale {
-    #[default]
     En,
+    #[default]
     Zh,
     Ja,
     Ko,
@@ -154,8 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn locale_default_is_english() {
-        assert_eq!(Locale::default(), Locale::En);
+    fn locale_default_is_chinese() {
+        assert_eq!(Locale::default(), Locale::Zh);
         assert_ne!(Locale::En, Locale::Zh);
     }
 

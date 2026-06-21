@@ -29,6 +29,8 @@ use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 use runtime_min::{headless_services_from_scene, RuntimeServices};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
 use tauri::{
     image::Image,
     utils::config::Color,
@@ -113,12 +115,13 @@ fn parse_thinking_effort(value: &str) -> Option<engine_ai::ThinkingEffort> {
 
 fn parse_locale(value: Option<&str>) -> Locale {
     match value {
+        Some("en") => Locale::En,
         Some("zh") => Locale::Zh,
         Some("ja") => Locale::Ja,
         Some("ko") => Locale::Ko,
         Some("es") => Locale::Es,
         Some("zh_hant") => Locale::ZhHant,
-        _ => Locale::En,
+        _ => Locale::Zh,
     }
 }
 
@@ -7268,6 +7271,10 @@ fn timestamp_now() -> String {
 }
 
 fn dirs_config_dir() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("GAME_EDITOR_AI_ROOT") {
+        return Some(PathBuf::from(root).join(".aster").join("config"));
+    }
+
     #[cfg(target_os = "linux")]
     {
         std::env::var("XDG_CONFIG_HOME")
@@ -7299,6 +7306,10 @@ fn dirs_config_dir() -> Option<PathBuf> {
 }
 
 fn dirs_data_dir() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("GAME_EDITOR_AI_ROOT") {
+        return Some(PathBuf::from(root).join(".aster").join("data"));
+    }
+
     #[cfg(target_os = "linux")]
     {
         std::env::var("XDG_DATA_HOME")
@@ -7452,6 +7463,67 @@ fn apply_desktop_window_adaptations(app: &tauri::App) -> Result<(), Box<dyn std:
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn install_chinese_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    let about = AboutMetadata {
+        name: Some("Aster 游戏编辑器".to_owned()),
+        version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        ..Default::default()
+    };
+    let app_menu = SubmenuBuilder::new(app, "Aster 游戏编辑器")
+        .about_with_text("关于 Aster 游戏编辑器", Some(about))
+        .separator()
+        .services_with_text("服务")
+        .separator()
+        .hide_with_text("隐藏 Aster 游戏编辑器")
+        .hide_others_with_text("隐藏其他")
+        .show_all_with_text("全部显示")
+        .separator()
+        .quit_with_text("退出 Aster 游戏编辑器")
+        .build()?;
+    let file_menu = SubmenuBuilder::new(app, "文件")
+        .close_window_with_text("关闭窗口")
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, "编辑")
+        .undo_with_text("撤销")
+        .redo_with_text("重做")
+        .separator()
+        .cut_with_text("剪切")
+        .copy_with_text("复制")
+        .paste_with_text("粘贴")
+        .select_all_with_text("全选")
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, "视图")
+        .fullscreen_with_text("进入全屏")
+        .build()?;
+    let window_menu = SubmenuBuilder::new(app, "窗口")
+        .minimize_with_text("最小化")
+        .maximize_with_text("缩放")
+        .separator()
+        .close_window_with_text("关闭窗口")
+        .separator()
+        .bring_all_to_front_with_text("全部置于最前")
+        .build()?;
+    let help_menu = SubmenuBuilder::new(app, "帮助")
+        .text("help_status", "帮助中心尚未完成")
+        .build()?;
+    let menu = MenuBuilder::new(app)
+        .item(&app_menu)
+        .item(&file_menu)
+        .item(&edit_menu)
+        .item(&view_menu)
+        .item(&window_menu)
+        .item(&help_menu)
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_chinese_app_menu(_app: &tauri::App) -> tauri::Result<()> {
+    Ok(())
+}
+
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let Some(window_config) = app.config().app.windows.first() else {
         return Ok(());
@@ -7465,7 +7537,9 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
                 payload.event(),
                 payload.url()
             );
-            if payload.event() == PageLoadEvent::Finished {
+            if payload.event() == PageLoadEvent::Finished
+                && std::env::var("ASTER_OPEN_DEVTOOLS").as_deref() == Ok("1")
+            {
                 #[cfg(debug_assertions)]
                 window.open_devtools();
             }
@@ -7567,6 +7641,7 @@ pub fn run() {
             save_scene_as_dialog
         ])
         .setup(|app| {
+            install_chinese_app_menu(app)?;
             create_main_window(app)?;
             apply_desktop_window_adaptations(app)?;
             Ok(())

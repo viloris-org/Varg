@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Aster Editor",
+  "productName": "Aster 游戏编辑器",
   "version": "0.1.0",
   "identifier": "com.aster.editor",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "create": false,
-        "title": "Aster Editor",
+        "title": "Aster 游戏编辑器",
         "width": 1280,
         "height": 800,
         "minWidth": 900,

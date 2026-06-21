@@ -252,16 +252,18 @@ resource_scene = "シーン"
 
 # Hub projects page
 hub_projects_title = "プロジェクト"
-hub_launch = "▶  起動"
+hub_launch = "エディターを開く"
 hub_delete = "削除"
-hub_new_project = "+ 新規プロジェクト"
+hub_new_project = "新規プロジェクト"
 hub_search = "プロジェクトを検索…"
 hub_search_no_matches = "一致するものがありません"
 hub_search_no_matches_desc = "検索に一致するプロジェクトがありません。別の名前をお試しください。"
 hub_no_projects = "プロジェクトがありません"
-hub_no_projects_desc = "プロジェクトを作成または開いて Aster を始めましょう。"
-hub_empty = "プロジェクトがありません。「+ 新規プロジェクト」をクリックして作成してください。"
+hub_no_projects_desc = "まずプロジェクトを作成または開き、シーン、アセット、スクリプト、インスペクター、保存 / 実行 / パッケージ化の流れを進めます。"
+hub_empty = "プロジェクトがありません。「新規プロジェクト」をクリックして作成してください。"
 hub_open_folder = "フォルダーを開く"
+hub_open_project = "既存プロジェクトを開く"
+hub_prototype_notice = "引き継ぎメモ：Aster はまだ初期段階のゲームエディター原型です。まずはプロジェクト、シーンビュー、アセット、スクリプト、インスペクター、保存 / 実行 / パッケージ化の閉ループを優先し、Quest Mode は実験機能として扱います。"
 
 # Hub installs page
 hub_installs_title = "インストール"

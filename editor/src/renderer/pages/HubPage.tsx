@@ -83,7 +83,7 @@ interface HubState {
 
 interface Props {
   state: HubState;
-  onOpenProject: (path: string) => void;
+  onOpenProject: (path: string) => Promise<void> | void;
   onNavigate: (page: string) => void;
   onSetTheme: (theme: string) => void;
   onSetLocale: (locale: string) => void;
@@ -144,6 +144,8 @@ const hubActionBarLabelClass = 'mr-1 text-[11px] text-[var(--text-muted)]';
 const hubScrollClass = 'flex-1 overflow-y-auto px-8 pb-6 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-[3px] [&::-webkit-scrollbar-thumb]:bg-[var(--border)] [&::-webkit-scrollbar-track]:bg-transparent';
 const hubGridClass = 'grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-2.5';
 const installListClass = 'flex flex-col gap-2';
+const hubEmptyActionsClass = 'mt-4 flex flex-wrap items-center justify-center gap-2';
+const hubNoticeClass = 'mx-8 mb-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2 text-[12px] leading-[1.45] text-[var(--text-secondary)] shadow-[var(--shadow-sm)]';
 
 function hubActionBarClass(visible: boolean): string {
   return [
@@ -228,9 +230,9 @@ function Sidebar({
   ];
 
   const themeOptions = [
-    { id: 'dark', icon: <IconMoon /> },
-    { id: 'light', icon: <IconSun /> },
-    { id: 'system', icon: <IconMonitor /> },
+    { id: 'dark', label: t('settings_theme_dark'), icon: <IconMoon /> },
+    { id: 'light', label: t('settings_theme_light'), icon: <IconSun /> },
+    { id: 'system', label: t('settings_theme_system'), icon: <IconMonitor /> },
   ];
 
   return (
@@ -246,10 +248,6 @@ function Sidebar({
 
       {/* Navigation */}
       <nav className={navClass}>
-        <button className={navItemClass()} onClick={onOpenQuests}>
-          <IconSparkles />
-          {t('quest_title')}
-        </button>
         {navItems.map(item => (
           <button
             key={item.id}
@@ -260,6 +258,10 @@ function Sidebar({
             {item.label}
           </button>
         ))}
+        <button className={navItemClass()} onClick={onOpenQuests} title={t('quest_intro_desc')}>
+          <IconSparkles />
+          {t('quest_title')}
+        </button>
       </nav>
 
       {/* Theme Toggle */}
@@ -271,7 +273,7 @@ function Sidebar({
               key={opt.id}
               className={themeToggleButtonClass(theme === opt.id)}
               onClick={() => onSetTheme(opt.id)}
-              title={opt.id.charAt(0).toUpperCase() + opt.id.slice(1)}
+              title={opt.label}
             >
               {opt.icon}
             </button>
@@ -295,6 +297,11 @@ interface NewProjectDialogProps {
   }) => Promise<void>;
 }
 
+const PROJECT_TEMPLATES = [
+  { id: 'three_d', labelKey: 'template_3d', descKey: 'template_3d_desc' },
+  { id: 'two_d', labelKey: 'template_2d', descKey: 'template_2d_desc' },
+] as const;
+
 function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
@@ -303,11 +310,6 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
   const [versionIdx, setVersionIdx] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-
-  const templates = [
-    { id: 'three_d', title: '3D', desc: 'Full 3D scene with camera, light, and a default cube' },
-    { id: 'two_d', title: '2D', desc: 'Orthographic 2D scene with sprite renderer set up' },
-  ];
 
   const handleCreate = useCallback(async () => {
     if (!name.trim()) { setError(t('error_project_name_required')); return; }
@@ -318,14 +320,14 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
       await onCreate({
         name: name.trim(),
         location: location.trim(),
-        template_id: templates[templateIdx].id,
+        template_id: PROJECT_TEMPLATES[templateIdx]?.id ?? 'three_d',
         toolchain_version: installs[versionIdx]?.version || '0.1.0',
       });
     } catch (e: unknown) {
       setError(typeof e === 'string' ? e : (e instanceof Error ? e.message : t('dialog_new_project')));
       setCreating(false);
     }
-  }, [name, location, templateIdx, versionIdx, installs, onCreate]);
+  }, [name, location, templateIdx, versionIdx, installs, onCreate, t]);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) onClose();
@@ -348,7 +350,7 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
           <div className={formGroupClass}>
             <label className={formLabelClass}>{t('dialog_template')}</label>
             <div className={templateGridClass}>
-              {templates.map((tmpl, i) => (
+              {PROJECT_TEMPLATES.map((tmpl, i) => (
                 <div
                   key={tmpl.id}
                   className={templateCardClass(templateIdx === i)}
@@ -369,8 +371,8 @@ function NewProjectDialog({ installs, onClose, onCreate }: NewProjectDialogProps
                       </svg>
                     )}
                   </span>
-                  <div className={templateCardTitleClass}>{t('template_' + tmpl.id)}</div>
-                  <div className={templateCardDescClass}>{t('template_' + tmpl.id + '_desc')}</div>
+                  <div className={templateCardTitleClass}>{t(tmpl.labelKey)}</div>
+                  <div className={templateCardDescClass}>{t(tmpl.descKey)}</div>
                 </div>
               ))}
             </div>
@@ -505,16 +507,19 @@ function ProjectsPage({
   projects: ProjectMeta[];
   selectedPath: string | null;
   onSelect: (path: string | null) => void;
-  onOpen: (path: string) => void;
+  onOpen: (path: string) => Promise<void> | void;
   onDeleteRequest: (path: string) => void;
   onNewProject: () => void;
 }) {
   const { t } = useTranslation();
   const [search, setSearch] = useState('');
+  const [openError, setOpenError] = useState<string | null>(null);
 
-  const filtered = projects.filter(p =>
-    p.name.toLowerCase().includes(search.toLowerCase())
-  );
+  const searchText = search.trim().toLowerCase();
+  const filtered = projects.filter(p => (
+    p.name.toLowerCase().includes(searchText)
+    || p.path.toLowerCase().includes(searchText)
+  ));
 
   const handleCardClick = useCallback((path: string) => {
     if (selectedPath === path) {
@@ -524,8 +529,27 @@ function ProjectsPage({
     }
   }, [selectedPath, onSelect]);
 
+  const openProjectPath = useCallback(async (path: string) => {
+    setOpenError(null);
+    try {
+      await Promise.resolve(onOpen(path));
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : String(err));
+    }
+  }, [onOpen]);
+
   const handleCardDoubleClick = useCallback((path: string) => {
-    onOpen(path);
+    openProjectPath(path);
+  }, [openProjectPath]);
+
+  const handleOpenExistingProject = useCallback(async () => {
+    setOpenError(null);
+    try {
+      const selected = await selectProjectLocation();
+      if (selected) await Promise.resolve(onOpen(selected));
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : String(err));
+    }
   }, [onOpen]);
 
   const handleOpenFolder = useCallback(async (e: React.MouseEvent, path: string) => {
@@ -545,6 +569,9 @@ function ProjectsPage({
       <div className={hubPageHeaderClass}>
         <h2 className={hubPageTitleClass}>{t('hub_projects_title')}</h2>
         <div className={hubPageActionsClass}>
+          <button className={buttonClass('secondary', 'sm')} onClick={handleOpenExistingProject}>
+            <IconFolder /> {t('hub_open_project')}
+          </button>
           <button className={buttonClass('primary', 'sm')} onClick={onNewProject}>
             <IconPlus /> {t('hub_new_project')}
           </button>
@@ -562,6 +589,9 @@ function ProjectsPage({
         />
       </div>
 
+      <div className={hubNoticeClass}>{t('hub_prototype_notice')}</div>
+      {openError && <div className={`mx-8 mb-2 ${formErrorClass}`}>{openError}</div>}
+
       {/* Action bar (shown when a project is selected) */}
       <div className={hubActionBarClass(Boolean(selectedProject))}>
         {selectedProject && (
@@ -569,7 +599,7 @@ function ProjectsPage({
             <span className={hubActionBarLabelClass}>
               {selectedProject.name}
             </span>
-            <button className={buttonClass('primary', 'sm')} onClick={() => onOpen(selectedProject.path)}>
+            <button className={buttonClass('primary', 'sm')} onClick={() => openProjectPath(selectedProject.path)}>
               <IconPlay /> {t('hub_launch')}
             </button>
             <button className={buttonClass('danger', 'sm')} onClick={() => onDeleteRequest(selectedProject.path)}>
@@ -593,6 +623,14 @@ function ProjectsPage({
               <>
                 <h3 className={hubEmptyTitleClass}>{t('hub_no_projects')}</h3>
                 <p className={hubEmptyTextClass}>{t('hub_no_projects_desc')}</p>
+                <div className={hubEmptyActionsClass}>
+                  <button className={buttonClass('primary', 'sm')} onClick={onNewProject}>
+                    <IconPlus /> {t('hub_new_project')}
+                  </button>
+                  <button className={buttonClass('secondary', 'sm')} onClick={handleOpenExistingProject}>
+                    <IconFolder /> {t('hub_open_project')}
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -1119,12 +1157,8 @@ function SettingsPage({
               <div className={settingsControlCompactClass}>
                 <select className={settingsSelectClass} value={locale} onChange={(e) => onSetLocale(e.target.value)}>
                   {[
-                    { id: 'en', label: t('settings_language_en') },
                     { id: 'zh', label: t('settings_language_zh') },
-                    { id: 'ja', label: t('settings_language_ja') },
-                    { id: 'ko', label: t('settings_language_ko') },
-                    { id: 'es', label: t('settings_language_es') },
-                    { id: 'zh_hant', label: t('settings_language_zh_hant') },
+                    { id: 'en', label: t('settings_language_en') },
                   ].map(opt => (
                     <option key={opt.id} className={settingsSelectOptionClass} value={opt.id}>{opt.label}</option>
                   ))}
