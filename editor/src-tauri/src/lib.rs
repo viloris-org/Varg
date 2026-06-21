@@ -457,6 +457,7 @@ struct GeneratedQuestSpec {
     title: String,
     spec: String,
     tasks: Vec<GeneratedQuestTask>,
+    question_cards: Vec<GeneratedQuestionCard>,
 }
 
 #[derive(Debug)]
@@ -464,6 +465,28 @@ struct GeneratedQuestTask {
     title: String,
     summary: Option<String>,
     acceptance: Vec<String>,
+}
+
+#[derive(Debug)]
+struct GeneratedQuestionCard {
+    title: String,
+    questions: Vec<GeneratedQuestion>,
+}
+
+#[derive(Debug)]
+struct GeneratedQuestion {
+    id: String,
+    prompt: String,
+    options: Vec<GeneratedQuestionOption>,
+    allow_multiple: bool,
+    allow_custom: bool,
+}
+
+#[derive(Debug)]
+struct GeneratedQuestionOption {
+    id: String,
+    label: String,
+    description: Option<String>,
 }
 
 struct PreparedCopilotRequest {
@@ -525,6 +548,23 @@ enum CompletedQuestAiRequest {
         model_config: QuestModelConfig,
     },
     Rewrite(Result<String, String>),
+}
+
+struct PreparedQuestExecution {
+    quest_store: QuestStore,
+    quest_id: String,
+    model_provider: PreparedQuestModelRequest,
+}
+
+#[derive(Default)]
+struct QuestExecutionRequests {
+    completed: HashMap<String, Result<Value, String>>,
+    cancelled: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Default)]
+struct QuestExecutionRequestState {
+    requests: std::sync::Arc<Mutex<QuestExecutionRequests>>,
 }
 
 #[derive(Default)]
@@ -1200,7 +1240,7 @@ impl EditorHost {
             }
         };
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
+            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
@@ -1238,7 +1278,16 @@ impl EditorHost {
             mode,
             model_config,
         )?;
-        let detail = self.quest_store.get(&detail.record.id)?;
+        let has_question_cards = append_generated_question_cards(
+            &self.quest_store,
+            &detail.record.id,
+            generated.question_cards,
+        )?;
+        let detail = if has_question_cards {
+            self.quest_store.transition(&detail.record.id, QuestStatus::Clarifying)?
+        } else {
+            self.quest_store.get(&detail.record.id)?
+        };
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
 
@@ -1412,7 +1461,16 @@ impl EditorHost {
                 }),
             )?;
         }
-        let detail = self.quest_store.get(&detail.record.id)?;
+        let has_question_cards = append_generated_question_cards(
+            &self.quest_store,
+            &detail.record.id,
+            generated.question_cards,
+        )?;
+        let detail = if has_question_cards {
+            self.quest_store.transition(&detail.record.id, QuestStatus::Clarifying)?
+        } else {
+            self.quest_store.get(&detail.record.id)?
+        };
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
 
@@ -1461,7 +1519,7 @@ impl EditorHost {
             },
         )?;
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
+            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
@@ -1623,122 +1681,170 @@ impl EditorHost {
     fn quest_execute(&mut self, params: &Value) -> EngineResult<Value> {
         let id = required_string(params, "id")?.to_owned();
         let started_at = Instant::now();
-        match self.run_quest_execution(&id) {
+        let prepared = self.prepare_quest_execution(&id)?;
+        match run_quest_execution(prepared) {
             Ok(value) => Ok(value),
             Err(error) => {
-                let reason = error.to_string();
-                let findings = match self.quest_store.write_review_finding(
-                    &id,
-                    "execution-failed",
-                    "Quest execution failed",
-                    &reason,
-                    "high",
-                    Some("execution"),
-                ) {
-                    Ok(finding) => vec![finding],
-                    Err(_) => vec![QuestReviewFinding {
-                        id: "execution-failed".to_owned(),
-                        title: "Quest execution failed".to_owned(),
-                        summary: reason.clone(),
-                        severity: "high".to_owned(),
-                        artifact_path: None,
-                        source: Some("execution".to_owned()),
-                    }],
-                };
-                let review = QuestReview {
-                    summary: "Quest execution stopped before a reviewable bundle was produced."
-                        .to_owned(),
-                    changed_files: Vec::new(),
-                    transaction_groups: Vec::new(),
-                    exploration_attempts: Vec::new(),
-                    findings,
-                    validations: vec![ValidationResult::new(
-                        "Quest execution",
-                        "failed",
-                        reason.clone(),
-                    )],
-                    unresolved_issues: vec![reason.clone()],
-                    next_actions: vec![
-                        QuestReviewAction::with_target(
-                            "inspect-error",
-                            "Inspect failure details",
-                            "open_review_finding",
-                            reason.clone(),
-                        ),
-                        QuestReviewAction::with_target(
-                            "revise-spec",
-                            "Revise Quest spec",
-                            "revise",
-                            reason.clone(),
-                        ),
-                        QuestReviewAction::new("retry-execution", "Retry execution", "retry"),
-                    ],
-                    project_fingerprint: None,
-                    metrics: QuestReviewMetrics {
-                        intent_to_first_action_ms: Some(elapsed_millis(started_at)),
-                        tool_call_latency_ms: None,
-                        validator_turnaround_ms: None,
-                        context_relevance_score: None,
-                        failed_action_recovery_rate: Some(0.0),
-                        review_evidence_quality_score: Some(0.2),
-                        isolated_attempt_count: 0,
-                        validation_count: 1,
-                        validation_failure_count: 1,
-                        baseline_changed_file_count: 0,
-                        notes: vec!["Execution failed before the isolated attempt produced review evidence.".to_owned()],
-                    },
-                    risk: "medium".to_owned(),
-                };
-                let _ = self.quest_store.append_timeline_event(
-                    &id,
-                    "blocked",
-                    "Quest execution failed",
-                    serde_json::json!({ "error": reason }),
-                );
-                let detail = self
-                    .quest_store
-                    .set_review(&id, QuestStatus::Blocked, review)?;
-                serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+                record_quest_execution_failure(&self.quest_store, &id, started_at, error)
             }
         }
     }
 
-    fn run_quest_execution(&mut self, id: &str) -> EngineResult<Value> {
-        let mut detail = self.quest_store.get(id)?;
-        if detail.record.status == QuestStatus::Draft {
-            detail = self.quest_store.transition(id, QuestStatus::Specified)?;
-        }
-        if !matches!(
-            detail.record.status,
-            QuestStatus::Specified | QuestStatus::WaitingForUser | QuestStatus::Blocked
-        ) {
-            return Err(EngineError::config(
-                "Quest must be specified, waiting, or blocked before execution",
-            ));
-        }
-
-        let quest_started_at = Instant::now();
-        let project_root = detail.record.project.path.clone();
-        let workspace_root = self.prepare_quest_workspace(&detail)?;
-        let workspace_id = workspace_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
-            .to_owned();
-        self.quest_store
-            .set_workspace_id(id, workspace_id.clone())?;
-        self.quest_store.transition(id, QuestStatus::Prepared)?;
-        self.quest_store.transition(id, QuestStatus::Running)?;
-        self.quest_store.append_timeline_event(
-            id,
-            "snapshot",
-            "Created isolated Quest workspace",
-            serde_json::json!({
-                "source_project": project_root,
-                "workspace": workspace_root,
-            }),
+    fn prepare_quest_execution(&mut self, id: &str) -> EngineResult<PreparedQuestExecution> {
+        let detail = self.quest_store.get(id)?;
+        let model_provider = self.prepare_quest_model_request(
+            &detail.record.model_config,
+            engine_ai::AiRequest::single_turn(String::new(), serde_json::json!({}), String::new()),
         )?;
-        self.quest_store.append_timeline_event(
+        Ok(PreparedQuestExecution {
+            quest_store: self.quest_store.clone(),
+            quest_id: id.to_owned(),
+            model_provider,
+        })
+    }
+}
+
+fn record_quest_execution_failure(
+    quest_store: &QuestStore,
+    id: &str,
+    started_at: Instant,
+    error: EngineError,
+) -> EngineResult<Value> {
+    let reason = error.to_string();
+    let findings = match quest_store.write_review_finding(
+        id,
+        "execution-failed",
+        "Quest execution failed",
+        &reason,
+        "high",
+        Some("execution"),
+    ) {
+        Ok(finding) => vec![finding],
+        Err(_) => vec![QuestReviewFinding {
+            id: "execution-failed".to_owned(),
+            title: "Quest execution failed".to_owned(),
+            summary: reason.clone(),
+            severity: "high".to_owned(),
+            artifact_path: None,
+            source: Some("execution".to_owned()),
+        }],
+    };
+    let review = QuestReview {
+        summary: "Quest execution stopped before a reviewable bundle was produced.".to_owned(),
+        changed_files: Vec::new(),
+        transaction_groups: Vec::new(),
+        exploration_attempts: Vec::new(),
+        findings,
+        validations: vec![ValidationResult::new(
+            "Quest execution",
+            "failed",
+            reason.clone(),
+        )],
+        unresolved_issues: vec![reason.clone()],
+        next_actions: vec![
+            QuestReviewAction::with_target(
+                "inspect-error",
+                "Inspect failure details",
+                "open_review_finding",
+                reason.clone(),
+            ),
+            QuestReviewAction::with_target("revise-spec", "Revise Quest spec", "revise", reason.clone()),
+            QuestReviewAction::new("retry-execution", "Retry execution", "retry"),
+        ],
+        project_fingerprint: None,
+        metrics: QuestReviewMetrics {
+            intent_to_first_action_ms: Some(elapsed_millis(started_at)),
+            tool_call_latency_ms: None,
+            validator_turnaround_ms: None,
+            context_relevance_score: None,
+            failed_action_recovery_rate: Some(0.0),
+            review_evidence_quality_score: Some(0.2),
+            isolated_attempt_count: 0,
+            validation_count: 1,
+            validation_failure_count: 1,
+            baseline_changed_file_count: 0,
+            notes: vec!["Execution failed before the isolated attempt produced review evidence.".to_owned()],
+        },
+        risk: "medium".to_owned(),
+    };
+    let _ = quest_store.append_timeline_event(
+        id,
+        "blocked",
+        "Quest execution failed",
+        serde_json::json!({ "error": reason }),
+    );
+    let detail = quest_store.set_review(id, QuestStatus::Blocked, review)?;
+    serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+}
+
+fn prepare_quest_workspace(quest_store: &QuestStore, detail: &quest::QuestDetail) -> EngineResult<PathBuf> {
+    prepare_quest_attempt_workspace(
+        quest_store,
+        detail,
+        &format!("workspace-{}", unix_time_ms()),
+    )
+}
+
+fn prepare_quest_attempt_workspace(
+    quest_store: &QuestStore,
+    detail: &quest::QuestDetail,
+    attempt_id: &str,
+) -> EngineResult<PathBuf> {
+    let workspace_id = format!("{attempt_id}-{}", unix_time_ms());
+    let workspace_root = quest_store
+        .quest_path(&detail.record.id)?
+        .join("workspaces")
+        .join(workspace_id);
+    if let Some(parent) = workspace_root.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if try_create_git_worktree(&detail.record.project.path, &workspace_root)? {
+        return Ok(workspace_root);
+    }
+    copy_project_tree(&detail.record.project.path, &workspace_root)?;
+    Ok(workspace_root)
+}
+
+fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineResult<Value> {
+    let id = prepared.quest_id.as_str();
+    let quest_store = &prepared.quest_store;
+    let mut detail = quest_store.get(id)?;
+    if detail.record.status == QuestStatus::Draft {
+        detail = quest_store.transition(id, QuestStatus::Specified)?;
+    }
+    if !matches!(
+        detail.record.status,
+        QuestStatus::Specified | QuestStatus::WaitingForUser | QuestStatus::Blocked
+    ) {
+        return Err(EngineError::config(
+            "Quest must be specified, waiting, or blocked before execution",
+        ));
+    }
+
+    let quest_started_at = Instant::now();
+    let project_root = detail.record.project.path.clone();
+    let workspace_root = prepare_quest_workspace(quest_store, &detail)?;
+    let workspace_id = workspace_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace")
+        .to_owned();
+    quest_store.set_workspace_id(id, workspace_id.clone())?;
+    quest_store.transition(id, QuestStatus::Prepared)?;
+    quest_store.transition(id, QuestStatus::Running)?;
+    quest_store.append_timeline_event(
+        id,
+        "snapshot",
+        "Created isolated Quest workspace",
+        serde_json::json!({
+            "source_project": project_root,
+            "workspace": workspace_root,
+        }),
+    )?;
+    quest_store.append_timeline_event(
             id,
             "command_policy",
             "Registered Solo sandbox command policy",
@@ -1748,7 +1854,7 @@ impl EditorHost {
                 "destructive_commands": "denied_by_default",
             }),
         )?;
-        detail = self.quest_store.record_checkpoint(
+        detail = quest_store.record_checkpoint(
             id,
             "isolated-workspace",
             "Isolated workspace checkpoint",
@@ -1756,8 +1862,8 @@ impl EditorHost {
             Some(workspace_id.clone()),
             Some(project_fingerprint(&project_root)?),
         )?;
-        let baseline_workspace_root = self.prepare_quest_attempt_workspace(&detail, "baseline")?;
-        self.quest_store.append_timeline_event(
+        let baseline_workspace_root = prepare_quest_attempt_workspace(quest_store, &detail, "baseline")?;
+        quest_store.append_timeline_event(
             id,
             "alternative",
             "Created isolated baseline comparison workspace",
@@ -1779,12 +1885,12 @@ impl EditorHost {
                 .iter()
                 .map(|entry| format!("- [{}] {}", entry.category, entry.content))
                 .collect::<Vec<_>>()
-                .join("\n");
+            .join("\n");
             format!("\n\nApproved project Knowledge attached to this Quest:\n{entries}")
         };
         let prompt = SoloQuestRunner::initial_prompt(&detail.spec, &knowledge_context);
         let mut session = AgentSession::new(context)?;
-        let model = self.create_quest_model(&detail.record.model_config)?;
+        let model = create_quest_model_from_prepared(prepared.model_provider)?;
         let first_action_started_at = Instant::now();
         let plan = session.plan_with_history_streaming(
             model.as_ref(),
@@ -1800,7 +1906,7 @@ impl EditorHost {
             .iter()
             .map(|operation| operation.preview.clone())
             .collect();
-        self.quest_store.append_timeline_event(
+        quest_store.append_timeline_event(
             id,
             "plan",
             "Model produced an executable Quest plan",
@@ -1814,7 +1920,7 @@ impl EditorHost {
         let mut outcome = session.apply_plan(&plan)?;
         let mut tool_call_latency_ms = plan_latency_ms + elapsed_millis(apply_started_at);
         save_project_context_scene(&session.context)?;
-        self.quest_store.append_timeline_event(
+        quest_store.append_timeline_event(
             id,
             "execution",
             "Applied model operations in isolated workspace",
@@ -1830,17 +1936,17 @@ impl EditorHost {
             }),
         )?;
 
-        self.quest_store.transition(id, QuestStatus::Validating)?;
+        quest_store.transition(id, QuestStatus::Validating)?;
         let validation_started_at = Instant::now();
         let mut validations = validate_quest_workspace(&workspace_root);
-        append_validation_events(&self.quest_store, id, &validations, None)?;
+        append_validation_events(quest_store, id, &validations, None)?;
         let mut repair_attempts = 0usize;
         while validations_failed(&validations) && repair_attempts < SoloQuestRunner::REPAIR_LIMIT {
             repair_attempts += 1;
-            self.quest_store.transition(id, QuestStatus::Repairing)?;
+            quest_store.transition(id, QuestStatus::Repairing)?;
             let repair_prompt =
                 SoloQuestRunner::repair_prompt(&detail.spec, &validations, repair_attempts);
-            self.quest_store.append_timeline_event(
+            quest_store.append_timeline_event(
                 id,
                 "repair",
                 &format!("Solo repair attempt {repair_attempts} started"),
@@ -1864,7 +1970,7 @@ impl EditorHost {
                 .iter()
                 .map(|operation| operation.preview.clone())
                 .collect();
-            self.quest_store.append_timeline_event(
+            quest_store.append_timeline_event(
                 id,
                 "repair_plan",
                 &format!("Model produced Solo repair plan {repair_attempts}"),
@@ -1880,7 +1986,7 @@ impl EditorHost {
                 repair_plan_latency_ms + elapsed_millis(repair_apply_started_at);
             merge_agent_outcome(&mut outcome, repair_outcome);
             save_project_context_scene(&session.context)?;
-            self.quest_store.append_timeline_event(
+            quest_store.append_timeline_event(
                 id,
                 "repair",
                 &format!("Solo repair attempt {repair_attempts} applied"),
@@ -1894,12 +2000,12 @@ impl EditorHost {
                     })).collect::<Vec<_>>(),
                 }),
             )?;
-            self.quest_store.transition(id, QuestStatus::Validating)?;
+            quest_store.transition(id, QuestStatus::Validating)?;
             validations = validate_quest_workspace(&workspace_root);
-            append_validation_events(&self.quest_store, id, &validations, Some(repair_attempts))?;
+            append_validation_events(quest_store, id, &validations, Some(repair_attempts))?;
         }
         let baseline_validations = validate_quest_workspace(&baseline_workspace_root);
-        append_validation_events(&self.quest_store, id, &baseline_validations, Some(0))?;
+        append_validation_events(quest_store, id, &baseline_validations, Some(0))?;
         let validator_turnaround_ms = elapsed_millis(validation_started_at);
 
         let after = collect_workspace_snapshot(&workspace_root)?;
@@ -1907,7 +2013,7 @@ impl EditorHost {
         let baseline_after = collect_workspace_snapshot(&baseline_workspace_root)?;
         let baseline_changed_files = diff_workspace_snapshots(&baseline_before, &baseline_after);
         for file in &changed_files {
-            self.quest_store.append_timeline_event(
+            quest_store.append_timeline_event(
                 id,
                 "file_edit",
                 &format!("{} {}", file.status, file.path),
@@ -1930,7 +2036,7 @@ impl EditorHost {
         } else {
             "Selected implementation attempt produced the current review bundle."
         };
-        self.quest_store.write_exploration_attempt(
+        quest_store.write_exploration_attempt(
             id,
             "selected-implementation",
             "Selected implementation attempt",
@@ -1945,7 +2051,7 @@ impl EditorHost {
                 .filter(|validation| validation.status == "failed")
                 .count()
         );
-        self.quest_store.write_exploration_attempt(
+        quest_store.write_exploration_attempt(
             id,
             "baseline",
             "Baseline comparison attempt",
@@ -1970,7 +2076,7 @@ impl EditorHost {
                 .filter(|validation| validation.status == "failed")
                 .enumerate()
             {
-                findings.push(self.quest_store.write_review_finding(
+                findings.push(quest_store.write_review_finding(
                     id,
                     &format!("validation-failed-{index}"),
                     &format!("Validation failed: {}", validation.name),
@@ -1980,7 +2086,7 @@ impl EditorHost {
                 )?);
             }
         } else if changed_files.is_empty() {
-            findings.push(self.quest_store.write_review_finding(
+            findings.push(quest_store.write_review_finding(
                 id,
                 "no-changes",
                 "Quest produced no file changes",
@@ -2081,8 +2187,8 @@ impl EditorHost {
             .to_owned(),
         };
         let apply_decision = QuestApplyPolicy::classify(&review, &detail.record.autonomy);
-        let detail = self.quest_store.set_review(id, status, review)?;
-        self.quest_store.append_timeline_event(
+        let detail = quest_store.set_review(id, status, review)?;
+        quest_store.append_timeline_event(
             id,
             "apply_policy",
             "Quest apply policy classified Solo result",
@@ -2093,7 +2199,7 @@ impl EditorHost {
                 "changed_files": detail.record.review.as_ref().map(|review| review.changed_files.len()).unwrap_or_default(),
             }),
         )?;
-        self.quest_store.append_timeline_event(
+        quest_store.append_timeline_event(
             id,
             if status == QuestStatus::ReadyForReview {
                 "review_ready"
@@ -2109,11 +2215,34 @@ impl EditorHost {
         )?;
         if apply_decision == QuestApplyDecision::AutoApply && status == QuestStatus::ReadyForReview
         {
-            return self.quest_apply(&serde_json::json!({ "id": id }));
+            quest_store.append_timeline_event(
+                id,
+                "apply_policy",
+                "Auto-apply deferred to the desktop thread",
+                serde_json::json!({
+                    "reason": "background_execution_cannot_touch_active_project",
+                }),
+            )?;
         }
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
 
+fn create_quest_model_from_prepared(
+    prepared: PreparedQuestModelRequest,
+) -> EngineResult<Box<dyn engine_ai::AiModel>> {
+    engine_ai::providers::create_provider(
+        &prepared.provider,
+        &prepared.model,
+        prepared.api_key.as_deref(),
+        prepared.endpoint.as_deref(),
+        prepared.max_tokens,
+        prepared.codex_oauth,
+        prepared.mimo_config.as_ref(),
+        prepared.glm_config.as_ref(),
+    )
+}
+
+impl EditorHost {
     fn quest_mock_execute(&mut self, params: &Value) -> EngineResult<Value> {
         let id = required_string(params, "id")?;
         serde_json::to_value(self.quest_store.mock_execute(id)?)
@@ -2484,26 +2613,6 @@ impl EditorHost {
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
 
-    fn create_quest_model(
-        &mut self,
-        config: &QuestModelConfig,
-    ) -> EngineResult<Box<dyn engine_ai::AiModel>> {
-        let prepared = self.prepare_quest_model_request(
-            config,
-            engine_ai::AiRequest::single_turn(String::new(), serde_json::json!({}), String::new()),
-        )?;
-        engine_ai::providers::create_provider(
-            &prepared.provider,
-            &prepared.model,
-            prepared.api_key.as_deref(),
-            prepared.endpoint.as_deref(),
-            prepared.max_tokens,
-            prepared.codex_oauth,
-            prepared.mimo_config.as_ref(),
-            prepared.glm_config.as_ref(),
-        )
-    }
-
     fn prepare_quest_model_request(
         &mut self,
         config: &QuestModelConfig,
@@ -2579,34 +2688,6 @@ impl EditorHost {
             })?;
         }
         Ok(config)
-    }
-
-    fn prepare_quest_workspace(&self, detail: &quest::QuestDetail) -> EngineResult<PathBuf> {
-        self.prepare_quest_attempt_workspace(detail, &format!("workspace-{}", unix_time_ms()))
-    }
-
-    fn prepare_quest_attempt_workspace(
-        &self,
-        detail: &quest::QuestDetail,
-        attempt_id: &str,
-    ) -> EngineResult<PathBuf> {
-        let workspace_id = format!("{attempt_id}-{}", unix_time_ms());
-        let workspace_root = self
-            .quest_store
-            .quest_path(&detail.record.id)?
-            .join("workspaces")
-            .join(workspace_id);
-        if let Some(parent) = workspace_root.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        if try_create_git_worktree(&detail.record.project.path, &workspace_root)? {
-            return Ok(workspace_root);
-        }
-        copy_project_tree(&detail.record.project.path, &workspace_root)?;
-        Ok(workspace_root)
     }
 
     fn app_open_folder(&mut self, params: &Value) -> EngineResult<Value> {
@@ -6732,6 +6813,7 @@ fn parse_generated_quest_response(
 ) -> EngineResult<GeneratedQuestSpec> {
     let mut spec_artifact: Option<(String, String)> = None;
     let mut tasks = Vec::new();
+    let mut question_cards = Vec::new();
     for call in tool_calls {
         match call.name.as_str() {
             "create_or_update_spec" => {
@@ -6805,6 +6887,113 @@ fn parse_generated_quest_response(
                     acceptance,
                 });
             }
+            "ask_questions" => {
+                let title = call
+                    .arguments
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Questions")
+                    .chars()
+                    .take(96)
+                    .collect::<String>();
+                let questions_value = call
+                    .arguments
+                    .get("questions")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        EngineError::config("Quest question tool call must include questions")
+                    })?;
+                let mut questions = Vec::new();
+                for (question_index, question_value) in questions_value.iter().enumerate() {
+                    let prompt = question_value
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    if prompt.is_empty() {
+                        return Err(EngineError::config(
+                            "Quest question tool call includes an empty prompt",
+                        ));
+                    }
+                    let id = question_value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("q{}", question_index + 1));
+                    let allow_multiple = question_value
+                        .get("allow_multiple")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let allow_custom = question_value
+                        .get("allow_custom")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    let options = question_value
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(option_index, option_value)| {
+                                    let label = option_value
+                                        .get("label")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .trim();
+                                    if label.is_empty() {
+                                        return None;
+                                    }
+                                    let id = option_value
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| {
+                                            char::from(b'A' + option_index.min(25) as u8)
+                                                .to_string()
+                                        });
+                                    let description = option_value
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                        .map(str::to_owned);
+                                    Some(GeneratedQuestionOption {
+                                        id,
+                                        label: label.to_owned(),
+                                        description,
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if options.is_empty() && !allow_custom {
+                        return Err(EngineError::config(
+                            "Quest question without options must allow a custom answer",
+                        ));
+                    }
+                    questions.push(GeneratedQuestion {
+                        id,
+                        prompt,
+                        options,
+                        allow_multiple,
+                        allow_custom,
+                    });
+                }
+                if questions.is_empty() {
+                    return Err(EngineError::config(
+                        "Quest question tool call must include at least one question",
+                    ));
+                }
+                question_cards.push(GeneratedQuestionCard { title, questions });
+            }
             other => {
                 return Err(EngineError::config(format!(
                     "unsupported Quest creation tool call: {other}"
@@ -6832,7 +7021,42 @@ fn parse_generated_quest_response(
             )
         }
     };
-    Ok(GeneratedQuestSpec { title, spec, tasks })
+    Ok(GeneratedQuestSpec {
+        title,
+        spec,
+        tasks,
+        question_cards,
+    })
+}
+
+fn append_generated_question_cards(
+    quest_store: &QuestStore,
+    quest_id: &str,
+    question_cards: Vec<GeneratedQuestionCard>,
+) -> EngineResult<bool> {
+    let has_question_cards = !question_cards.is_empty();
+    for card in question_cards {
+        quest_store.append_timeline_event(
+            quest_id,
+            "question_card",
+            &card.title,
+            serde_json::json!({
+                "title": card.title,
+                "questions": card.questions.into_iter().map(|question| serde_json::json!({
+                    "id": question.id,
+                    "prompt": question.prompt,
+                    "allow_multiple": question.allow_multiple,
+                    "allow_custom": question.allow_custom,
+                    "options": question.options.into_iter().map(|option| serde_json::json!({
+                        "id": option.id,
+                        "label": option.label,
+                        "description": option.description,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }),
+        )?;
+    }
+    Ok(has_question_cards)
 }
 
 fn quest_title_from_goal(goal: &str) -> String {
@@ -6906,6 +7130,72 @@ fn quest_creation_tool_definitions() -> Vec<engine_ai::ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional task-specific acceptance checks."
+                    }
+                }
+            }),
+        },
+        engine_ai::ToolDefinition {
+            name: "ask_questions".to_owned(),
+            description:
+                "Create an interactive question card when user clarification is needed before a useful Quest spec can be finalized."
+                    .to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["questions"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short card title, for example Questions."
+                    },
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["prompt"],
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Stable question id."
+                                },
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Question shown to the user."
+                                },
+                                "allow_multiple": {
+                                    "type": "boolean",
+                                    "description": "Whether multiple options can be selected."
+                                },
+                                "allow_custom": {
+                                    "type": "boolean",
+                                    "description": "Whether the user may type a custom answer."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "required": ["label"],
+                                        "properties": {
+                                            "id": {
+                                                "type": "string",
+                                                "description": "Stable option id such as A, B, C."
+                                            },
+                                            "label": {
+                                                "type": "string",
+                                                "description": "Option label."
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "Optional explanation for this option."
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }),
@@ -7342,6 +7632,73 @@ fn finish_quest_ai_request(
 #[tauri::command]
 fn cancel_quest_ai_request(
     requests: State<'_, QuestAiRequestState>,
+    request_id: String,
+) -> Result<(), String> {
+    requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .cancelled
+        .insert(request_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn start_quest_execution(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    requests: State<'_, QuestExecutionRequestState>,
+    request_id: String,
+    id: String,
+) -> Result<(), String> {
+    let started_at = Instant::now();
+    let prepared = state
+        .with_host(|host| host.prepare_quest_execution(&id))
+        .map_err(|error| error.to_string())?;
+    let quest_store = prepared.quest_store.clone();
+    let requests = requests.requests.clone();
+    std::thread::spawn(move || {
+        let result = run_quest_execution(prepared).or_else(|error| {
+            record_quest_execution_failure(&quest_store, &id, started_at, error)
+        });
+        let mut request_state = requests.lock().expect("poisoned lock");
+        if request_state.cancelled.remove(&request_id) {
+            drop(request_state);
+            let _ = app.emit(
+                "quest-execution-complete",
+                serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
+        request_state
+            .completed
+            .insert(request_id.clone(), result.map_err(|error| error.to_string()));
+        drop(request_state);
+        let _ = app.emit(
+            "quest-execution-complete",
+            serde_json::json!({ "request_id": request_id }),
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn finish_quest_execution(
+    requests: State<'_, QuestExecutionRequestState>,
+    request_id: String,
+) -> Result<Value, String> {
+    requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .completed
+        .remove(&request_id)
+        .ok_or_else(|| "Quest execution has not completed".to_owned())?
+}
+
+#[tauri::command]
+fn cancel_quest_execution(
+    requests: State<'_, QuestExecutionRequestState>,
     request_id: String,
 ) -> Result<(), String> {
     requests
@@ -7795,6 +8152,7 @@ pub fn run() {
         .manage(EditorHostState::new(host))
         .manage(CopilotRequestState::default())
         .manage(QuestAiRequestState::default())
+        .manage(QuestExecutionRequestState::default())
         .invoke_handler(tauri::generate_handler![
             rpc,
             create_openai_realtime_transcription_session,
@@ -7804,6 +8162,9 @@ pub fn run() {
             start_quest_ai_request,
             finish_quest_ai_request,
             cancel_quest_ai_request,
+            start_quest_execution,
+            finish_quest_execution,
+            cancel_quest_execution,
             open_game_view,
             set_game_render_scaling,
             open_native_scene_view,
@@ -8010,6 +8371,37 @@ mod tests {
         assert!(generated.spec.contains("model chose"));
         assert_eq!(generated.tasks.len(), 1);
         assert_eq!(generated.tasks[0].acceptance.len(), 2);
+    }
+
+    #[test]
+    fn quest_creation_accepts_question_card_tool_calls() {
+        let generated = parse_generated_quest_response(
+            &[engine_ai::ToolCall {
+                id: "call-question".to_owned(),
+                name: "ask_questions".to_owned(),
+                arguments: serde_json::json!({
+                    "title": "Questions",
+                    "questions": [{
+                        "id": "scope",
+                        "prompt": "Which scope should Aster optimize first?",
+                        "allow_multiple": false,
+                        "allow_custom": true,
+                        "options": [
+                            { "id": "A", "label": "Rendering", "description": "Focus on frame time." },
+                            { "id": "B", "label": "Editor UX" }
+                        ]
+                    }]
+                }),
+            }],
+            "",
+            "Optimize Aster",
+        )
+        .unwrap();
+
+        assert_eq!(generated.question_cards.len(), 1);
+        assert_eq!(generated.question_cards[0].questions.len(), 1);
+        assert_eq!(generated.question_cards[0].questions[0].options.len(), 2);
+        assert!(generated.question_cards[0].questions[0].allow_custom);
     }
 
     #[test]

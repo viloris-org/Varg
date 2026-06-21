@@ -42,12 +42,12 @@
   }
 }
 
-@keyframes quest-active-sheen {
+@keyframes quest-live-text-sheen {
   0% {
-    background-position: 160% 0;
+    background-position: 180% 0;
   }
   100% {
-    background-position: -160% 0;
+    background-position: -180% 0;
   }
 }
 

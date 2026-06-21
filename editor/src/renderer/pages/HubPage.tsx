@@ -748,6 +748,7 @@ function CopilotSettingsSection() {
   const [codexAuthBusy, setCodexAuthBusy] = useState(false);
   const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [keyChanged, setKeyChanged] = useState(false);
 
   useEffect(() => {
@@ -774,20 +775,36 @@ function CopilotSettingsSection() {
   );
 
   const handleProviderChange = useCallback((provider: CopilotSettingsData['provider']) => {
-    setSettings(s => ({ ...s, provider, api_endpoint: null }));
-  }, []);
+    const nextMeta = providerMetas.find(p => p.provider === provider);
+    const endpointConfigurable = nextMeta?.endpoint_configurable
+      ?? (provider === 'ollama' || provider === 'custom');
+    setSettings(s => ({
+      ...s,
+      provider,
+      api_endpoint: endpointConfigurable ? s.api_endpoint : null,
+    }));
+  }, [providerMetas]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
     setSaved(false);
+    setSaveError(null);
     try {
       const payload = { ...settings };
       if (!keyChanged) delete (payload as any).api_key;
       await rpc('app/update_copilot_settings', payload);
+      const refreshed = await rpc<CopilotSettingsData>('app/get_copilot_settings').catch(() => null);
+      if (refreshed) {
+        const providerMap: Record<string, CopilotSettingsData['provider']> = { open_a_i: 'openai' };
+        const normalized = providerMap[refreshed.provider] ?? refreshed.provider;
+        setSettings({ ...refreshed, provider: normalized as CopilotSettingsData['provider'] });
+      }
       setSaved(true);
       setKeyChanged(false);
       setTimeout(() => setSaved(false), 2000);
-    } catch { /* ignore */ }
+    } catch (err: any) {
+      setSaveError(typeof err === 'string' ? err : err?.message || 'Failed to save AI settings');
+    }
     setSaving(false);
   }, [settings, keyChanged]);
 
@@ -1050,9 +1067,12 @@ function CopilotSettingsSection() {
       <div className={settingsRowClass(true, 'min-h-0 pt-3 max-[780px]:[&>*:first-child]:hidden')}>
         <div />
         <div className={settingsActionsControlClass}>
-          <button className={buttonClass('primary', 'sm')} onClick={handleSave} disabled={saving}>
-            {saving ? t('settings_saving') : saved ? t('settings_saved') : t('settings_save_ai')}
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            <button className={buttonClass('primary', 'sm')} onClick={handleSave} disabled={saving}>
+              {saving ? t('settings_saving') : saved ? t('settings_saved') : t('settings_save_ai')}
+            </button>
+            {saveError && <small className={errorTextClass}>{saveError}</small>}
+          </div>
         </div>
       </div>
     </div>

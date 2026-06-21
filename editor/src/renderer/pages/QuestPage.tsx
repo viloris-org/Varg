@@ -11,6 +11,7 @@ import {
   deleteQuest,
   discardQuest,
   discardQuestTransactionGroups,
+  executeQuest,
   approveKnowledge,
   applyQuestTransactionGroups,
   applyQuest,
@@ -37,6 +38,7 @@ import {
   type QuestDetail,
   type QuestAiStreamHandle,
   type QuestAiStreamKind,
+  type QuestEvent,
   type QuestMode,
   type QuestModelConfig,
   type QuestProjectFile,
@@ -61,6 +63,7 @@ import {
   IconEdit,
   IconFile,
   IconLoader,
+  IconMessageSquare,
   IconMic,
   IconMonitor,
   IconPlay,
@@ -112,6 +115,43 @@ type QuestInputFileToken = {
   path: string;
   kind: string;
 };
+type QuestQuestionOption = {
+  id: string;
+  label: string;
+  description?: string | null;
+};
+type QuestQuestion = {
+  id: string;
+  prompt: string;
+  options: QuestQuestionOption[];
+  allow_multiple: boolean;
+  allow_custom: boolean;
+};
+type QuestQuestionCard = {
+  eventId: string;
+  title: string;
+  questions: QuestQuestion[];
+};
+type QuestTimelineBlockKind =
+  | 'prompt'
+  | 'thought'
+  | 'plan'
+  | 'workspace'
+  | 'tool_group'
+  | 'execution'
+  | 'validation'
+  | 'result'
+  | 'decision'
+  | 'debug';
+type QuestTimelineBlock = {
+  id: string;
+  kind: QuestTimelineBlockKind;
+  title: string;
+  summary: string;
+  events: QuestEvent[];
+  defaultCollapsed: boolean;
+  importance: 'primary' | 'secondary' | 'debug';
+};
 
 const defaultQuestModelConfig: QuestModelConfig = {
   provider: 'inherit',
@@ -132,6 +172,15 @@ interface QuestSelectOption {
   value: string;
   label: string;
   description?: string;
+}
+interface CopilotSettingsFull {
+  provider: string;
+  model: string;
+  api_endpoint: string | null;
+  api_key: string | null;
+  has_api_key?: boolean;
+  max_tokens: number;
+  allowed_commands?: string[];
 }
 
 interface RealtimeTranscriptionHandle {
@@ -202,6 +251,12 @@ const questInputTokenBoxClass = 'grid min-w-0 gap-1.5';
 const questInputTextRowClass = 'flex min-w-0 items-end gap-1.5';
 const questInputFileTokenClass = 'inline-grid max-w-[220px] grid-cols-[14px_minmax(0,1fr)_16px] items-center gap-1.5 rounded-[6px] border border-[var(--border-light)] bg-[var(--bg-hover)] px-2 py-[5px] text-[11px] text-[var(--text-secondary)] [&_button]:grid [&_button]:h-4 [&_button]:w-4 [&_button]:cursor-pointer [&_button]:place-items-center [&_button]:rounded [&_button]:border-0 [&_button]:bg-transparent [&_button]:p-0 [&_button]:text-[var(--text-muted)] hover:[&_button]:text-[var(--text-primary)] [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap';
 const questInputTextareaClass = 'max-h-[150px] min-h-[28px] min-w-0 flex-1 resize-none border-0 bg-transparent py-[5px] text-[12px] leading-[1.45] text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]';
+const questionCardClass = 'absolute bottom-[calc(100%+8px)] left-2 right-2 z-20 grid max-h-[320px] overflow-hidden rounded-[7px] border border-[var(--border-light)] bg-[var(--bg-surface)] text-[12px] text-[var(--text-primary)] shadow-[var(--shadow-lg)] [&_header]:flex [&_header]:items-center [&_header]:justify-between [&_header]:gap-2 [&_header]:border-b [&_header]:border-[var(--border)] [&_header]:px-3 [&_header]:py-2 [&_header_span]:inline-flex [&_header_span]:items-center [&_header_span]:gap-2 [&_header_span]:font-medium [&_section]:grid [&_section]:max-h-[230px] [&_section]:gap-3 [&_section]:overflow-auto [&_section]:px-3 [&_section]:py-3 [&_footer]:flex [&_footer]:items-center [&_footer]:justify-between [&_footer]:gap-2 [&_footer]:border-t [&_footer]:border-[var(--border)] [&_footer]:px-3 [&_footer]:py-2';
+const questionOptionClass = (active: boolean) => cn(
+  'grid w-full cursor-pointer grid-cols-[22px_minmax(0,1fr)] gap-2 rounded-[5px] border border-transparent bg-transparent px-2 py-[6px] text-left font-[inherit] text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] [&_b]:grid [&_b]:h-5 [&_b]:w-5 [&_b]:place-items-center [&_b]:rounded [&_b]:border [&_b]:border-[var(--border-light)] [&_b]:font-mono [&_b]:text-[10px] [&_b]:font-medium [&_strong]:block [&_strong]:font-medium [&_strong]:text-[var(--text-primary)] [&_small]:mt-0.5 [&_small]:block [&_small]:text-[11px] [&_small]:leading-[1.35] [&_small]:text-[var(--text-muted)]',
+  active && 'border-[var(--border-light)] bg-[var(--bg-hover)] [&_b]:border-[var(--text-primary)] [&_b]:text-[var(--text-primary)]',
+);
+const questionAnswerSummaryClass = 'mx-auto mb-4 mt-3 grid w-[min(720px,calc(100%-44px))] gap-3 rounded-[7px] border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-3 text-[12px] text-[var(--text-primary)] [&_header]:flex [&_header]:items-center [&_header]:gap-2 [&_header]:font-medium [&_section]:grid [&_section]:gap-3 [&_b]:block [&_b]:font-medium [&_p]:m-0 [&_p]:mt-1 [&_p]:text-[var(--text-muted)]';
 const executionToggleClass = 'inline-flex h-8 items-center gap-[7px] rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-surface)] px-[10px] text-[11px] font-medium text-[var(--text-secondary)] [&_input]:m-0 [&_input]:h-[13px] [&_input]:w-[13px]';
 const markdownPreviewClass = [
   'min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--border-light)] bg-[var(--bg-base)] px-[26px] py-[22px] text-[12px] leading-[1.7] text-[var(--text-primary)]',
@@ -236,18 +291,23 @@ const questClasses = {
   introCard: 'mt-16 grid w-[min(640px,calc(100vw-440px))] grid-cols-[96px_minmax(0,1fr)] gap-[18px] rounded-lg border border-dashed border-[var(--border-light)] bg-[var(--bg-surface)] p-3 text-[var(--text-secondary)] max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:grid-cols-1 max-[900px]:min-w-0 [&>svg]:h-[70px] [&>svg]:w-24 [&>svg]:rounded-md [&>svg]:bg-[var(--brand-dim)] [&>svg]:p-4 [&>svg]:text-[var(--brand)] [&_p]:m-0 [&_p]:text-[12px] [&_p]:leading-[1.5] [&_p]:text-[var(--text-muted)] [&_strong]:mb-2 [&_strong]:mt-1 [&_strong]:block [&_strong]:text-[14px] [&_strong]:text-[var(--text-primary)]',
   liveActivityList: 'mt-4 w-[min(800px,calc(100vw-360px))] min-w-[min(800px,calc(100vw-360px))] border-l border-[var(--border)] py-1 pl-4 max-[900px]:w-[min(680px,calc(100vw-280px))] max-[900px]:min-w-0',
   liveActivityEntry: 'relative flex min-h-[22px] items-center gap-2 text-[11px] leading-none text-[var(--text-muted)] before:absolute before:-left-[19px] before:top-1/2 before:h-[7px] before:w-[7px] before:-translate-y-1/2 before:rounded-full before:border before:border-[var(--text-muted)] before:bg-[var(--bg-base)] [&_b]:font-medium [&_b]:text-[var(--text-secondary)] [&_span]:min-w-0 [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap [&_svg]:h-[13px] [&_svg]:w-[13px] [&_svg]:shrink-0',
+  liveActivityEntryActive: 'before:border-[rgba(255,255,255,0.78)] [&_b]:bg-[linear-gradient(90deg,var(--text-secondary),#fff,var(--text-secondary))] [&_b]:bg-[length:220%_100%] [&_b]:bg-clip-text [&_b]:text-transparent [&_b]:[animation:quest-live-text-sheen_1.8s_linear_infinite] [&_span]:bg-[linear-gradient(90deg,var(--text-muted),#f8fafc,var(--text-muted))] [&_span]:bg-[length:220%_100%] [&_span]:bg-clip-text [&_span]:text-transparent [&_span]:[animation:quest-live-text-sheen_1.8s_linear_infinite]',
   workspace: 'grid min-h-0 min-w-0 overflow-hidden bg-[var(--bg-surface)]',
   cockpit: 'grid min-h-0 overflow-hidden bg-[var(--bg-surface)] max-[900px]:grid-cols-1 max-[900px]:grid-rows-[minmax(0,1fr)_minmax(320px,42vh)]',
   runStream: 'grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] bg-[var(--bg-base)] max-[900px]:border-b max-[900px]:border-r-0',
   paneResizeHandle: 'w-[6px] cursor-col-resize border-x border-[var(--border)] bg-[var(--bg-base)] transition-colors hover:bg-[var(--bg-hover)] active:bg-[var(--bg-hover)] focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--brand)] max-[900px]:hidden',
   paneResizeHandleActive: 'bg-[var(--bg-hover)]',
-  streamPrompt: 'mx-auto mb-4 mt-4 w-[min(720px,calc(100%-44px))] rounded-[7px] border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-[9px] text-[12px] leading-[1.45] text-[var(--text-secondary)]',
+  streamPrompt: 'mx-auto mb-5 mt-4 w-[min(720px,calc(100%-44px))] rounded-[7px] border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-[9px] text-[12px] leading-[1.45] text-[var(--text-primary)]',
   streamList: 'min-h-0 overflow-auto px-[22px] pb-[22px]',
-  streamEntry: 'grid grid-cols-[16px_minmax(0,1fr)] gap-[9px] py-[3px] [&>div]:min-w-0 [&_button]:flex [&_button]:min-h-8 [&_button]:w-full [&_button]:cursor-default [&_button]:items-center [&_button]:gap-2 [&_button]:rounded-[5px] [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:py-[6px] [&_button]:text-left [&_button]:font-[inherit] [&_button]:outline-none [&_button:enabled]:cursor-pointer [&_button:enabled:hover]:bg-[var(--bg-hover)] [&_pre]:mt-1 [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:min-w-0 [&_small]:shrink-0 [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
+  streamEntry: 'py-[3px] [&>div]:min-w-0 [&_button]:flex [&_button]:min-h-8 [&_button]:w-full [&_button]:cursor-default [&_button]:items-center [&_button]:gap-2 [&_button]:rounded-[5px] [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:py-[6px] [&_button]:text-left [&_button]:font-[inherit] [&_button]:outline-none [&_button:enabled]:cursor-pointer [&_button:enabled:hover]:bg-[var(--bg-hover)] [&_pre]:mt-1 [&_pre]:max-h-[260px] [&_pre]:overflow-auto [&_pre]:rounded-[5px] [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-[9px] [&_pre]:font-mono [&_pre]:text-[10px] [&_pre]:leading-[1.55] [&_pre]:text-[var(--text-secondary)] [&_small]:min-w-0 [&_small]:shrink-0 [&_small]:text-[11px] [&_small]:text-[var(--text-muted)] [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[12px] [&_strong]:font-medium [&_strong]:text-[var(--text-primary)]',
+  streamBlock: 'rounded-[6px] px-1 py-1',
+  streamBlockDebug: 'opacity-75',
+  streamChildren: 'ml-4 mt-1 grid gap-1 border-l border-[var(--border)] pl-3',
+  streamChild: 'grid gap-1 rounded-[5px] px-2 py-[6px] text-[11px] text-[var(--text-secondary)] [&_button]:min-h-0 [&_button]:px-0 [&_button]:py-0 [&_button:hover]:bg-transparent [&_small]:text-[10px] [&_strong]:text-[11px]',
   streamArrow: 'ml-auto h-[13px] w-[13px] shrink-0 text-[var(--text-muted)] opacity-0 transition-[opacity,transform] duration-150 group-hover:opacity-100',
   streamEvidence: 'ml-2 mr-1 pb-2',
   nextEntry: '[&_strong]:text-[var(--brand)]',
-  liveEntry: 'rounded-[6px] bg-[linear-gradient(90deg,transparent,rgba(34,197,94,0.08),transparent)] bg-[length:220%_100%] [animation:quest-active-sheen_2.4s_linear_infinite] [&_strong]:text-[var(--brand)]',
+  liveEntry: 'rounded-[6px] [&_strong]:bg-[linear-gradient(90deg,var(--text-primary),#fff,var(--text-primary))] [&_strong]:bg-[length:220%_100%] [&_strong]:bg-clip-text [&_strong]:text-transparent [&_strong]:[animation:quest-live-text-sheen_1.8s_linear_infinite] [&_small]:bg-[linear-gradient(90deg,var(--text-muted),#f8fafc,var(--text-muted))] [&_small]:bg-[length:220%_100%] [&_small]:bg-clip-text [&_small]:text-transparent [&_small]:[animation:quest-live-text-sheen_1.8s_linear_infinite]',
   timelineDot: 'relative mt-4 h-[9px] w-[9px] rounded-full border border-[var(--text-muted)] bg-[var(--bg-surface)] after:absolute after:left-1 after:top-[10px] after:h-[calc(100%+34px)] after:w-px after:bg-[var(--border)] after:content-[""]',
   timelineDotLast: 'after:hidden',
   timelineDotNext: 'border-[var(--text-primary)]',
@@ -314,7 +374,7 @@ function statusTextClass(status: QuestStatus | string): string {
   return 'text-[#64748b]';
 }
 
-function statusDotClass(status: QuestStatus): string {
+function statusDotClass(status: QuestStatus | string): string {
   if (status === 'completed') return 'bg-[#22c55e]';
   if (status === 'running' || status === 'applying' || status === 'validating' || status === 'repairing') return 'bg-[#52525b] shadow-[0_0_7px_rgba(82,82,91,0.35)]';
   if (status === 'ready_for_review') return 'bg-[#3f3f46]';
@@ -693,6 +753,251 @@ function isInternalTaskEvent(kind: string): boolean {
   return kind === 'task_created' || kind === 'tasks_updated';
 }
 
+function isStatusEvent(kind: string): boolean {
+  return kind === 'status_changed';
+}
+
+function isWorkspaceEvent(kind: string): boolean {
+  return kind === 'checkpoint'
+    || kind === 'alternative'
+    || kind === 'knowledge_context_updated'
+    || kind === 'execution_config_updated'
+    || kind === 'branched'
+    || kind === 'branch_created';
+}
+
+function isToolEvent(kind: string): boolean {
+  return kind === 'file_read'
+    || kind === 'file_edit'
+    || kind === 'command'
+    || kind === 'command_policy'
+    || kind === 'tool_call';
+}
+
+function statusFromValidationEvent(event: QuestEvent): string {
+  if (!event.details || typeof event.details !== 'object') return '';
+  const status = (event.details as Record<string, unknown>).status;
+  return typeof status === 'string' ? status : '';
+}
+
+function validationSummary(events: QuestEvent[]): string {
+  const passed = events.filter(event => statusFromValidationEvent(event) === 'passed').length;
+  const failed = events.filter(event => ['failed', 'error'].includes(statusFromValidationEvent(event))).length;
+  const skipped = events.filter(event => statusFromValidationEvent(event) === 'skipped').length;
+  const total = events.length;
+  if (failed > 0) return `${failed}/${total} checks failed`;
+  if (passed > 0 || skipped > 0) return `${passed}/${total} checks passed${skipped > 0 ? `, ${skipped} skipped` : ''}`;
+  return total === 1 ? events[0].summary : `${total} validation checks recorded`;
+}
+
+function parseQuestionCardEvent(event: QuestEvent): QuestQuestionCard | null {
+  if (event.kind !== 'question_card' || !event.details || typeof event.details !== 'object') return null;
+  const details = event.details as Record<string, unknown>;
+  const questionsValue = Array.isArray(details.questions) ? details.questions : [];
+  const questions = questionsValue.map((item, index): QuestQuestion | null => {
+    if (!item || typeof item !== 'object') return null;
+    const value = item as Record<string, unknown>;
+    const prompt = typeof value.prompt === 'string' ? value.prompt.trim() : '';
+    if (!prompt) return null;
+    const optionsValue = Array.isArray(value.options) ? value.options : [];
+    const options = optionsValue.map((option, optionIndex): QuestQuestionOption | null => {
+      if (!option || typeof option !== 'object') return null;
+      const optionValue = option as Record<string, unknown>;
+      const label = typeof optionValue.label === 'string' ? optionValue.label.trim() : '';
+      if (!label) return null;
+      return {
+        id: typeof optionValue.id === 'string' && optionValue.id.trim()
+          ? optionValue.id.trim()
+          : String.fromCharCode(65 + Math.min(optionIndex, 25)),
+        label,
+        description: typeof optionValue.description === 'string' && optionValue.description.trim()
+          ? optionValue.description.trim()
+          : null,
+      };
+    }).filter((option): option is QuestQuestionOption => Boolean(option));
+    return {
+      id: typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `q${index + 1}`,
+      prompt,
+      options,
+      allow_multiple: typeof value.allow_multiple === 'boolean' ? value.allow_multiple : false,
+      allow_custom: typeof value.allow_custom === 'boolean' ? value.allow_custom : options.length === 0,
+    };
+  }).filter((question): question is QuestQuestion => Boolean(question));
+  if (questions.length === 0) return null;
+  return {
+    eventId: event.id,
+    title: typeof details.title === 'string' && details.title.trim() ? details.title.trim() : event.summary || 'Questions',
+    questions,
+  };
+}
+
+function answerMessageFromQuestionCard(
+  card: QuestQuestionCard,
+  answers: Record<string, string[]>,
+  customAnswers: Record<string, string>,
+): string {
+  return [
+    `Answers for ${card.title}:`,
+    ...card.questions.map(question => {
+      const selectedLabels = (answers[question.id] ?? [])
+        .map(optionId => question.options.find(option => option.id === optionId)?.label ?? optionId);
+      const custom = customAnswers[question.id]?.trim();
+      const values = [...selectedLabels, ...(custom ? [custom] : [])];
+      return `- ${question.prompt}\n  ${values.length > 0 ? values.join('; ') : 'No answer'}`;
+    }),
+  ].join('\n');
+}
+
+function latestQuestionCard(events: QuestEvent[]): QuestQuestionCard | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const card = parseQuestionCardEvent(events[index]);
+    if (card) return card;
+  }
+  return null;
+}
+
+function latestClarificationAnswer(events: QuestEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind !== 'clarification_answer') continue;
+    if (event.details && typeof event.details === 'object') {
+      const message = (event.details as Record<string, unknown>).message;
+      if (typeof message === 'string' && message.trim()) return message.trim();
+    }
+    return event.summary;
+  }
+  return null;
+}
+
+function blockKindLabel(kind: QuestTimelineBlockKind): string {
+  return kind.replaceAll('_', ' ');
+}
+
+function eventKindLabel(kind: string): string {
+  return kind.replaceAll('_', ' ');
+}
+
+function providerEndpointConfigurable(provider: string): boolean {
+  return provider === 'custom' || provider === 'ollama';
+}
+
+function providerRequiresEndpoint(provider: string): boolean {
+  return provider === 'custom';
+}
+
+function makeTimelineBlock(
+  kind: QuestTimelineBlockKind,
+  title: string,
+  summary: string,
+  events: QuestEvent[],
+  options: Partial<Pick<QuestTimelineBlock, 'defaultCollapsed' | 'importance'>> = {},
+): QuestTimelineBlock {
+  return {
+    id: `${kind}-${events.map(event => event.id).join('-') || title}`,
+    kind,
+    title,
+    summary,
+    events,
+    defaultCollapsed: options.defaultCollapsed ?? events.length > 1,
+    importance: options.importance ?? 'primary',
+  };
+}
+
+function buildQuestTimeline(events: QuestEvent[]): QuestTimelineBlock[] {
+  const blocks: QuestTimelineBlock[] = [];
+  const workspaceEvents: QuestEvent[] = [];
+  const toolEvents: QuestEvent[] = [];
+  const validationEvents: QuestEvent[] = [];
+  const debugEvents: QuestEvent[] = [];
+
+  const flushWorkspace = () => {
+    if (workspaceEvents.length === 0) return;
+    blocks.push(makeTimelineBlock(
+      'workspace',
+      'Workspace prepared',
+      workspaceEvents.length === 1 ? workspaceEvents[0].summary : `${workspaceEvents.length} workspace events`,
+      workspaceEvents.splice(0),
+      { defaultCollapsed: true, importance: 'secondary' },
+    ));
+  };
+  const flushTools = () => {
+    if (toolEvents.length === 0) return;
+    blocks.push(makeTimelineBlock(
+      'tool_group',
+      'Tool activity',
+      toolEvents.length === 1 ? toolEvents[0].summary : `${toolEvents.length} operations`,
+      toolEvents.splice(0),
+      { defaultCollapsed: true, importance: 'secondary' },
+    ));
+  };
+  const flushValidation = () => {
+    if (validationEvents.length === 0) return;
+    blocks.push(makeTimelineBlock(
+      'validation',
+      validationEvents.some(event => ['failed', 'error'].includes(statusFromValidationEvent(event))) ? 'Validation failed' : 'Validation passed',
+      validationSummary(validationEvents),
+      validationEvents.splice(0),
+      { defaultCollapsed: true, importance: 'primary' },
+    ));
+  };
+  const flushGrouped = () => {
+    flushWorkspace();
+    flushTools();
+    flushValidation();
+  };
+
+  for (const event of events) {
+    if (isInternalTaskEvent(event.kind)) continue;
+    if (isStatusEvent(event.kind)) {
+      debugEvents.push(event);
+      continue;
+    }
+    if (isWorkspaceEvent(event.kind)) {
+      workspaceEvents.push(event);
+      continue;
+    }
+    if (isToolEvent(event.kind)) {
+      toolEvents.push(event);
+      continue;
+    }
+    if (event.kind === 'validation') {
+      validationEvents.push(event);
+      continue;
+    }
+    if (event.kind === 'question_card') {
+      flushGrouped();
+      continue;
+    }
+
+    flushGrouped();
+    if (event.kind === 'created' || event.kind === 'spec_updated' || event.kind === 'intent_updated') {
+      blocks.push(makeTimelineBlock('plan', event.summary, eventKindLabel(event.kind), [event], { defaultCollapsed: true }));
+    } else if (event.kind === 'plan') {
+      blocks.push(makeTimelineBlock('plan', event.summary, eventKindLabel(event.kind), [event], { defaultCollapsed: true }));
+    } else if (event.kind === 'review_ready') {
+      blocks.push(makeTimelineBlock('result', event.summary, eventKindLabel(event.kind), [event], { defaultCollapsed: false }));
+    } else if (event.kind.includes('decision') || event.kind.startsWith('user_') || event.kind.includes('requested')) {
+      blocks.push(makeTimelineBlock('decision', event.summary, eventKindLabel(event.kind), [event], { defaultCollapsed: false }));
+    } else if (event.kind === 'thought' || event.kind === 'thinking') {
+      blocks.push(makeTimelineBlock('thought', 'Thought', event.summary, [event], { defaultCollapsed: true, importance: 'secondary' }));
+    } else {
+      blocks.push(makeTimelineBlock('execution', event.summary, eventKindLabel(event.kind), [event], { defaultCollapsed: true }));
+    }
+  }
+
+  flushGrouped();
+  if (debugEvents.length > 0) {
+    blocks.push(makeTimelineBlock(
+      'debug',
+      'Debug trace',
+      `${debugEvents.length} internal events`,
+      debugEvents,
+      { defaultCollapsed: true, importance: 'debug' },
+    ));
+  }
+  return blocks;
+}
+
 function hasEventDetails(details: unknown): boolean {
   if (!details || typeof details !== 'object') return false;
   return Object.keys(details as Record<string, unknown>).length > 0;
@@ -737,6 +1042,7 @@ export default function QuestPage({
   const [specSelection, setSpecSelection] = useState<SpecSelection | null>(null);
   const [specSelectionQuestion, setSpecSelectionQuestion] = useState('');
   const [goal, setGoal] = useState('');
+  const [creatingQuestGoal, setCreatingQuestGoal] = useState<string | null>(null);
   const [questMode, setQuestMode] = useState<QuestMode>('solo');
   const [modelConfig, setModelConfig] = useState<QuestModelConfig>(defaultQuestModelConfig);
   const [modelOptions, setModelOptions] = useState<QuestModelOption[]>([]);
@@ -752,12 +1058,15 @@ export default function QuestPage({
   const [liveNow, setLiveNow] = useState(() => Date.now());
   const [selectedReviewFiles, setSelectedReviewFiles] = useState<Set<string>>(new Set());
   const [selectedReviewGroups, setSelectedReviewGroups] = useState<Set<string>>(new Set());
-  const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(new Set());
+  const [eventExpansionOverrides, setEventExpansionOverrides] = useState<Map<string, boolean>>(new Map());
   const [questInput, setQuestInput] = useState('');
   const [questInputFileTokens, setQuestInputFileTokens] = useState<QuestInputFileToken[]>([]);
   const [questProjectFiles, setQuestProjectFiles] = useState<QuestProjectFile[]>([]);
   const [questInputSuggestionMode, setQuestInputSuggestionMode] = useState<QuestInputSuggestionMode | null>(null);
   const [questInputSuggestionIndex, setQuestInputSuggestionIndex] = useState(0);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string[]>>({});
+  const [questionCustomAnswers, setQuestionCustomAnswers] = useState<Record<string, string>>({});
+  const [questionCardCollapsed, setQuestionCardCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorOpen, setErrorOpen] = useState(false);
   const [artifactPanePercent, setArtifactPanePercent] = useState(() => {
@@ -777,9 +1086,12 @@ export default function QuestPage({
     setSpecSelectionQuestion('');
     setSelectedReviewFiles(new Set());
     setSelectedReviewGroups(new Set());
-    setExpandedEventIds(new Set());
+    setEventExpansionOverrides(new Map());
     setQuestInput('');
     setQuestInputFileTokens([]);
+    setQuestionAnswers({});
+    setQuestionCustomAnswers({});
+    setQuestionCardCollapsed(false);
     setTitleDraft('');
     setArtifact(null);
     setRenaming(false);
@@ -810,6 +1122,7 @@ export default function QuestPage({
   useEffect(() => () => stopVoiceInput(), [stopVoiceInput]);
 
   const syncQuestDrafts = useCallback((detail: QuestDetail) => {
+    const nextQuestionCardId = latestQuestionCard(detail.events)?.eventId ?? null;
     setSelected(detail);
     setIntentDraft(detail.intent);
     setSpecDraft(detail.spec);
@@ -819,6 +1132,12 @@ export default function QuestPage({
     setQuestMode(detail.mode);
     setModelConfig(detail.model_config ?? defaultQuestModelConfig);
     setTitleDraft(detail.title);
+    setQuestionAnswers(current => {
+      if (nextQuestionCardId && current.__card_id === nextQuestionCardId) return current;
+      return nextQuestionCardId ? { __card_id: [nextQuestionCardId] } : {};
+    });
+    setQuestionCustomAnswers({});
+    setQuestionCardCollapsed(false);
   }, []);
 
   const refreshList = useCallback(async (preferredId?: string | null) => {
@@ -894,7 +1213,7 @@ export default function QuestPage({
   useEffect(() => {
     let canceled = false;
     async function loadQuestModels() {
-      const settings = await rpc<{ provider: string; model: string; has_api_key?: boolean }>('app/get_copilot_settings').catch(() => null);
+      const settings = await rpc<CopilotSettingsFull>('app/get_copilot_settings').catch(() => null);
       const provider = settings?.provider && settings.provider !== 'stub' ? settings.provider : null;
       if (!canceled) {
         setCanUseOpenAIVoiceInput(provider === 'openai' && settings?.has_api_key === true);
@@ -911,12 +1230,16 @@ export default function QuestPage({
       if (!canceled) {
         setModelOptions(models);
         const preferred = settings?.model || models[0]?.id || '';
-        setModelConfig(prev => ({
-          ...prev,
-          provider: models.find(model => model.id === (prev.model || preferred))?.provider ?? provider ?? prev.provider,
-          model: prev.model || preferred,
-          max_tokens: models.find(model => model.id === (prev.model || preferred))?.default_max_tokens ?? prev.max_tokens,
-        }));
+        setModelConfig(prev => {
+          const selectedModel = models.find(model => model.id === (prev.model || preferred));
+          return {
+            ...prev,
+            provider: selectedModel?.provider ?? provider ?? prev.provider,
+            model: prev.model || preferred,
+            api_endpoint: prev.api_endpoint ?? settings?.api_endpoint ?? null,
+            max_tokens: selectedModel?.default_max_tokens ?? settings?.max_tokens ?? prev.max_tokens,
+          };
+        });
       }
     }
     loadQuestModels().catch(reportError);
@@ -952,10 +1275,66 @@ export default function QuestPage({
       description: option.provider,
     }));
   }, [modelOptions, t]);
-  const visibleEvents = useMemo(
-    () => selected?.events.filter(event => !isInternalTaskEvent(event.kind)) ?? [],
+  const syncQuestModelPreference = useCallback(async (next: QuestModelConfig) => {
+    if (!next.model.trim()) return;
+    const settings = await rpc<CopilotSettingsFull>('app/get_copilot_settings').catch(() => null);
+    if (!settings) return;
+    const endpoint = next.api_endpoint ?? settings.api_endpoint ?? null;
+    const canSyncProvider = !providerRequiresEndpoint(next.provider) || Boolean(endpoint);
+    const { api_key: _apiKey, ...payload } = settings;
+    await rpc('app/update_copilot_settings', {
+      ...payload,
+      provider: canSyncProvider ? next.provider : settings.provider,
+      model: next.model,
+      api_endpoint: providerEndpointConfigurable(canSyncProvider ? next.provider : settings.provider)
+        ? endpoint
+        : settings.api_endpoint,
+      max_tokens: next.max_tokens,
+    });
+  }, []);
+  const chooseQuestModel = useCallback((value: string) => {
+    const model = modelOptions.find(option => option.id === value);
+    const next = {
+      ...modelConfig,
+      model: value,
+      provider: model?.provider ?? modelConfig.provider,
+      api_endpoint: providerEndpointConfigurable(model?.provider ?? modelConfig.provider)
+        ? modelConfig.api_endpoint
+        : null,
+      max_tokens: model?.default_max_tokens ?? modelConfig.max_tokens,
+    };
+    setModelConfig(next);
+    syncQuestModelPreference(next).catch(reportError);
+  }, [modelConfig, modelOptions, reportError, syncQuestModelPreference]);
+  const resolveQuestModelConfig = useCallback(async (): Promise<QuestModelConfig> => {
+    const selectedModel = modelOptions.find(model => model.id === modelConfig.model);
+    const provider = selectedModel?.provider ?? modelConfig.provider;
+    const settings = await rpc<CopilotSettingsFull>('app/get_copilot_settings').catch(() => null);
+    const endpoint = providerEndpointConfigurable(provider)
+      ? modelConfig.api_endpoint ?? settings?.api_endpoint ?? null
+      : null;
+    return {
+      ...modelConfig,
+      provider,
+      api_endpoint: endpoint,
+    };
+  }, [modelConfig, modelOptions]);
+  const timelineBlocks = useMemo(
+    () => buildQuestTimeline(selected?.events ?? []),
     [selected?.events],
   );
+  const activeQuestionCard = useMemo(
+    () => latestQuestionCard(selected?.events ?? []),
+    [selected?.events],
+  );
+  const latestQuestionAnswer = useMemo(
+    () => latestClarificationAnswer(selected?.events ?? []),
+    [selected?.events],
+  );
+  const activeGoal = selected?.goal ?? creatingQuestGoal ?? '';
+  const activeStatus = selected?.status ?? (creatingQuestGoal ? 'draft' : null);
+  const activeSpec = selected ? (specDraft || selected.spec) : '';
+  const activeSpecPath = selected?.spec_path ?? (creatingQuestGoal ? 'spec.md' : null);
 
   const startArtifactPaneResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const cockpit = cockpitRef.current;
@@ -1056,27 +1435,29 @@ export default function QuestPage({
 
   const create = useCallback(async () => {
     if (!goal.trim() || rewritingPrompt) return;
+    const submittedGoal = goal.trim();
     setBusy(true);
     setError(null);
+    setCreatingQuestGoal(submittedGoal);
+    setPanel('spec');
+    setArtifact(null);
     const startedAt = Date.now();
     setLiveNow(startedAt);
     setLiveQuestActivities([{
       id: 'quest-create-start',
       kind: 'status',
       label: 'Planning Quest',
-      detail: goal.trim(),
+      detail: submittedGoal,
       startedAt,
     }]);
     try {
       if (effectiveProjectPath && (!currentProjectPath || currentProjectPath !== effectiveProjectPath)) {
         await rpc('hub/open_project', { path: effectiveProjectPath });
       }
-      const detail = await createQuest('', goal.trim(), {
+      const resolvedModelConfig = await resolveQuestModelConfig();
+      const detail = await createQuest('', submittedGoal, {
         mode: questMode,
-        model_config: {
-          ...modelConfig,
-          provider: modelOptions.find(model => model.id === modelConfig.model)?.provider ?? modelConfig.provider,
-        },
+        model_config: resolvedModelConfig,
       }, (delta, kind) => {
         const now = Date.now();
         setLiveNow(now);
@@ -1110,6 +1491,7 @@ export default function QuestPage({
         });
       });
       setGoal('');
+      setCreatingQuestGoal(null);
       syncQuestDrafts(detail);
       setArtifact(null);
       setPanel('spec');
@@ -1117,12 +1499,14 @@ export default function QuestPage({
       await refreshList(detail.id);
       await refreshKnowledge();
     } catch (reason) {
+      setCreatingQuestGoal(null);
+      setGoal(submittedGoal);
       reportError(reason);
     } finally {
       setLiveQuestActivities([]);
       setBusy(false);
     }
-  }, [currentProjectPath, effectiveProjectPath, goal, modelConfig, modelOptions, questMode, refreshList, refreshKnowledge, reportError, resetReviewSelection, rewritingPrompt, syncQuestDrafts]);
+  }, [currentProjectPath, effectiveProjectPath, goal, questMode, refreshList, refreshKnowledge, reportError, resetReviewSelection, resolveQuestModelConfig, rewritingPrompt, syncQuestDrafts]);
 
   const rewritePrompt = useCallback(async () => {
     if (rewritingPrompt) {
@@ -1135,13 +1519,10 @@ export default function QuestPage({
     setError(null);
     setRewritingPrompt(true);
     try {
-      const selectedModel = modelOptions.find(model => model.id === modelConfig.model);
+      const resolvedModelConfig = await resolveQuestModelConfig();
       const request = rewriteQuestPrompt(
         goal.trim(),
-        {
-          ...modelConfig,
-          provider: selectedModel?.provider ?? modelConfig.provider,
-        },
+        resolvedModelConfig,
         (delta, kind) => {
           if (kind !== 'text' || !delta) return;
           streamedPrompt += delta;
@@ -1160,7 +1541,7 @@ export default function QuestPage({
       rewriteRequestRef.current = null;
       setRewritingPrompt(false);
     }
-  }, [goal, modelConfig, modelOptions, reportError, rewritingPrompt]);
+  }, [goal, reportError, resolveQuestModelConfig, rewritingPrompt]);
 
   useEffect(() => () => {
     rewriteRequestRef.current?.cancel();
@@ -1310,8 +1691,32 @@ export default function QuestPage({
 
   const execute = useCallback(async () => {
     if (!selected) return;
-    reportError(new Error('Quest execution is temporarily disabled because the current backend execution path runs on the desktop UI thread. This prevents the Build button from freezing the app while the background execution path is implemented.'));
-  }, [reportError, selected]);
+    setBusy(true);
+    setError(null);
+    setExecutingQuestId(selected.id);
+    setLiveQuestActivities([{
+      id: 'quest-execute-start',
+      kind: 'status',
+      label: t('quest_execution_running'),
+      detail: t('quest_execution_running_desc'),
+      startedAt: Date.now(),
+    }]);
+    try {
+      const detail = await executeQuest(selected.id);
+      syncQuestDrafts(detail);
+      setPanel(detail.review ? 'review' : panel);
+      resetReviewSelection(detail);
+      await refreshList(detail.id);
+      await refreshKnowledge();
+    } catch (reason) {
+      reportError(reason);
+      await refreshList(selected.id);
+    } finally {
+      setExecutingQuestId(null);
+      setLiveQuestActivities([]);
+      setBusy(false);
+    }
+  }, [panel, refreshList, refreshKnowledge, reportError, resetReviewSelection, selected, syncQuestDrafts, t]);
 
   const transition = useCallback(async (status: QuestStatus) => {
     if (!selected) return;
@@ -1540,9 +1945,15 @@ export default function QuestPage({
     if (liveQuestActivities.length === 0) return null;
     return (
       <div className={compact ? 'mt-2 border-l border-[var(--border)] py-1 pl-4' : questClasses.liveActivityList}>
-        {liveQuestActivities.map(activity => (
-          <div key={activity.id} className={questClasses.liveActivityEntry}>
-            {activity.kind === 'thinking' || activity.kind === 'status' ? <IconLoader /> : activity.kind === 'tool_call' ? <IconCode /> : <IconFile />}
+        {liveQuestActivities.map((activity, index) => (
+          <div
+            key={activity.id}
+            className={cn(
+              questClasses.liveActivityEntry,
+              index === liveQuestActivities.length - 1 && questClasses.liveActivityEntryActive,
+            )}
+          >
+            {activity.kind === 'tool_call' ? <IconCode /> : activity.kind === 'file' ? <IconFile /> : null}
             <b>{activity.label}</b>
             <span>{activity.detail}</span>
             <time>{formatElapsed(activity.startedAt, liveNow)}</time>
@@ -1787,6 +2198,54 @@ export default function QuestPage({
       setBusy(false);
     }
   }, [questInput, questInputFileTokens, refreshList, reportError, selected]);
+
+  const toggleQuestionOption = useCallback((question: QuestQuestion, optionId: string) => {
+    setQuestionAnswers(current => {
+      const currentValues = current[question.id] ?? [];
+      const selected = currentValues.includes(optionId);
+      return {
+        ...current,
+        [question.id]: question.allow_multiple
+          ? selected
+            ? currentValues.filter(value => value !== optionId)
+            : [...currentValues, optionId]
+          : selected
+            ? []
+            : [optionId],
+      };
+    });
+  }, []);
+
+  const submitQuestionCard = useCallback(async () => {
+    if (!selected || !activeQuestionCard) return;
+    const hasAnswer = activeQuestionCard.questions.some(question => {
+      return (questionAnswers[question.id] ?? []).length > 0
+        || Boolean(questionCustomAnswers[question.id]?.trim());
+    });
+    if (!hasAnswer) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const message = answerMessageFromQuestionCard(
+        activeQuestionCard,
+        questionAnswers,
+        questionCustomAnswers,
+      );
+      const detail = await addQuestNote(selected.id, 'clarify', message);
+      setSelected(detail);
+      setIntentDraft(detail.intent);
+      setSpecDraft(detail.spec);
+      setTitleDraft(detail.title);
+      setQuestionAnswers({});
+      setQuestionCustomAnswers({});
+      setQuestionCardCollapsed(false);
+      await refreshList(detail.id);
+    } catch (reason) {
+      reportError(reason);
+    } finally {
+      setBusy(false);
+    }
+  }, [activeQuestionCard, questionAnswers, questionCustomAnswers, refreshList, reportError, selected]);
 
   const requestQuickFix = useCallback(async (issue: string) => {
     if (!selected) return;
@@ -2040,7 +2499,7 @@ export default function QuestPage({
           </div>
         </aside>
 
-        {!selected ? (
+        {!selected && !creatingQuestGoal ? (
           <main className={questClasses.home}>
             <div className={questClasses.orb}><IconSparkles size={28} /></div>
             <h1 className="m-0 mb-3 text-[clamp(28px,3vw,40px)] font-[650] leading-[1.1] text-[var(--text-primary)]">{t('quest_home_title')}</h1>
@@ -2084,15 +2543,7 @@ export default function QuestPage({
                     thinkingValue={modelConfig.thinking_effort}
                     modelOptions={modelSelectOptions}
                     thinkingOptions={thinkingOptions}
-                    onModelChange={value => {
-                      const model = modelOptions.find(option => option.id === value);
-                      setModelConfig(prev => ({
-                        ...prev,
-                        model: value,
-                        provider: model?.provider ?? prev.provider,
-                        max_tokens: model?.default_max_tokens ?? prev.max_tokens,
-                      }));
-                    }}
+                    onModelChange={chooseQuestModel}
                     onThinkingChange={value => setModelConfig(prev => ({ ...prev, thinking_effort: value }))}
                     disabled={busy}
                     widthClass="w-[150px]"
@@ -2153,29 +2604,38 @@ export default function QuestPage({
             >
               <div className={questClasses.runStream}>
                 <div className={questClasses.streamList}>
-                  <div className={questClasses.streamPrompt}>{selected.goal}</div>
-                  <article className={questClasses.streamEntry}>
-                    <span className={questClasses.timelineDot} />
-                    <div>
-                      <button type="button" disabled>
-                        <strong>{t('quest_goal_accepted')}</strong>
-                        <small>{t('quest_user_prompt')}</small>
-                      </button>
+                  <div className={questClasses.streamPrompt}>{activeGoal}</div>
+                  {latestQuestionAnswer && activeQuestionCard && (
+                    <div className={questionAnswerSummaryClass}>
+                      <header><IconMessageSquare /> Questions Answers</header>
+                      <section>
+                        {activeQuestionCard.questions.map(question => {
+                          const marker = `- ${question.prompt}\n  `;
+                          const answer = latestQuestionAnswer.includes(marker)
+                            ? latestQuestionAnswer.split(marker)[1]?.split('\n- ')[0]?.trim()
+                            : null;
+                          return (
+                            <div key={question.id}>
+                              <b>{question.prompt}</b>
+                              <p>{answer || 'Answered'}</p>
+                            </div>
+                          );
+                        })}
+                      </section>
                     </div>
-                  </article>
-                  {visibleEvents.map((event, index) => {
-                    const hasDetails = hasEventDetails(event.details);
-                    const expanded = expandedEventIds.has(event.id);
+                  )}
+                  {timelineBlocks.map(block => {
+                    const hasDetails = block.events.length > 0;
+                    const expanded = eventExpansionOverrides.get(block.id) ?? !block.defaultCollapsed;
                     return (
-                      <article key={event.id} className={questClasses.streamEntry}>
-                        <span className={cn(
-                          questClasses.timelineDot,
-                          index === visibleEvents.length - 1
-                            && selected.status !== 'draft'
-                            && !['draft', 'specified'].includes(selected.status)
-                            && executingQuestId !== selected.id
-                            && 'after:hidden',
-                        )} />
+                      <article
+                        key={block.id}
+                        className={cn(
+                          questClasses.streamEntry,
+                          questClasses.streamBlock,
+                          block.importance === 'debug' && questClasses.streamBlockDebug,
+                        )}
+                      >
                         <div>
                           <button
                             className="group"
@@ -2183,50 +2643,62 @@ export default function QuestPage({
                             disabled={!hasDetails}
                             onClick={() => {
                               if (!hasDetails) return;
-                              setExpandedEventIds(ids => {
-                                const next = new Set(ids);
-                                if (next.has(event.id)) {
-                                  next.delete(event.id);
-                                } else {
-                                  next.add(event.id);
-                                }
+                              setEventExpansionOverrides(overrides => {
+                                const next = new Map(overrides);
+                                next.set(block.id, !expanded);
                                 return next;
                               });
                             }}
                           >
-                            <strong>{event.summary}</strong>
-                            <small>{event.kind.replaceAll('_', ' ')}</small>
+                            <strong>{block.title}</strong>
+                            <small>{block.summary || blockKindLabel(block.kind)}</small>
                             {hasDetails && (
                               <IconChevronRight className={cn(questClasses.streamArrow, expanded && 'rotate-90 opacity-100')} />
                             )}
                           </button>
                           {hasDetails && expanded && (
-                            <pre className={questClasses.streamEvidence}>{formatEventDetails(event.details)}</pre>
+                            <div className={questClasses.streamChildren}>
+                              {block.events.map(event => {
+                                const eventHasDetails = hasEventDetails(event.details);
+                                return (
+                                  <div key={event.id} className={questClasses.streamChild}>
+                                    <button type="button" disabled>
+                                      <strong>{event.summary}</strong>
+                                      <small>{eventKindLabel(event.kind)}</small>
+                                    </button>
+                                    {eventHasDetails && (
+                                      <pre className={questClasses.streamEvidence}>{formatEventDetails(event.details)}</pre>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           )}
                         </div>
                       </article>
                     );
                   })}
                   <article className={cn(questClasses.streamEntry, questClasses.nextEntry)}>
-                    <span className={cn(questClasses.timelineDot, questClasses.timelineDotNext)} />
                     <div>
                       <button type="button" disabled>
-                        <strong>{selected.next_action.label}</strong>
-                        <small>{selected.next_action.reason}</small>
+                        <strong>{selected?.next_action.label ?? 'Generating Quest spec'}</strong>
+                        <small>{selected?.next_action.reason ?? 'Aster is preparing the editable task artifact.'}</small>
                       </button>
                     </div>
                   </article>
-                  {['draft', 'specified'].includes(selected.status) && (
+                  {activeStatus && ['draft', 'specified'].includes(activeStatus) && (
                     <div className={feedDecisionCardClass}>
                       <header>
                         <span>
                           <IconCode />
                           <b>Spec</b>
-                          <strong>{selected.spec_path?.split('/').pop() ?? 'Spec.md'}</strong>
+                          <strong>{activeSpecPath?.split('/').pop() ?? 'Spec.md'}</strong>
                         </span>
                       </header>
                       <section>
-                        <p>{summarizeSpecForDecision(specDraft || selected.spec, selected.next_action.reason || t('quest_spec_ready_desc'))}</p>
+                        <p>{selected
+                          ? summarizeSpecForDecision(activeSpec, selected.next_action.reason || t('quest_spec_ready_desc'))
+                          : 'Generating an editable Quest spec from your prompt.'}</p>
                       </section>
                       <footer>
                         <button
@@ -2240,7 +2712,7 @@ export default function QuestPage({
                           type="button"
                           className="border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--bg-base)]"
                           onClick={execute}
-                          disabled={busy || selected.status === 'archived'}
+                          disabled={busy || !selected || selected.status === 'archived'}
                           title="Build"
                         >
                           {busy ? <QuestLoader /> : <IconPlay />} Build
@@ -2248,19 +2720,18 @@ export default function QuestPage({
                       </footer>
                     </div>
                   )}
-                  {executingQuestId === selected.id && (
+                  {(creatingQuestGoal || (selected && executingQuestId === selected.id)) && (
                     <article className={cn(questClasses.streamEntry, questClasses.liveEntry)}>
-                      <span className={cn(questClasses.timelineDot, questClasses.timelineDotLive, questClasses.timelineDotLast)} />
                       <div>
                         <button type="button" disabled>
-                          <strong>{t('quest_execution_running')}</strong>
-                          <small>{t('quest_execution_running_desc')}</small>
+                          <strong>{creatingQuestGoal ? 'Generating Quest spec' : t('quest_execution_running')}</strong>
+                          <small>{creatingQuestGoal ? 'waiting for model output and task artifact' : t('quest_execution_running_desc')}</small>
                         </button>
                         {renderLiveActivities(true)}
                       </div>
                     </article>
                   )}
-                  {selected.review && (
+                  {selected?.review && (
                     <button className={questClasses.reviewChip} onClick={() => { setArtifact(null); setPanel('review'); }}>
                       <IconCheck /> {t('quest_tab_review')} +{selected.review.changed_files.reduce((sum, file) => sum + file.additions, 0)}
                       <span>-{selected.review.changed_files.reduce((sum, file) => sum + file.deletions, 0)}</span>
@@ -2268,6 +2739,79 @@ export default function QuestPage({
                   )}
                 </div>
                 <div className={questClasses.steerBar}>
+                  {activeQuestionCard && !latestQuestionAnswer && selected && ['clarifying', 'waiting_for_user'].includes(selected.status) && (
+                    <div className={questionCardClass}>
+                      <header>
+                        <span><IconMessageSquare /> {activeQuestionCard.title}</span>
+                        <button
+                          type="button"
+                          className="grid h-6 w-6 cursor-pointer place-items-center rounded border-0 bg-transparent text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                          onClick={() => setQuestionCardCollapsed(value => !value)}
+                          title={questionCardCollapsed ? 'Expand questions' : 'Collapse questions'}
+                        >
+                          <IconChevronDown className={questionCardCollapsed ? '' : 'rotate-180'} />
+                        </button>
+                      </header>
+                      {!questionCardCollapsed && (
+                        <>
+                          <section>
+                            {activeQuestionCard.questions.map((question, questionIndex) => (
+                              <div key={question.id} className="grid gap-2">
+                                <b>{questionIndex + 1}. {question.prompt}</b>
+                                <div className="grid gap-1">
+                                  {question.options.map(option => {
+                                    const selectedOption = (questionAnswers[question.id] ?? []).includes(option.id);
+                                    return (
+                                      <button
+                                        key={option.id}
+                                        type="button"
+                                        className={questionOptionClass(selectedOption)}
+                                        onClick={() => toggleQuestionOption(question, option.id)}
+                                        disabled={busy}
+                                      >
+                                        <b>{option.id}</b>
+                                        <span>
+                                          <strong>{option.label}</strong>
+                                          {option.description && <small>{option.description}</small>}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                {question.allow_custom && (
+                                  <textarea
+                                    rows={2}
+                                    className="min-h-[52px] resize-none rounded-[5px] border border-[var(--border-light)] bg-[var(--bg-base)] px-2.5 py-2 text-[12px] leading-[1.4] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
+                                    value={questionCustomAnswers[question.id] ?? ''}
+                                    onChange={event => setQuestionCustomAnswers(current => ({ ...current, [question.id]: event.target.value }))}
+                                    placeholder="Custom answer"
+                                    disabled={busy}
+                                  />
+                                )}
+                              </div>
+                            ))}
+                          </section>
+                          <footer>
+                            <button
+                              type="button"
+                              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[5px] border border-transparent bg-transparent px-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                              onClick={() => setQuestionCardCollapsed(true)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--text-primary)] bg-[var(--text-primary)] px-2.5 text-[11px] font-semibold text-[var(--bg-base)] disabled:cursor-default disabled:opacity-45"
+                              onClick={submitQuestionCard}
+                              disabled={busy || !activeQuestionCard.questions.some(question => (questionAnswers[question.id] ?? []).length > 0 || Boolean(questionCustomAnswers[question.id]?.trim()))}
+                            >
+                              Continue
+                            </button>
+                          </footer>
+                        </>
+                      )}
+                    </div>
+                  )}
                   {questInputSuggestionMode && questInputSuggestions.length > 0 && (
                     <div className={questInputSuggestClass}>
                       {questInputSuggestions.map((suggestion, index) => (
@@ -2344,11 +2888,13 @@ export default function QuestPage({
                           }
                         }}
                         placeholder={questInputFileTokens.length === 0
-                          ? selected.status === 'ready_for_review'
+                          ? creatingQuestGoal
+                            ? 'Quest is being created'
+                            : selected?.status === 'ready_for_review'
                             ? 'Ask for revision or explain what to change  @ file  / command'
-                            : selected.status === 'blocked'
+                            : selected?.status === 'blocked'
                               ? 'Provide missing info  @ file  / command'
-                              : ['running', 'validating', 'repairing', 'applying'].includes(selected.status)
+                              : selected && ['running', 'validating', 'repairing', 'applying'].includes(selected.status)
                                 ? 'Add instruction or context  @ file  / command'
                                 : `${t('quest_input_placeholder')}  @ file  / command`
                           : 'Message'}
@@ -2363,7 +2909,7 @@ export default function QuestPage({
                           { value: 'extra', label: t('quest_mode_extra') },
                         ]}
                         onChange={value => setQuestMode(value as QuestMode)}
-                        disabled={busy || executionLockedStatuses.includes(selected.status)}
+                        disabled={busy || !selected || executionLockedStatuses.includes(selected.status)}
                         compact
                         widthClass="w-10"
                         menuWidthClass="w-[116px]"
@@ -2374,17 +2920,9 @@ export default function QuestPage({
                         thinkingValue={modelConfig.thinking_effort}
                         modelOptions={modelSelectOptions}
                         thinkingOptions={thinkingOptions}
-                        onModelChange={value => {
-                          const model = modelOptions.find(option => option.id === value);
-                          setModelConfig(prev => ({
-                            ...prev,
-                            model: value,
-                            provider: model?.provider ?? prev.provider,
-                            max_tokens: model?.default_max_tokens ?? prev.max_tokens,
-                          }));
-                        }}
+                        onModelChange={chooseQuestModel}
                         onThinkingChange={value => setModelConfig(prev => ({ ...prev, thinking_effort: value }))}
-                        disabled={busy || executionLockedStatuses.includes(selected.status)}
+                        disabled={busy || !selected || executionLockedStatuses.includes(selected.status)}
                         widthClass="w-[68px]"
                         menuWidthClass="w-[240px]"
                         placement="top"
@@ -2475,7 +3013,15 @@ export default function QuestPage({
                   </div>
                 </div>
 
-                {panel === 'overview' && (
+                {creatingQuestGoal && (
+                  <div className={questClasses.reviewEmpty}>
+                    <IconFile />
+                    <strong>Artifact workspace</strong>
+                    <p className={mutedText}>Artifacts will appear here when the agent creates them.</p>
+                  </div>
+                )}
+
+                {!creatingQuestGoal && panel === 'overview' && selected && (
                   <div className={questClasses.overview}>
                     <section>
                       <h2>{t('quest_progress')}</h2>
@@ -2576,7 +3122,7 @@ export default function QuestPage({
                   </div>
                 )}
 
-                {panel === 'intent' && (
+                {!creatingQuestGoal && panel === 'intent' && selected && (
                   <div className={documentPanelClass}>
                     <div className={questClasses.sectionHeading}>
                       <div><span>{t('quest_durable_intent')}</span><strong>{t('quest_durable_intent_desc')}</strong></div>
@@ -2592,7 +3138,7 @@ export default function QuestPage({
                   </div>
                 )}
 
-                {panel === 'spec' && (
+                {!creatingQuestGoal && panel === 'spec' && selected && (
                   <div className={documentPanelClass}>
                     <div className={questClasses.sectionHeading}>
                       <div><span>{t('quest_ai_tool_spec')}</span><strong>{t('quest_ai_tool_spec_desc')}</strong></div>
@@ -2691,7 +3237,7 @@ export default function QuestPage({
                   </div>
                 )}
 
-                {panel === 'artifact' && artifact && (
+                {!creatingQuestGoal && panel === 'artifact' && artifact && selected && (
                   <div className={questClasses.artifactViewer}>
                     <header>
                       <button className={sectionHeadingButton} onClick={() => { setArtifact(null); setPanel('overview'); }}><IconChevronRight /> {t('quest_tab_overview')}</button>
@@ -2723,7 +3269,7 @@ export default function QuestPage({
                   </div>
                 )}
 
-                {panel === 'knowledge' && (
+                {!creatingQuestGoal && panel === 'knowledge' && selected && (
                   <div className={questClasses.knowledge}>
                     <section>
                       <h2>
@@ -2765,7 +3311,7 @@ export default function QuestPage({
                   </div>
                 )}
 
-                {panel === 'review' && (
+                {!creatingQuestGoal && panel === 'review' && selected && (
                   <div className={questClasses.review}>
                     {!selected.review ? (
                       <div className={questClasses.reviewEmpty}>

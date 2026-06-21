@@ -382,7 +382,25 @@ export function deleteQuest(id: string): Promise<{ deleted: boolean }> {
 }
 
 export function executeQuest(id: string): Promise<QuestDetail> {
-  return rpc('quest/execute', { id });
+  const requestId = `quest-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let settled = false;
+  let unlisten: (() => void) | null = null;
+  const promise = new Promise<QuestDetail>((resolve, reject) => {
+    listen<{ request_id: string }>('quest-execution-complete', event => {
+      if (event.payload.request_id !== requestId) return;
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      invoke<QuestDetail>('finish_quest_execution', { requestId })
+        .then(resolve)
+        .catch(reject);
+    }).then(cleanup => {
+      unlisten = cleanup;
+      if (settled) cleanup();
+      return invoke('start_quest_execution', { requestId, id });
+    }).catch(reject);
+  });
+  return promise;
 }
 
 export function applyQuest(id: string, files?: string[]): Promise<QuestDetail> {

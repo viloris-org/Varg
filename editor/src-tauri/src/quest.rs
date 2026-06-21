@@ -1497,8 +1497,20 @@ impl QuestStore {
             "pause" => "Quest paused for manual intervention",
             _ => "User added Quest note",
         };
-        if kind == "pause" && detail.record.status != QuestStatus::WaitingForUser {
-            detail.record.status = QuestStatus::WaitingForUser;
+        let next_status = if kind == "pause" && detail.record.status != QuestStatus::WaitingForUser {
+            Some(QuestStatus::WaitingForUser)
+        } else if kind == "clarify"
+            && matches!(
+                detail.record.status,
+                QuestStatus::Clarifying | QuestStatus::WaitingForUser
+            )
+        {
+            Some(QuestStatus::Specified)
+        } else {
+            None
+        };
+        if let Some(status) = next_status {
+            detail.record.status = status;
             detail.record.updated_at_ms = unix_time_ms();
             normalize_record_metadata(&mut detail.record);
             refresh_next_action(&mut detail.record);

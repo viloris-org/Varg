@@ -242,7 +242,8 @@ function ModelSelector() {
     setCurrentModel(modelId);
     const settings = await rpc<CopilotSettingsFull>('app/get_copilot_settings').catch(() => null);
     if (settings) {
-      await rpc('app/update_copilot_settings', { ...settings, model: modelId });
+      const { api_key: _apiKey, ...payload } = settings;
+      await rpc('app/update_copilot_settings', { ...payload, model: modelId });
     }
   }, []);
 
