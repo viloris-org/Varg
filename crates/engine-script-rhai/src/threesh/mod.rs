@@ -57,22 +57,30 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
     let mut module = rhai::Module::new();
 
     // ── Geometry constructors ──
-    module.set_native_fn("box_geometry", |w: f32, h: f32, d: f32| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::box_geometry(w, h, d)))
-    });
-    module.set_native_fn("sphere_geometry", |r: f32, ws: i64, hs: i64| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::sphere_geometry(r, ws, hs)))
-    });
-    module.set_native_fn("plane_geometry", |w: f32, h: f32| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::plane_geometry(w, h)))
-    });
-    module.set_native_fn("cylinder_geometry", |rt: f32, rb: f32, h: f32, s: i64| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::cylinder_geometry(
-            rt, rb, h, s,
+    module.set_native_fn("box_geometry", |w: f64, h: f64, d: f64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::box_geometry(
+            w as f32, h as f32, d as f32,
         )))
     });
-    module.set_native_fn("capsule_geometry", |r: f32, h: f32, s: i64| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::capsule_geometry(r, h, s)))
+    module.set_native_fn("sphere_geometry", |r: f64, ws: i64, hs: i64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::sphere_geometry(
+            r as f32, ws, hs,
+        )))
+    });
+    module.set_native_fn("plane_geometry", |w: f64, h: f64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::plane_geometry(
+            w as f32, h as f32,
+        )))
+    });
+    module.set_native_fn("cylinder_geometry", |rt: f64, rb: f64, h: f64, s: i64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::cylinder_geometry(
+            rt as f32, rb as f32, h as f32, s,
+        )))
+    });
+    module.set_native_fn("capsule_geometry", |r: f64, h: f64, s: i64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::capsule_geometry(
+            r as f32, h as f32, s,
+        )))
     });
     module.set_native_fn("model_geometry", |path: rhai::ImmutableString| {
         Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Geometry::model_geometry(
@@ -103,8 +111,10 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
     });
 
     // ── Vector3 constructors ──
-    module.set_native_fn("vec3", |x: f32, y: f32, z: f32| {
-        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Vector3::new(x, y, z)))
+    module.set_native_fn("vec3", |x: f64, y: f64, z: f64| {
+        Ok::<_, Box<rhai::EvalAltResult>>(rhai::Dynamic::from(Vector3::new(
+            x as f32, y as f32, z as f32,
+        )))
     });
     module.set_native_fn("vector3_zero", || {
         Ok::<_, Box<rhai::EvalAltResult>>(vector3::vector3_zero())
@@ -142,9 +152,13 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "directional_light",
-            move |color: rhai::Array, intensity: f32| {
+            move |color: rhai::Array, intensity: f64| {
                 let c = array_to_color(color);
-                Ok::<_, Box<rhai::EvalAltResult>>(Light::directional_light(c, intensity, &ctx))
+                Ok::<_, Box<rhai::EvalAltResult>>(Light::directional_light(
+                    c,
+                    intensity as f32,
+                    &ctx,
+                ))
             },
         );
     }
@@ -152,9 +166,14 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "point_light",
-            move |color: rhai::Array, intensity: f32, range: f32| {
+            move |color: rhai::Array, intensity: f64, range: f64| {
                 let c = array_to_color(color);
-                Ok::<_, Box<rhai::EvalAltResult>>(Light::point_light(c, intensity, range, &ctx))
+                Ok::<_, Box<rhai::EvalAltResult>>(Light::point_light(
+                    c,
+                    intensity as f32,
+                    range as f32,
+                    &ctx,
+                ))
             },
         );
     }
@@ -162,10 +181,14 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "spot_light",
-            move |color: rhai::Array, intensity: f32, range: f32, angle: f32| {
+            move |color: rhai::Array, intensity: f64, range: f64, angle: f64| {
                 let c = array_to_color(color);
                 Ok::<_, Box<rhai::EvalAltResult>>(Light::spot_light(
-                    c, intensity, range, angle, &ctx,
+                    c,
+                    intensity as f32,
+                    range as f32,
+                    angle as f32,
+                    &ctx,
                 ))
             },
         );
@@ -174,9 +197,9 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "ambient_light",
-            move |color: rhai::Array, intensity: f32| {
+            move |color: rhai::Array, intensity: f64| {
                 let c = array_to_color(color);
-                Ok::<_, Box<rhai::EvalAltResult>>(Light::ambient_light(c, intensity, &ctx))
+                Ok::<_, Box<rhai::EvalAltResult>>(Light::ambient_light(c, intensity as f32, &ctx))
             },
         );
     }
@@ -184,9 +207,13 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "perspective_camera",
-            move |fov: f32, aspect: f32, near: f32, far: f32| {
+            move |fov: f64, aspect: f64, near: f64, far: f64| {
                 Ok::<_, Box<rhai::EvalAltResult>>(Camera::perspective_camera(
-                    fov, aspect, near, far, &ctx,
+                    fov as f32,
+                    aspect as f32,
+                    near as f32,
+                    far as f32,
+                    &ctx,
                 ))
             },
         );
@@ -195,9 +222,15 @@ pub fn build_three_module(ctx: &SceneContext) -> rhai::Module {
         let ctx = ctx.clone();
         module.set_native_fn(
             "orthographic_camera",
-            move |left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32| {
+            move |left: f64, right: f64, top: f64, bottom: f64, near: f64, far: f64| {
                 Ok::<_, Box<rhai::EvalAltResult>>(Camera::orthographic_camera(
-                    left, right, top, bottom, near, far, &ctx,
+                    left as f32,
+                    right as f32,
+                    top as f32,
+                    bottom as f32,
+                    near as f32,
+                    far as f32,
+                    &ctx,
                 ))
             },
         );
@@ -263,27 +296,68 @@ pub fn register_threesh_api(engine: &mut rhai::Engine, ctx: &SceneContext) {
 // ── Vector3 ──
 
 fn register_vector3_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set", Vector3::set);
+    engine.register_fn("set", |vector: &mut Vector3, x: f64, y: f64, z: f64| {
+        vector.set(x as f32, y as f32, z as f32);
+    });
     engine.register_fn("clone_vec", Vector3::clone_vec);
-    engine.register_fn("add", Vector3::add);
-    engine.register_fn("add_scalar", Vector3::add_scalar);
-    engine.register_fn("sub", Vector3::sub);
-    engine.register_fn("sub_scalar", Vector3::sub_scalar);
-    engine.register_fn("multiply", Vector3::multiply);
-    engine.register_fn("multiply_scalar", Vector3::multiply_scalar);
-    engine.register_fn("divide", Vector3::divide);
-    engine.register_fn("divide_scalar", Vector3::divide_scalar);
+    engine.register_fn("add", |vector: &mut Vector3, other: Vector3| {
+        vector.add(&other);
+    });
+    engine.register_fn("add_scalar", |vector: &mut Vector3, value: f64| {
+        vector.add_scalar(value as f32);
+    });
+    engine.register_fn("sub", |vector: &mut Vector3, other: Vector3| {
+        vector.sub(&other);
+    });
+    engine.register_fn("sub_scalar", |vector: &mut Vector3, value: f64| {
+        vector.sub_scalar(value as f32);
+    });
+    engine.register_fn("multiply", |vector: &mut Vector3, other: Vector3| {
+        vector.multiply(&other);
+    });
+    engine.register_fn("multiply_scalar", |vector: &mut Vector3, value: f64| {
+        vector.multiply_scalar(value as f32);
+    });
+    engine.register_fn("divide", |vector: &mut Vector3, other: Vector3| {
+        vector.divide(&other);
+    });
+    engine.register_fn("divide_scalar", |vector: &mut Vector3, value: f64| {
+        vector.divide_scalar(value as f32);
+    });
     engine.register_fn("negate", Vector3::negate);
-    engine.register_fn("length", Vector3::length_vec);
-    engine.register_fn("length_sq", Vector3::length_sq);
+    engine.register_fn("length", |vector: &mut Vector3| vector.length_vec() as f64);
+    engine.register_fn("length_sq", |vector: &mut Vector3| {
+        vector.length_sq() as f64
+    });
     engine.register_fn("normalize", Vector3::normalize_vec);
-    engine.register_fn("dot", Vector3::dot);
-    engine.register_fn("cross", Vector3::cross);
-    engine.register_fn("distance_to", Vector3::distance_to);
-    engine.register_fn("distance_to_squared", Vector3::distance_to_squared);
-    engine.register_fn("lerp", Vector3::lerp);
-    engine.register_fn("clamp", Vector3::clamp_vec);
-    engine.register_fn("get_component", Vector3::get_component);
+    engine.register_fn("dot", |vector: &mut Vector3, other: Vector3| {
+        vector.dot(&other) as f64
+    });
+    engine.register_fn("cross", |vector: &mut Vector3, other: Vector3| {
+        vector.cross(&other)
+    });
+    engine.register_fn("distance_to", |vector: &mut Vector3, other: Vector3| {
+        vector.distance_to(&other) as f64
+    });
+    engine.register_fn(
+        "distance_to_squared",
+        |vector: &mut Vector3, other: Vector3| vector.distance_to_squared(&other) as f64,
+    );
+    engine.register_fn(
+        "lerp",
+        |vector: &mut Vector3, target: Vector3, alpha: f64| {
+            vector.lerp(&target, alpha as f32);
+        },
+    );
+    engine.register_fn(
+        "clamp",
+        |vector: &mut Vector3, min: Vector3, max: Vector3| {
+            vector.clamp_vec(&min, &max);
+        },
+    );
+    engine.register_fn("get_component", |vector: &mut Vector3, index: i64| {
+        vector.get_component(index) as f64
+    });
     engine.register_fn("to_array", Vector3::to_array);
 }
 
@@ -304,67 +378,142 @@ fn register_material_methods(_engine: &mut rhai::Engine) {
 // ── Object3D ──
 
 fn register_object3d_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set_position", Object3D::set_position);
+    engine.register_fn(
+        "set_position",
+        |object: &mut Object3D, x: f64, y: f64, z: f64| {
+            object.set_position(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("get_position", Object3D::get_position);
     engine.register_fn("position", Object3D::position);
-    engine.register_fn("set_rotation", Object3D::set_rotation);
+    engine.register_get("position", Object3D::position);
+    engine.register_fn(
+        "set_rotation",
+        |object: &mut Object3D, x: f64, y: f64, z: f64| {
+            object.set_rotation(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("get_rotation", Object3D::get_rotation);
     engine.register_fn("rotation", Object3D::rotation);
-    engine.register_fn("set_scale", Object3D::set_scale);
+    engine.register_get("rotation", Object3D::rotation);
+    engine.register_fn(
+        "set_scale",
+        |object: &mut Object3D, x: f64, y: f64, z: f64| {
+            object.set_scale(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("get_scale", Object3D::get_scale);
     engine.register_fn("scale", Object3D::scale);
-    engine.register_fn("translate_x", Object3D::translate_x);
-    engine.register_fn("translate_y", Object3D::translate_y);
-    engine.register_fn("translate_z", Object3D::translate_z);
-    engine.register_fn("look_at", Object3D::look_at);
+    engine.register_get("scale", Object3D::scale);
+    engine.register_fn("translate_x", |object: &mut Object3D, value: f64| {
+        object.translate_x(value as f32);
+    });
+    engine.register_fn("translate_y", |object: &mut Object3D, value: f64| {
+        object.translate_y(value as f32);
+    });
+    engine.register_fn("translate_z", |object: &mut Object3D, value: f64| {
+        object.translate_z(value as f32);
+    });
+    engine.register_fn(
+        "look_at",
+        |object: &mut Object3D, x: f64, y: f64, z: f64| {
+            object.look_at(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("destroy", Object3D::destroy);
 }
 
 // ── Mesh ──
 
 fn register_mesh_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set_position", Mesh::set_position);
+    engine.register_fn("set_position", |mesh: &mut Mesh, x: f64, y: f64, z: f64| {
+        mesh.set_position(x as f32, y as f32, z as f32);
+    });
     engine.register_fn("get_position", Mesh::get_position);
     engine.register_fn("position", Mesh::position);
-    engine.register_fn("set_rotation", Mesh::set_rotation);
+    engine.register_get("position", Mesh::position);
+    engine.register_fn("set_rotation", |mesh: &mut Mesh, x: f64, y: f64, z: f64| {
+        mesh.set_rotation(x as f32, y as f32, z as f32);
+    });
     engine.register_fn("get_rotation", Mesh::get_rotation);
     engine.register_fn("rotation", Mesh::rotation);
-    engine.register_fn("set_scale", Mesh::set_scale);
+    engine.register_get("rotation", Mesh::rotation);
+    engine.register_fn("set_scale", |mesh: &mut Mesh, x: f64, y: f64, z: f64| {
+        mesh.set_scale(x as f32, y as f32, z as f32);
+    });
     engine.register_fn("get_scale", Mesh::get_scale);
     engine.register_fn("scale", Mesh::scale);
-    engine.register_fn("translate_x", Mesh::translate_x);
-    engine.register_fn("translate_y", Mesh::translate_y);
-    engine.register_fn("translate_z", Mesh::translate_z);
-    engine.register_fn("look_at", Mesh::look_at);
+    engine.register_get("scale", Mesh::scale);
+    engine.register_fn("translate_x", |mesh: &mut Mesh, value: f64| {
+        mesh.translate_x(value as f32);
+    });
+    engine.register_fn("translate_y", |mesh: &mut Mesh, value: f64| {
+        mesh.translate_y(value as f32);
+    });
+    engine.register_fn("translate_z", |mesh: &mut Mesh, value: f64| {
+        mesh.translate_z(value as f32);
+    });
+    engine.register_fn("look_at", |mesh: &mut Mesh, x: f64, y: f64, z: f64| {
+        mesh.look_at(x as f32, y as f32, z as f32);
+    });
     engine.register_fn("destroy", Mesh::destroy);
-    engine.register_fn("entity_id", Mesh::entity_id);
+    engine.register_fn("entity_id", |mesh: &mut Mesh| mesh.entity_id());
 }
 
 // ── Light ──
 
 fn register_light_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set_position", Light::set_position);
+    engine.register_fn(
+        "set_position",
+        |light: &mut Light, x: f64, y: f64, z: f64| {
+            light.set_position(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("get_position", Light::get_position);
     engine.register_fn("position", Light::position);
-    engine.register_fn("entity_id", Light::entity_id);
+    engine.register_get("position", Light::position);
+    engine.register_fn("entity_id", |light: &mut Light| light.entity_id());
 }
 
 // ── Camera ──
 
 fn register_camera_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set_position", Camera::set_position);
+    engine.register_fn(
+        "set_position",
+        |camera: &mut Camera, x: f64, y: f64, z: f64| {
+            camera.set_position(x as f32, y as f32, z as f32);
+        },
+    );
     engine.register_fn("get_position", Camera::get_position);
     engine.register_fn("position", Camera::position);
-    engine.register_fn("look_at", Camera::look_at);
-    engine.register_fn("entity_id", Camera::entity_id);
+    engine.register_get("position", Camera::position);
+    engine.register_fn("look_at", |camera: &mut Camera, x: f64, y: f64, z: f64| {
+        camera.look_at(x as f32, y as f32, z as f32);
+    });
+    engine.register_fn("entity_id", |camera: &mut Camera| camera.entity_id());
 }
 
 // ── Position / Rotation / Scale Proxy ──
 
 fn register_proxy_methods(engine: &mut rhai::Engine) {
-    engine.register_fn("set", scene::PositionProxy::set);
-    engine.register_fn("set", scene::RotationProxy::set);
-    engine.register_fn("set", scene::ScaleProxy::set);
+    engine.register_fn(
+        "set",
+        |proxy: &mut scene::PositionProxy, x: f64, y: f64, z: f64| {
+            proxy.set(x as f32, y as f32, z as f32);
+        },
+    );
+    engine.register_fn(
+        "set",
+        |proxy: &mut scene::RotationProxy, x: f64, y: f64, z: f64| {
+            proxy.set(x as f32, y as f32, z as f32);
+        },
+    );
+    engine.register_fn(
+        "set",
+        |proxy: &mut scene::ScaleProxy, x: f64, y: f64, z: f64| {
+            proxy.set(x as f32, y as f32, z as f32);
+        },
+    );
 }
 
 // ── THREE module functions ──
@@ -374,28 +523,30 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
     engine.register_fn("vector3_from_array", vector3::vector3_from_array);
 
     // Geometry constructors — return Dynamic because Geometry is not registered as Rhai type
-    engine.register_fn("box_geometry", |w: f32, h: f32, d: f32| -> rhai::Dynamic {
-        rhai::Dynamic::from(Geometry::box_geometry(w, h, d))
+    engine.register_fn("box_geometry", |w: f64, h: f64, d: f64| -> rhai::Dynamic {
+        rhai::Dynamic::from(Geometry::box_geometry(w as f32, h as f32, d as f32))
     });
     engine.register_fn(
         "sphere_geometry",
-        |r: f32, ws: i64, hs: i64| -> rhai::Dynamic {
-            rhai::Dynamic::from(Geometry::sphere_geometry(r, ws, hs))
+        |r: f64, ws: i64, hs: i64| -> rhai::Dynamic {
+            rhai::Dynamic::from(Geometry::sphere_geometry(r as f32, ws, hs))
         },
     );
-    engine.register_fn("plane_geometry", |w: f32, h: f32| -> rhai::Dynamic {
-        rhai::Dynamic::from(Geometry::plane_geometry(w, h))
+    engine.register_fn("plane_geometry", |w: f64, h: f64| -> rhai::Dynamic {
+        rhai::Dynamic::from(Geometry::plane_geometry(w as f32, h as f32))
     });
     engine.register_fn(
         "cylinder_geometry",
-        |rt: f32, rb: f32, h: f32, s: i64| -> rhai::Dynamic {
-            rhai::Dynamic::from(Geometry::cylinder_geometry(rt, rb, h, s))
+        |rt: f64, rb: f64, h: f64, s: i64| -> rhai::Dynamic {
+            rhai::Dynamic::from(Geometry::cylinder_geometry(
+                rt as f32, rb as f32, h as f32, s,
+            ))
         },
     );
     engine.register_fn(
         "capsule_geometry",
-        |r: f32, h: f32, s: i64| -> rhai::Dynamic {
-            rhai::Dynamic::from(Geometry::capsule_geometry(r, h, s))
+        |r: f64, h: f64, s: i64| -> rhai::Dynamic {
+            rhai::Dynamic::from(Geometry::capsule_geometry(r as f32, h as f32, s))
         },
     );
     engine.register_fn("model_geometry", |path: &str| -> rhai::Dynamic {
@@ -445,9 +596,9 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "directional_light",
-            move |color: rhai::Array, intensity: f32| -> Light {
+            move |color: rhai::Array, intensity: f64| -> Light {
                 let c = array_to_color(color);
-                Light::directional_light(c, intensity, &ctx)
+                Light::directional_light(c, intensity as f32, &ctx)
             },
         );
     }
@@ -455,9 +606,9 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "point_light",
-            move |color: rhai::Array, intensity: f32, range: f32| -> Light {
+            move |color: rhai::Array, intensity: f64, range: f64| -> Light {
                 let c = array_to_color(color);
-                Light::point_light(c, intensity, range, &ctx)
+                Light::point_light(c, intensity as f32, range as f32, &ctx)
             },
         );
     }
@@ -465,9 +616,9 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "spot_light",
-            move |color: rhai::Array, intensity: f32, range: f32, angle: f32| -> Light {
+            move |color: rhai::Array, intensity: f64, range: f64, angle: f64| -> Light {
                 let c = array_to_color(color);
-                Light::spot_light(c, intensity, range, angle, &ctx)
+                Light::spot_light(c, intensity as f32, range as f32, angle as f32, &ctx)
             },
         );
     }
@@ -475,9 +626,9 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "ambient_light",
-            move |color: rhai::Array, intensity: f32| -> Light {
+            move |color: rhai::Array, intensity: f64| -> Light {
                 let c = array_to_color(color);
-                Light::ambient_light(c, intensity, &ctx)
+                Light::ambient_light(c, intensity as f32, &ctx)
             },
         );
     }
@@ -485,8 +636,8 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "perspective_camera",
-            move |fov: f32, aspect: f32, near: f32, far: f32| -> Camera {
-                Camera::perspective_camera(fov, aspect, near, far, &ctx)
+            move |fov: f64, aspect: f64, near: f64, far: f64| -> Camera {
+                Camera::perspective_camera(fov as f32, aspect as f32, near as f32, far as f32, &ctx)
             },
         );
     }
@@ -494,8 +645,16 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
         let ctx = ctx.clone();
         engine.register_fn(
             "orthographic_camera",
-            move |left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32| -> Camera {
-                Camera::orthographic_camera(left, right, top, bottom, near, far, &ctx)
+            move |left: f64, right: f64, top: f64, bottom: f64, near: f64, far: f64| -> Camera {
+                Camera::orthographic_camera(
+                    left as f32,
+                    right as f32,
+                    top as f32,
+                    bottom as f32,
+                    near as f32,
+                    far as f32,
+                    &ctx,
+                )
             },
         );
     }
@@ -509,8 +668,8 @@ fn register_module_functions(engine: &mut rhai::Engine, ctx: &SceneContext) {
     // Convenience math — use `vec3(1, 2, 3)` to create vectors in scripts.
     // Returns Dynamic because Rhai requires explicit Dynamic conversion for custom types
     // in register_fn closures.
-    engine.register_fn("vec3", |x: f32, y: f32, z: f32| -> rhai::Dynamic {
-        rhai::Dynamic::from(Vector3::new(x, y, z))
+    engine.register_fn("vec3", |x: f64, y: f64, z: f64| -> rhai::Dynamic {
+        rhai::Dynamic::from(Vector3::new(x as f32, y as f32, z as f32))
     });
     engine.register_fn("vector3_zero", vector3::vector3_zero);
     engine.register_fn("vector3_one", vector3::vector3_one);
@@ -847,15 +1006,15 @@ mod tests {
 
         // Step 1: Just Vector3
         engine.register_type::<Vector3>();
-        engine.register_fn("vec3", |x: f32, y: f32, z: f32| -> Vector3 {
-            Vector3::new(x, y, z)
+        engine.register_fn("vec3", |x: f64, y: f64, z: f64| -> Vector3 {
+            Vector3::new(x as f32, y as f32, z as f32)
         });
         let _: Vector3 = engine.eval("vec3(1.0, 2.0, 3.0)").unwrap();
         eprintln!("Step 1 OK: Vector3");
 
         // Step 2: Add box_geometry
-        engine.register_fn("box_geo", |w: f32, h: f32, d: f32| -> rhai::Dynamic {
-            rhai::Dynamic::from(Geometry::box_geometry(w, h, d))
+        engine.register_fn("box_geo", |w: f64, h: f64, d: f64| -> rhai::Dynamic {
+            rhai::Dynamic::from(Geometry::box_geometry(w as f32, h as f32, d as f32))
         });
         let _: rhai::Dynamic = engine.eval("box_geo(1.0, 2.0, 3.0)").unwrap();
         eprintln!("Step 2 OK: box_geometry");
@@ -950,7 +1109,7 @@ mod tests {
     #[test]
     fn vector3_dot_and_cross() {
         let (engine, _ctx) = setup_engine();
-        let (dot, cross): (f32, Vector3) = engine
+        let result: rhai::Array = engine
             .eval(
                 r#"
             let a = vec3(1.0, 0.0, 0.0);
@@ -961,6 +1120,8 @@ mod tests {
         "#,
             )
             .unwrap();
+        let dot = result[0].as_float().unwrap();
+        let cross = result[1].clone().cast::<Vector3>();
         assert!((dot - 0.0).abs() < 0.01);
         assert!((cross.x - 0.0).abs() < 0.01);
         assert!((cross.y - 0.0).abs() < 0.01);

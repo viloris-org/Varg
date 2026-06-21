@@ -121,6 +121,7 @@ impl Translations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn loads_both_locales() {
@@ -156,5 +157,23 @@ mod tests {
     fn locale_default_is_english() {
         assert_eq!(Locale::default(), Locale::En);
         assert_ne!(Locale::En, Locale::Zh);
+    }
+
+    #[test]
+    fn locale_key_sets_match() {
+        let base = Translations::load(Locale::En)
+            .entries()
+            .into_iter()
+            .map(|(key, _)| key.to_owned())
+            .collect::<BTreeSet<_>>();
+
+        for locale in [Locale::En, Locale::Zh, Locale::Es] {
+            let keys = Translations::load(locale)
+                .entries()
+                .into_iter()
+                .map(|(key, _)| key.to_owned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(keys, base, "translation keys differ for {locale:?}");
+        }
     }
 }

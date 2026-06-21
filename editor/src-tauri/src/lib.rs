@@ -41,9 +41,9 @@ mod quest;
 mod scene_window;
 
 use quest::{
-    transaction_groups_from_changed_files, ChangedFile, QuestExplorationAttempt, QuestProject,
-    QuestReview, QuestReviewAction, QuestReviewFinding, QuestReviewMetrics, QuestStatus,
-    QuestStore, ValidationResult,
+    transaction_groups_from_changed_files, ChangedFile, QuestExplorationAttempt, QuestMode,
+    QuestModelConfig, QuestProject, QuestReview, QuestReviewAction, QuestReviewFinding,
+    QuestReviewMetrics, QuestStatus, QuestStore, ValidationResult,
 };
 
 const APP_WINDOW_ICON: Image<'static> = tauri::include_image!("./icons/128x128.png");
@@ -76,6 +76,63 @@ fn required_string<'a>(params: &'a Value, key: &str) -> EngineResult<&'a str> {
         .ok_or_else(|| EngineError::config(format!("missing '{key}' parameter")))
 }
 
+fn copilot_provider_str(provider: &engine_editor::CopilotProvider) -> EngineResult<&'static str> {
+    match provider {
+        engine_editor::CopilotProvider::Anthropic => Ok("anthropic"),
+        engine_editor::CopilotProvider::Ollama => Ok("ollama"),
+        engine_editor::CopilotProvider::OpenAI => Ok("openai"),
+        engine_editor::CopilotProvider::CodexOAuth => Ok("codex_oauth"),
+        engine_editor::CopilotProvider::Gemini => Ok("gemini"),
+        engine_editor::CopilotProvider::Custom => Ok("custom"),
+        engine_editor::CopilotProvider::Mimo => Ok("mimo"),
+        engine_editor::CopilotProvider::DeepSeek => Ok("deepseek"),
+        engine_editor::CopilotProvider::Glm => Ok("glm"),
+        engine_editor::CopilotProvider::Stub => Err(EngineError::config(
+            "Quest execution requires a configured AI provider.",
+        )),
+    }
+}
+
+fn parse_quest_mode(value: Option<&Value>) -> EngineResult<QuestMode> {
+    match value.and_then(Value::as_str).unwrap_or("solo") {
+        "solo" => Ok(QuestMode::Solo),
+        "extra" => Ok(QuestMode::Extra),
+        other => Err(EngineError::config(format!("unknown Quest mode: {other}"))),
+    }
+}
+
+fn parse_thinking_effort(value: &str) -> Option<engine_ai::ThinkingEffort> {
+    match value {
+        "off" => Some(engine_ai::ThinkingEffort::Off),
+        "low" => Some(engine_ai::ThinkingEffort::Low),
+        "medium" => Some(engine_ai::ThinkingEffort::Medium),
+        "high" => Some(engine_ai::ThinkingEffort::High),
+        _ => None,
+    }
+}
+
+fn parse_locale(value: Option<&str>) -> Locale {
+    match value {
+        Some("zh") => Locale::Zh,
+        Some("ja") => Locale::Ja,
+        Some("ko") => Locale::Ko,
+        Some("es") => Locale::Es,
+        Some("zh_hant") => Locale::ZhHant,
+        _ => Locale::En,
+    }
+}
+
+fn locale_code(locale: Locale) -> &'static str {
+    match locale {
+        Locale::En => "en",
+        Locale::Zh => "zh",
+        Locale::Ja => "ja",
+        Locale::Ko => "ko",
+        Locale::Es => "es",
+        Locale::ZhHant => "zh_hant",
+    }
+}
+
 fn validate_file_name(name: &str) -> EngineResult<()> {
     let mut components = Path::new(name).components();
     if matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none() {
@@ -85,6 +142,31 @@ fn validate_file_name(name: &str) -> EngineResult<()> {
             "file name must not contain path separators",
         ))
     }
+}
+
+fn format_script_diagnostics(
+    path: &str,
+    diagnostics: &[engine_script_rhai::AsterScriptDiagnostic],
+) -> String {
+    let details = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let location = match (diagnostic.line, diagnostic.column) {
+                (Some(line), Some(column)) => format!("{path}:{line}:{column}"),
+                (Some(line), None) => format!("{path}:{line}"),
+                _ => path.to_owned(),
+            };
+            format!(
+                "{} {}: {} Suggestion: {}",
+                diagnostic.code, location, diagnostic.message, diagnostic.suggestion
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Aster Script validation failed with {} diagnostic(s):\n{details}",
+        diagnostics.len()
+    )
 }
 
 fn asset_meta_path_for_source(path: &Path) -> PathBuf {
@@ -320,6 +402,55 @@ struct CompletedCopilotRequest {
     tool_calls: Vec<engine_ai::ToolCall>,
     cached_context: engine_editor::ProjectContext,
     knowledge_entries_used: usize,
+}
+
+struct PreparedQuestModelRequest {
+    request: engine_ai::AiRequest,
+    provider: String,
+    model: String,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+    max_tokens: u32,
+    codex_oauth: Option<engine_ai::providers::CodexOAuthCredentials>,
+    mimo_config: Option<engine_editor::MimoConfig>,
+    glm_config: Option<engine_editor::GlmConfig>,
+}
+
+struct PreparedQuestCreateRequest {
+    model_request: PreparedQuestModelRequest,
+    title: String,
+    goal: String,
+    project: QuestProject,
+    mode: QuestMode,
+    model_config: QuestModelConfig,
+}
+
+enum PreparedQuestAiRequest {
+    Create(PreparedQuestCreateRequest),
+    Rewrite(PreparedQuestModelRequest),
+}
+
+enum CompletedQuestAiRequest {
+    Create {
+        generated: Result<GeneratedQuestSpec, String>,
+        title: String,
+        goal: String,
+        project: QuestProject,
+        mode: QuestMode,
+        model_config: QuestModelConfig,
+    },
+    Rewrite(Result<String, String>),
+}
+
+#[derive(Default)]
+struct QuestAiRequests {
+    completed: HashMap<String, CompletedQuestAiRequest>,
+    cancelled: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Default)]
+struct QuestAiRequestState {
+    requests: std::sync::Arc<Mutex<QuestAiRequests>>,
 }
 
 #[derive(Default)]
@@ -781,16 +912,27 @@ impl EditorHost {
             "project/delete_asset" => self.project_delete_asset(params),
             "project/reimport_asset" => self.project_reimport_asset(params),
             "project/read_file" => self.project_read_file(params),
+            "project/check_amdl" => self.project_check_amdl(params),
+            "project/check_script" => self.project_check_script(params),
             "project/write_file" => self.project_write_file(params),
             "project/package" => self.project_package(params),
 
             // ── Quests ──
             "quest/list" => self.quest_list(params),
             "quest/get" => self.quest_get(params),
-            "quest/create" => self.quest_create(params),
+            "quest/create" => Err(EngineError::config(
+                "Quest creation must use the background Quest AI command",
+            )),
+            "quest/create_openai_realtime_transcription_session" => {
+                self.quest_create_openai_realtime_transcription_session(params)
+            }
+            "quest/rewrite_prompt" => Err(EngineError::config(
+                "Quest prompt rewriting must use the background Quest AI command",
+            )),
             "quest/promote" => self.quest_promote(params),
             "quest/update_intent" => self.quest_update_intent(params),
             "quest/update_spec" => self.quest_update_spec(params),
+            "quest/update_execution_config" => self.quest_update_execution_config(params),
             "quest/update_knowledge_context" => self.quest_update_knowledge_context(params),
             "quest/add_note" => self.quest_add_note(params),
             "quest/request_quick_fix" => self.quest_request_quick_fix(params),
@@ -887,34 +1029,70 @@ impl EditorHost {
             .map_err(|error| EngineError::other(error.to_string()))
     }
 
-    fn quest_create(&mut self, params: &Value) -> EngineResult<Value> {
+    fn prepare_quest_create_request(
+        &mut self,
+        params: &Value,
+    ) -> EngineResult<PreparedQuestCreateRequest> {
         let title = params
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or("")
-            .trim();
-        let goal = required_string(params, "goal")?.trim();
+            .trim()
+            .to_owned();
+        let goal = required_string(params, "goal")?.trim().to_owned();
         if goal.is_empty() {
             return Err(EngineError::config("Quest goal must not be empty"));
         }
-        let generated = self.generate_quest_spec(goal)?;
-        let title = if title.is_empty() {
-            generated.title
-        } else {
-            title.to_owned()
-        };
-        let project = self
-            .shell
-            .project()
-            .ok_or_else(|| EngineError::config("no project open"))?;
-        let detail = self.quest_store.create(
-            title,
-            goal.to_owned(),
-            generated.spec,
+        let mode = parse_quest_mode(params.get("mode"))?;
+        let model_config = self.quest_model_config_from_params(params)?;
+        let project = {
+            let project = self
+                .shell
+                .project()
+                .ok_or_else(|| EngineError::config("no project open"))?;
             QuestProject {
                 name: project.name().to_owned(),
                 path: project.root.clone(),
-            },
+            }
+        };
+        let mut request = engine_ai::AiRequest::single_turn(
+            "You are Aster Quest Mode. Create the initial artifacts for an AI-led game-editor Quest by calling tools only. You must call `create_or_update_spec` exactly once. You may call `create_task` any number of times when concrete task slices are useful. Do not put the spec or task list in normal text. Do not force a generic workflow; choose the task shape that best fits the user's goal.".to_owned(),
+            serde_json::json!({}),
+            format!("Quest goal:\n{goal}"),
+        );
+        request.tools = quest_creation_tool_definitions();
+        let model_request = self.prepare_quest_model_request(&model_config, request)?;
+        Ok(PreparedQuestCreateRequest {
+            model_request,
+            title,
+            goal,
+            project,
+            mode,
+            model_config,
+        })
+    }
+
+    fn finish_quest_create(
+        &mut self,
+        generated: GeneratedQuestSpec,
+        title: String,
+        goal: String,
+        project: QuestProject,
+        mode: QuestMode,
+        model_config: QuestModelConfig,
+    ) -> EngineResult<Value> {
+        let title = if title.is_empty() {
+            generated.title
+        } else {
+            title
+        };
+        let detail = self.quest_store.create_with_config(
+            title,
+            goal,
+            generated.spec,
+            project,
+            mode,
+            model_config,
         )?;
         for task in generated.tasks {
             self.quest_store.append_timeline_event(
@@ -930,6 +1108,116 @@ impl EditorHost {
         }
         let detail = self.quest_store.get(&detail.record.id)?;
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_create_openai_realtime_transcription_session(
+        &self,
+        _params: &Value,
+    ) -> EngineResult<Value> {
+        if !matches!(
+            self.copilot_settings.provider,
+            engine_editor::CopilotProvider::OpenAI
+        ) {
+            return Err(EngineError::config(
+                "Quest voice input requires the OpenAI API provider.",
+            ));
+        }
+        let api_key = self.copilot_settings.api_key.as_deref().ok_or_else(|| {
+            EngineError::config("OpenAI API key is required for Quest voice input")
+        })?;
+        let endpoint = self
+            .copilot_settings
+            .api_endpoint
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/');
+        let url = format!("{endpoint}/realtime/client_secrets");
+        let body = serde_json::json!({
+            "session": {
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "transcription": {
+                            "model": "gpt-realtime-whisper",
+                            "delay": "low"
+                        }
+                    }
+                }
+            }
+        });
+        let mut response = ureq::post(&url)
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|error| {
+                EngineError::other(format!(
+                    "OpenAI Realtime transcription session failed: {error}"
+                ))
+            })?;
+        let json: Value = response.body_mut().read_json().map_err(|error| {
+            EngineError::other(format!(
+                "OpenAI Realtime transcription session response parse failed: {error}"
+            ))
+        })?;
+        Ok(serde_json::json!({
+            "session": json,
+            "model": "gpt-realtime-whisper",
+            "endpoint": endpoint,
+            "realtime_url": format!("{endpoint}/realtime/calls"),
+        }))
+    }
+
+    fn openai_realtime_transcription_config(&self) -> EngineResult<(String, String)> {
+        if !matches!(
+            self.copilot_settings.provider,
+            engine_editor::CopilotProvider::OpenAI
+        ) {
+            return Err(EngineError::config(
+                "Quest voice input requires the OpenAI API provider.",
+            ));
+        }
+        let api_key = self.copilot_settings.api_key.clone().ok_or_else(|| {
+            EngineError::config("OpenAI API key is required for Quest voice input")
+        })?;
+        let endpoint = self
+            .copilot_settings
+            .api_endpoint
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+            .to_owned();
+        Ok((api_key, endpoint))
+    }
+
+    fn prepare_quest_rewrite_request(
+        &mut self,
+        params: &Value,
+    ) -> EngineResult<PreparedQuestModelRequest> {
+        let prompt = required_string(params, "prompt")?.trim();
+        if prompt.is_empty() {
+            return Err(EngineError::config("Prompt must not be empty"));
+        }
+        let model_config = self.quest_model_config_from_params(params)?;
+        let request = engine_ai::AiRequest {
+            system: "You rewrite rough Quest prompts into clear, actionable game-engine development tasks. Return only the rewritten prompt. Do not add markdown fences, titles, commentary, or multiple options.".to_owned(),
+            context: serde_json::json!({}),
+            messages: vec![engine_ai::ChatMessage::user(format!(
+                "Rewrite this Quest prompt so an autonomous coding agent can execute it. Preserve the user's intent, concrete nouns, language, and constraints. Make it concise but specific.\n\nPrompt:\n{prompt}"
+            ))],
+            thinking_effort: parse_thinking_effort(&model_config.thinking_effort),
+            tools: Vec::new(),
+        };
+        self.prepare_quest_model_request(&model_config, request)
+    }
+
+    fn finish_quest_rewrite(&mut self, response: String) -> EngineResult<Value> {
+        let rewritten = response.trim().trim_matches('"').trim().to_owned();
+        if rewritten.is_empty() {
+            return Err(EngineError::other(
+                "Prompt rewrite returned an empty result",
+            ));
+        }
+        Ok(serde_json::json!({ "prompt": rewritten }))
     }
 
     fn quest_promote(&mut self, params: &Value) -> EngineResult<Value> {
@@ -950,11 +1238,12 @@ impl EditorHost {
             format!("{prompt}\n\nPromoted Editor context:\n{context}")
         };
         let generated = self.generate_quest_spec(&goal)?;
+        let model_config = self.default_quest_model_config();
         let project = self
             .shell
             .project()
             .ok_or_else(|| EngineError::config("no project open"))?;
-        let detail = self.quest_store.create(
+        let detail = self.quest_store.create_with_config(
             generated.title,
             goal.clone(),
             generated.spec,
@@ -962,6 +1251,8 @@ impl EditorHost {
                 name: project.name().to_owned(),
                 path: project.root.clone(),
             },
+            QuestMode::Solo,
+            model_config,
         )?;
         if !context.is_empty() {
             let promoted_intent = format!(
@@ -1052,6 +1343,27 @@ impl EditorHost {
         let spec = required_string(params, "spec")?;
         serde_json::to_value(self.quest_store.update_spec(id, spec)?)
             .map_err(|error| EngineError::other(error.to_string()))
+    }
+
+    fn quest_update_execution_config(&mut self, params: &Value) -> EngineResult<Value> {
+        let id = required_string(params, "id")?;
+        let mode = parse_quest_mode(params.get("mode"))?;
+        let model_config = self.quest_model_config_from_params(params)?;
+        let autonomy = params
+            .get("autonomy")
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    EngineError::config(format!("invalid Quest autonomy config: {error}"))
+                })
+            })
+            .transpose()?;
+        serde_json::to_value(self.quest_store.update_execution_config(
+            id,
+            mode,
+            model_config,
+            autonomy,
+        )?)
+        .map_err(|error| EngineError::other(error.to_string()))
     }
 
     fn quest_update_knowledge_context(&mut self, params: &Value) -> EngineResult<Value> {
@@ -1323,9 +1635,16 @@ impl EditorHost {
             detail.spec, knowledge_context
         );
         let mut session = AgentSession::new(context)?;
-        let model = self.create_copilot_model()?;
+        let model = self.create_quest_model(&detail.record.model_config)?;
         let first_action_started_at = Instant::now();
-        let plan = session.plan(model.as_ref(), &prompt, PermissionPolicy::worktree_write())?;
+        let plan = session.plan_with_history_streaming(
+            model.as_ref(),
+            &prompt,
+            &[],
+            PermissionPolicy::worktree_write(),
+            parse_thinking_effort(&detail.record.model_config.thinking_effort),
+            &mut |_| {},
+        )?;
         let plan_latency_ms = elapsed_millis(first_action_started_at);
         let planned: Vec<String> = plan
             .operations
@@ -1972,50 +2291,101 @@ impl EditorHost {
         serde_json::to_value(detail).map_err(|error| EngineError::other(error.to_string()))
     }
 
-    fn create_copilot_model(&mut self) -> EngineResult<Box<dyn engine_ai::AiModel>> {
-        let provider_str = match self.copilot_settings.provider {
-            engine_editor::CopilotProvider::Anthropic => "anthropic",
-            engine_editor::CopilotProvider::Ollama => "ollama",
-            engine_editor::CopilotProvider::OpenAI => "openai",
-            engine_editor::CopilotProvider::CodexOAuth => "codex_oauth",
-            engine_editor::CopilotProvider::Gemini => "gemini",
-            engine_editor::CopilotProvider::Custom => "custom",
-            engine_editor::CopilotProvider::Mimo => "mimo",
-            engine_editor::CopilotProvider::DeepSeek => "deepseek",
-            engine_editor::CopilotProvider::Glm => "glm",
-            engine_editor::CopilotProvider::Stub => {
-                return Err(EngineError::config(
-                    "Quest execution requires a configured AI provider.",
-                ));
-            }
+    fn create_quest_model(
+        &mut self,
+        config: &QuestModelConfig,
+    ) -> EngineResult<Box<dyn engine_ai::AiModel>> {
+        let prepared = self.prepare_quest_model_request(
+            config,
+            engine_ai::AiRequest::single_turn(String::new(), serde_json::json!({}), String::new()),
+        )?;
+        engine_ai::providers::create_provider(
+            &prepared.provider,
+            &prepared.model,
+            prepared.api_key.as_deref(),
+            prepared.endpoint.as_deref(),
+            prepared.max_tokens,
+            prepared.codex_oauth,
+            prepared.mimo_config.as_ref(),
+            prepared.glm_config.as_ref(),
+        )
+    }
+
+    fn prepare_quest_model_request(
+        &mut self,
+        config: &QuestModelConfig,
+        request: engine_ai::AiRequest,
+    ) -> EngineResult<PreparedQuestModelRequest> {
+        let provider = if config.provider == "inherit" {
+            copilot_provider_str(&self.copilot_settings.provider)?.to_owned()
+        } else if config.provider == "stub" {
+            return Err(EngineError::config(
+                "Quest execution requires a configured AI provider.",
+            ));
+        } else {
+            config.provider.clone()
         };
+        let provider_str = provider.as_str();
+        let model = if config.model.trim().is_empty() {
+            self.copilot_settings.model.clone()
+        } else {
+            config.model.clone()
+        };
+        let max_tokens = config.max_tokens.max(1);
+        let endpoint = config.api_endpoint.clone().or_else(|| {
+            if config.provider == "inherit"
+                && self.copilot_settings.provider.endpoint_configurable()
+            {
+                self.copilot_settings.api_endpoint.clone()
+            } else {
+                None
+            }
+        });
         let codex_oauth = if provider_str == "codex_oauth" {
             Some(self.ensure_codex_oauth()?)
         } else {
             None
         };
-        engine_ai::providers::create_provider(
-            provider_str,
-            &self.copilot_settings.model,
-            self.copilot_settings.api_key.as_deref(),
-            if self.copilot_settings.provider.endpoint_configurable() {
-                self.copilot_settings.api_endpoint.as_deref()
-            } else {
-                None
-            },
-            self.copilot_settings.max_tokens,
+        let mimo_config =
+            (provider_str == "mimo").then(|| self.copilot_settings.mimo_config.clone());
+        let glm_config = (provider_str == "glm").then(|| self.copilot_settings.glm_config.clone());
+        Ok(PreparedQuestModelRequest {
+            request,
+            provider,
+            model,
+            api_key: self.copilot_settings.api_key.clone(),
+            endpoint,
+            max_tokens,
             codex_oauth,
-            if provider_str == "mimo" {
-                Some(&self.copilot_settings.mimo_config)
+            mimo_config,
+            glm_config,
+        })
+    }
+
+    fn default_quest_model_config(&self) -> QuestModelConfig {
+        QuestModelConfig {
+            provider: copilot_provider_str(&self.copilot_settings.provider)
+                .unwrap_or("inherit")
+                .to_owned(),
+            model: self.copilot_settings.model.clone(),
+            api_endpoint: if self.copilot_settings.provider.endpoint_configurable() {
+                self.copilot_settings.api_endpoint.clone()
             } else {
                 None
             },
-            if provider_str == "glm" {
-                Some(&self.copilot_settings.glm_config)
-            } else {
-                None
-            },
-        )
+            max_tokens: self.copilot_settings.max_tokens,
+            thinking_effort: "medium".to_owned(),
+        }
+    }
+
+    fn quest_model_config_from_params(&self, params: &Value) -> EngineResult<QuestModelConfig> {
+        let mut config = self.default_quest_model_config();
+        if let Some(value) = params.get("model_config") {
+            config = serde_json::from_value(value.clone()).map_err(|error| {
+                EngineError::config(format!("invalid Quest model config: {error}"))
+            })?;
+        }
+        Ok(config)
     }
 
     fn prepare_quest_workspace(&self, detail: &quest::QuestDetail) -> EngineResult<PathBuf> {
@@ -2097,14 +2467,7 @@ impl EditorHost {
                 "last_touched": p.last_touched,
                 "toolchain_version": p.toolchain_version,
             })).collect::<Vec<_>>(),
-            "locale": match self.hub.preferences().locale {
-                engine_i18n::Locale::Zh => "zh",
-                engine_i18n::Locale::Ja => "ja",
-                engine_i18n::Locale::Ko => "ko",
-                engine_i18n::Locale::Es => "es",
-                engine_i18n::Locale::ZhHant => "zh_hant",
-                _ => "en",
-            },
+            "locale": locale_code(self.hub.preferences().locale),
             "installs": self.hub.installs().iter().map(|i| serde_json::json!({
                 "version": i.version,
                 "path": i.path.to_string_lossy(),
@@ -2276,22 +2639,22 @@ impl EditorHost {
         Ok(serde_json::json!({ "page": page }))
     }
 
-    fn hub_get_translations(&mut self, _params: &Value) -> EngineResult<Value> {
-        let entries: Vec<serde_json::Value> = self
-            .translations
+    fn hub_get_translations(&mut self, params: &Value) -> EngineResult<Value> {
+        let requested_locale = params.get("locale").and_then(Value::as_str);
+        let translations;
+        let active_translations = if requested_locale.is_some() {
+            translations = Translations::load(parse_locale(requested_locale));
+            &translations
+        } else {
+            &self.translations
+        };
+        let entries: Vec<serde_json::Value> = active_translations
             .entries()
             .into_iter()
             .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
             .collect();
         Ok(serde_json::json!({
-            "locale": match self.translations.locale() {
-                Locale::En => "en",
-                Locale::Zh => "zh",
-                Locale::Ja => "ja",
-                Locale::Ko => "ko",
-                Locale::Es => "es",
-                Locale::ZhHant => "zh_hant",
-            },
+            "locale": locale_code(active_translations.locale()),
             "entries": entries,
         }))
     }
@@ -2301,19 +2664,12 @@ impl EditorHost {
             .get("locale")
             .and_then(|v| v.as_str())
             .ok_or_else(|| EngineError::config("missing 'locale' parameter"))?;
-        let locale = match locale_str {
-            "zh" => Locale::Zh,
-            "ja" => Locale::Ja,
-            "ko" => Locale::Ko,
-            "es" => Locale::Es,
-            "zh_hant" => Locale::ZhHant,
-            _ => Locale::En,
-        };
+        let locale = parse_locale(Some(locale_str));
         self.hub.set_locale(locale);
         // Reload translations for the new locale
         self.translations = Translations::load(locale);
         self.sync_durable_state();
-        Ok(serde_json::json!({ "locale": locale_str }))
+        Ok(serde_json::json!({ "locale": locale_code(locale) }))
     }
 
     // ── Project handlers ──
@@ -2402,7 +2758,7 @@ impl EditorHost {
             source,
         })?;
 
-        let ext = if backend == "python" { "py" } else { "rhai" };
+        let ext = if backend == "python" { "py" } else { "aster" };
         let script_path = format!("scripts/{name}.{ext}");
         let full_path = asset_root.join(&script_path);
 
@@ -2849,6 +3205,21 @@ fn on_update(entity, dt) {
         let asset_root = project.root.join(&project.manifest.asset_root);
         let full_path = resolve_writable_relative_path(&asset_root, path_str)?;
 
+        if full_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("aster")
+        {
+            let backend = engine_script_rhai::RhaiScriptBackend::new();
+            let diagnostics = backend.diagnose_source(&full_path, content);
+            if !diagnostics.is_empty() {
+                return Err(EngineError::config(format_script_diagnostics(
+                    path_str,
+                    &diagnostics,
+                )));
+            }
+        }
+
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
@@ -2863,6 +3234,100 @@ fn on_update(entity, dt) {
         })?;
 
         Ok(serde_json::json!({ "saved": true }))
+    }
+
+    fn project_check_script(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+        let source = params
+            .get("source")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::config("missing 'source'"))?;
+
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let full_path = resolve_writable_relative_path(&asset_root, path_str)?;
+        let backend = engine_script_rhai::RhaiScriptBackend::new();
+        let diagnostics = backend.diagnose_source(&full_path, source);
+        let diagnostics = diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                serde_json::json!({
+                    "code": diagnostic.code,
+                    "severity": match diagnostic.severity {
+                        engine_script_rhai::AsterDiagnosticSeverity::Error => "error",
+                        engine_script_rhai::AsterDiagnosticSeverity::Warning => "warning",
+                    },
+                    "line": diagnostic.line,
+                    "column": diagnostic.column,
+                    "message": diagnostic.message,
+                    "suggestion": diagnostic.suggestion,
+                    "source_line": diagnostic.source_line,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "valid": diagnostics.is_empty(),
+            "diagnostics": diagnostics,
+        }))
+    }
+
+    fn project_check_amdl(&mut self, params: &Value) -> EngineResult<Value> {
+        let path_str = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::config("missing 'path'"))?;
+        let source = params
+            .get("source")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::config("missing 'source'"))?;
+
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+        let asset_root = project.root.join(&project.manifest.asset_root);
+        let _full_path = resolve_writable_relative_path(&asset_root, path_str)?;
+
+        let diagnostics = match engine_assets::parse_amdl(source) {
+            Ok(document) => match engine_assets::AmdlValidator::validate(&document) {
+                Ok(()) => Vec::new(),
+                Err(errors) => errors
+                    .into_iter()
+                    .map(|error| {
+                        serde_json::json!({
+                            "code": "AMDL_VALIDATION",
+                            "severity": "error",
+                            "line": null,
+                            "column": null,
+                            "message": error.message,
+                            "suggestion": "Keep .amdl declarative: declare one model with mesh, material, collider, rigidbody, sockets, and LODs only.",
+                            "source_line": null,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            },
+            Err(error) => serde_json::json!([{
+                "code": "AMDL_PARSE",
+                "severity": "error",
+                "line": null,
+                "column": null,
+                "message": error.to_string(),
+                "suggestion": "Use Aster Model syntax such as: model Crate { mesh = primitive.box(size: [1, 1, 1]) }",
+                "source_line": null,
+            }])
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+        };
+
+        Ok(serde_json::json!({
+            "valid": diagnostics.is_empty(),
+            "diagnostics": diagnostics,
+        }))
     }
 
     fn project_package(&mut self, params: &Value) -> EngineResult<Value> {
@@ -6503,6 +6968,172 @@ fn cancel_copilot_plan(
     Ok(())
 }
 
+fn run_prepared_quest_model(
+    prepared: PreparedQuestModelRequest,
+    on_delta: &mut dyn FnMut(engine_ai::AiStreamDelta),
+) -> EngineResult<engine_ai::AiResponse> {
+    let model = engine_ai::providers::create_provider(
+        &prepared.provider,
+        &prepared.model,
+        prepared.api_key.as_deref(),
+        prepared.endpoint.as_deref(),
+        prepared.max_tokens,
+        prepared.codex_oauth,
+        prepared.mimo_config.as_ref(),
+        prepared.glm_config.as_ref(),
+    )?;
+    model.chat_stream(prepared.request, on_delta)
+}
+
+#[tauri::command]
+fn start_quest_ai_request(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    requests: State<'_, QuestAiRequestState>,
+    request_id: String,
+    kind: String,
+    params: Value,
+) -> Result<(), String> {
+    let prepared = state
+        .with_host(|host| match kind.as_str() {
+            "create" => host
+                .prepare_quest_create_request(&params)
+                .map(PreparedQuestAiRequest::Create),
+            "rewrite" => host
+                .prepare_quest_rewrite_request(&params)
+                .map(PreparedQuestAiRequest::Rewrite),
+            _ => Err(EngineError::config(format!(
+                "unknown Quest AI request kind: {kind}"
+            ))),
+        })
+        .map_err(|error| error.to_string())?;
+    let requests = requests.requests.clone();
+    std::thread::spawn(move || {
+        let emit_delta = &mut |delta: engine_ai::AiStreamDelta| {
+            if requests
+                .lock()
+                .expect("poisoned lock")
+                .cancelled
+                .contains(&request_id)
+            {
+                return;
+            }
+            let delta_payload = match &delta {
+                engine_ai::AiStreamDelta::ToolCallDelta(tool_call) => {
+                    serde_json::to_string(tool_call).unwrap_or_default()
+                }
+                _ => delta.text().to_owned(),
+            };
+            let _ = app.emit(
+                "quest-ai-stream",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "kind": delta.kind(),
+                    "delta": delta_payload,
+                }),
+            );
+        };
+        let completed = match prepared {
+            PreparedQuestAiRequest::Create(prepared) => {
+                let PreparedQuestCreateRequest {
+                    model_request,
+                    title,
+                    goal,
+                    project,
+                    mode,
+                    model_config,
+                } = prepared;
+                let generated = run_prepared_quest_model(model_request, emit_delta)
+                    .and_then(|response| parse_generated_quest_tools(&response.tool_calls))
+                    .map_err(|error| error.to_string());
+                CompletedQuestAiRequest::Create {
+                    generated,
+                    title,
+                    goal,
+                    project,
+                    mode,
+                    model_config,
+                }
+            }
+            PreparedQuestAiRequest::Rewrite(prepared) => {
+                let rewritten = run_prepared_quest_model(prepared, emit_delta)
+                    .map(|response| response.content)
+                    .map_err(|error| error.to_string());
+                CompletedQuestAiRequest::Rewrite(rewritten)
+            }
+        };
+        let mut request_state = requests.lock().expect("poisoned lock");
+        if request_state.cancelled.remove(&request_id) {
+            drop(request_state);
+            let _ = app.emit(
+                "quest-ai-stream-complete",
+                serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
+        request_state
+            .completed
+            .insert(request_id.clone(), completed);
+        drop(request_state);
+        let _ = app.emit(
+            "quest-ai-stream-complete",
+            serde_json::json!({ "request_id": request_id }),
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn finish_quest_ai_request(
+    state: State<'_, EditorHostState>,
+    requests: State<'_, QuestAiRequestState>,
+    request_id: String,
+) -> Result<Value, String> {
+    let completed = requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .completed
+        .remove(&request_id)
+        .ok_or_else(|| "Quest AI request has not completed".to_owned())?;
+    state
+        .with_host(|host| match completed {
+            CompletedQuestAiRequest::Create {
+                generated,
+                title,
+                goal,
+                project,
+                mode,
+                model_config,
+            } => host.finish_quest_create(
+                generated.map_err(EngineError::other)?,
+                title,
+                goal,
+                project,
+                mode,
+                model_config,
+            ),
+            CompletedQuestAiRequest::Rewrite(response) => {
+                host.finish_quest_rewrite(response.map_err(EngineError::other)?)
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_quest_ai_request(
+    requests: State<'_, QuestAiRequestState>,
+    request_id: String,
+) -> Result<(), String> {
+    requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .cancelled
+        .insert(request_id);
+    Ok(())
+}
+
 #[tauri::command]
 fn rpc(
     app: tauri::AppHandle,
@@ -6538,6 +7169,53 @@ fn rpc(
         };
         result.map_err(|error| error.to_string())
     })
+}
+
+#[tauri::command]
+async fn create_openai_realtime_transcription_session(
+    state: State<'_, EditorHostState>,
+) -> Result<Value, String> {
+    let (api_key, endpoint) = state
+        .with_host(|host| host.openai_realtime_transcription_config())
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let url = format!("{endpoint}/realtime/client_secrets");
+        let body = serde_json::json!({
+            "session": {
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "transcription": {
+                            "model": "gpt-realtime-whisper",
+                            "delay": "low"
+                        }
+                    }
+                }
+            }
+        });
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(12)))
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .build()
+            .into();
+        let mut response = agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|error| format!("OpenAI Realtime transcription session failed: {error}"))?;
+        let json: Value = response.body_mut().read_json().map_err(|error| {
+            format!("OpenAI Realtime transcription session response parse failed: {error}")
+        })?;
+        Ok(serde_json::json!({
+            "session": json,
+            "model": "gpt-realtime-whisper",
+            "endpoint": endpoint,
+            "realtime_url": format!("{endpoint}/realtime/calls"),
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Binary viewport readback — returns raw RGBA pixels as ArrayBuffer.
@@ -6896,11 +7574,16 @@ pub fn run() {
     tauri::Builder::default()
         .manage(EditorHostState::new(host))
         .manage(CopilotRequestState::default())
+        .manage(QuestAiRequestState::default())
         .invoke_handler(tauri::generate_handler![
             rpc,
+            create_openai_realtime_transcription_session,
             start_copilot_plan,
             finish_copilot_plan,
             cancel_copilot_plan,
+            start_quest_ai_request,
+            finish_quest_ai_request,
+            cancel_quest_ai_request,
             open_game_view,
             set_game_render_scaling,
             open_native_scene_view,
@@ -6963,11 +7646,11 @@ mod tests {
     fn existing_asset_paths_resolve_under_asset_root() {
         let temp = tempfile::tempdir().unwrap();
         let asset_root = temp.path().join("assets");
-        let script_path = asset_root.join("scripts/player.rhai");
+        let script_path = asset_root.join("scripts/player.aster");
         fs::create_dir_all(script_path.parent().unwrap()).unwrap();
         fs::write(&script_path, "fn on_start() {}").unwrap();
 
-        let resolved = resolve_existing_relative_path(&asset_root, "scripts/player.rhai").unwrap();
+        let resolved = resolve_existing_relative_path(&asset_root, "scripts/player.aster").unwrap();
 
         assert_eq!(resolved, script_path.canonicalize().unwrap());
     }
@@ -6988,14 +7671,14 @@ mod tests {
         fs::create_dir_all(&asset_root).unwrap();
 
         let resolved =
-            resolve_writable_relative_path(&asset_root, "scripts/new_script.rhai").unwrap();
+            resolve_writable_relative_path(&asset_root, "scripts/new_script.aster").unwrap();
 
         assert_eq!(
             resolved,
             asset_root
                 .canonicalize()
                 .unwrap()
-                .join("scripts/new_script.rhai")
+                .join("scripts/new_script.aster")
         );
     }
 
@@ -7003,6 +7686,43 @@ mod tests {
     fn quest_creation_rejects_text_only_model_responses() {
         let error = parse_generated_quest_tools(&[]).unwrap_err();
         assert!(error.to_string().contains("create_or_update_spec"));
+    }
+
+    #[test]
+    fn quest_ai_network_calls_are_rejected_by_synchronous_rpc_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = host_with_quest_root(temp.path());
+
+        let create_error = host
+            .handle(
+                "quest/create",
+                &serde_json::json!({ "title": "", "goal": "Build a scene" }),
+            )
+            .unwrap_err();
+        let rewrite_error = host
+            .handle(
+                "quest/rewrite_prompt",
+                &serde_json::json!({ "prompt": "make game" }),
+            )
+            .unwrap_err();
+
+        assert!(create_error.to_string().contains("background Quest AI"));
+        assert!(rewrite_error.to_string().contains("background Quest AI"));
+    }
+
+    #[test]
+    fn streamed_quest_rewrite_is_cleaned_before_returning_to_the_ui() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = host_with_quest_root(temp.path());
+
+        let value = host
+            .finish_quest_rewrite("  \"Build a deterministic patrol scene\"  ".to_owned())
+            .unwrap();
+
+        assert_eq!(
+            value["prompt"].as_str(),
+            Some("Build a deterministic patrol scene")
+        );
     }
 
     #[test]

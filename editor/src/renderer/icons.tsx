@@ -101,6 +101,13 @@ export const IconAudio = icon('0 0 24 24', <>
   <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
 </>);
 
+export const IconMic = icon('0 0 24 24', <>
+  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+  <line x1="12" y1="19" x2="12" y2="23" />
+  <line x1="8" y1="23" x2="16" y2="23" />
+</>);
+
 export const IconShader = icon('0 0 24 24', <>
   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
 </>);
@@ -132,12 +139,23 @@ export const IconInfo = icon('0 0 24 24', <>
   <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
 </>);
 
-export const IconLoader = icon('0 0 24 24', <>
-  <line x1="12" y1="2" x2="12" y2="6" /><line x1="12" y1="18" x2="12" y2="22" />
-  <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" /><line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-  <line x1="2" y1="12" x2="6" y2="12" /><line x1="18" y1="12" x2="22" y2="12" />
-  <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" /><line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-</>);
+export const IconLoader = ({ size = 14, className }: IconProps = {}) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    width={size}
+    height={size}
+    className={className}
+    style={{ transformBox: 'fill-box', transformOrigin: 'center' }}
+  >
+    <circle cx="12" cy="12" r="9" opacity="0.2" />
+    <path d="M21 12a9 9 0 0 0-9-9" />
+    <path d="M3 12a9 9 0 0 0 9 9" opacity="0.75" />
+  </svg>
+);
 
 export const IconBrain = icon('0 0 24 24', <>
   <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.33.47 2.55 1.26 3.5H4a3 3 0 0 0-3 3v.5c0 1.1.9 2 2 2h1.27A5.48 5.48 0 0 0 9.5 22a5.48 5.48 0 0 0 5.23-6H16a3 3 0 0 0 3-3v-.5c0-1.1.9-2 2-2h-1.26A5.49 5.49 0 0 0 20 7.5 5.5 5.5 0 0 0 14.5 2h-5z" />
@@ -185,6 +203,17 @@ export const IconBot = icon('0 0 24 24', <>
 export const IconSparkles = icon('0 0 24 24', <>
   <path d="M12 3l1.3 4.3L17 6l-2.7 3.7L17 13l-3.7-1.3L12 16l-1.3-4.3L7 13l2.7-3.7L7 6l3.7 1.3z" />
   <path d="M8 3l.5 1.5L10 5l-1.5.5L8 7l-.5-1.5L6 5l1.5-.5z" />
+</>);
+
+export const IconWand = icon('0 0 24 24', <>
+  <path d="M5 21 19 7" />
+  <path d="M15 7 17 5 19 7 17 9Z" />
+  <path d="M6 4v3" />
+  <path d="M4.5 5.5h3" />
+  <path d="M20 15v3" />
+  <path d="M18.5 16.5h3" />
+  <path d="M11 2v2" />
+  <path d="M10 3h2" />
 </>);
 
 // ─── Sidebar Icons ─────────────────────────────────────────────────────────

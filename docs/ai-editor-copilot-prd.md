@@ -60,7 +60,7 @@ The first useful version should focus on project authoring workflows:
 
 - Explain the current scene, selected entity, assets, and scripts.
 - Create and modify scene objects and components.
-- Create or update Rhai scripts in the project asset root.
+- Create or update `.aster` Aster Script files in the project asset root.
 - Execute registered editor commands through the existing command registry.
 - Read project files through a sandboxed read tool.
 - Present a plan before applying write operations.
@@ -119,7 +119,7 @@ AI write workflows require a git-backed task workspace. If git is not installed,
 4. As a game developer, I want the Copilot to create a camera and light setup, so that a new scene becomes usable quickly.
 5. As a game developer, I want the Copilot to add or remove components from an entity, so that routine scene setup takes less manual work.
 6. As a game developer, I want the Copilot to modify component fields, so that I can tune values through natural language.
-7. As a game developer, I want the Copilot to write a Rhai script asset, so that simple gameplay behavior can be generated from a description.
+7. As a game developer, I want the Copilot to write an Aster Script asset, so that simple gameplay behavior can be generated from a description.
 8. As a game developer, I want the Copilot to update an existing script, so that I can iterate on behavior without manually editing every line.
 9. As a game developer, I want script changes to stay under the project asset root, so that generated code cannot write outside the project.
 10. As a game developer, I want the Copilot to reference existing asset paths, so that generated components point to real project resources.
@@ -1261,7 +1261,7 @@ WASM sandboxing (previously mentioned) is also not needed — skills are text, n
 
 The current repository already points in the right direction. The main product risk is not model integration; it is uncontrolled mutation. The Copilot should therefore be built around trusted tool boundaries, task-bound dynamic permissions, preview-before-apply behavior, undo or transaction support, and traceability. Enterprise automation should support broad task-local execution when policy can bind it to workspace, evidence, risk route, and rollback.
 
-The first milestone should prove the Copilot mode vertical slice: ask for a player controller, preview the plan, create a player object, write a Rhai script, attach it as a script component, show diagnostics and trace, then undo the applied changes. Include the auto-accept toggle as a session-level convenience.
+The first milestone should prove the Copilot mode vertical slice: ask for a player controller, preview the plan, create a player object, write a `.aster` Aster Script file, run final script acceptance, attach it as a script component, show diagnostics and trace, then undo the applied changes. Include the auto-accept toggle as a session-level convenience.
 
 The second milestone should harden the shared tool layer: canonical path sandboxing, policy enforcement, transaction boundaries, structured failures, grant hashes, risk classification, and deterministic tests. Both modes use the same tool layer.
 

@@ -1,6 +1,47 @@
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
+@keyframes quest-voice-wave {
+  0% {
+    transform: scaleY(0.45);
+    opacity: 0.58;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes quest-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes quest-loader-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+    transform: scale(0.72);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes quest-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--brand-dim);
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 @theme inline {
   --color-bg-base: var(--bg-base);
   --color-bg-surface: var(--bg-surface);

@@ -142,6 +142,60 @@ pub struct QuestProject {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestMode {
+    #[default]
+    Solo,
+    Extra,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestModelConfig {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_endpoint: Option<String>,
+    pub max_tokens: u32,
+    #[serde(default = "default_quest_thinking_effort")]
+    pub thinking_effort: String,
+}
+
+impl Default for QuestModelConfig {
+    fn default() -> Self {
+        Self {
+            provider: "inherit".to_owned(),
+            model: String::new(),
+            api_endpoint: None,
+            max_tokens: 4096,
+            thinking_effort: default_quest_thinking_effort(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestAutonomyPolicy {
+    #[serde(default = "default_true")]
+    pub workspace_writes_automatic: bool,
+    #[serde(default = "default_true")]
+    pub active_project_apply_requires_approval: bool,
+    #[serde(default)]
+    pub allowlisted_commands_automatic: bool,
+    #[serde(default)]
+    pub high_risk_requires_confirmation: bool,
+}
+
+impl Default for QuestAutonomyPolicy {
+    fn default() -> Self {
+        Self {
+            workspace_writes_automatic: true,
+            active_project_apply_requires_approval: true,
+            allowlisted_commands_automatic: true,
+            high_risk_requires_confirmation: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChangedFile {
     pub path: String,
@@ -366,6 +420,12 @@ pub struct QuestRecord {
     pub goal: String,
     pub status: QuestStatus,
     pub project: QuestProject,
+    #[serde(default)]
+    pub mode: QuestMode,
+    #[serde(default)]
+    pub model_config: QuestModelConfig,
+    #[serde(default)]
+    pub autonomy: QuestAutonomyPolicy,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub workspace_id: Option<String>,
@@ -536,12 +596,32 @@ impl QuestStore {
         self.list_knowledge()
     }
 
+    #[cfg(test)]
     pub fn create(
         &self,
         title: String,
         goal: String,
         spec: String,
         project: QuestProject,
+    ) -> EngineResult<QuestDetail> {
+        self.create_with_config(
+            title,
+            goal,
+            spec,
+            project,
+            QuestMode::default(),
+            QuestModelConfig::default(),
+        )
+    }
+
+    pub fn create_with_config(
+        &self,
+        title: String,
+        goal: String,
+        spec: String,
+        project: QuestProject,
+        mode: QuestMode,
+        model_config: QuestModelConfig,
     ) -> EngineResult<QuestDetail> {
         let now = unix_time_ms();
         let id = format!(
@@ -563,6 +643,9 @@ impl QuestStore {
             goal: goal.clone(),
             status: QuestStatus::Draft,
             project,
+            mode,
+            model_config,
+            autonomy: QuestAutonomyPolicy::default(),
             created_at_ms: now,
             updated_at_ms: now,
             workspace_id: None,
@@ -591,6 +674,9 @@ impl QuestStore {
             "AI generated Quest spec",
             serde_json::json!({
                 "status": "draft",
+                "mode": record.mode,
+                "model_config": record.model_config,
+                "autonomy": record.autonomy,
                 "intent_path": "intent.md",
                 "spec_path": "spec.md",
                 "spec_bytes": spec.len()
@@ -619,6 +705,9 @@ impl QuestStore {
             goal: source.record.goal.clone(),
             status: QuestStatus::Draft,
             project: source.record.project.clone(),
+            mode: source.record.mode,
+            model_config: source.record.model_config.clone(),
+            autonomy: source.record.autonomy.clone(),
             created_at_ms: now,
             updated_at_ms: now,
             workspace_id: None,
@@ -737,6 +826,49 @@ impl QuestStore {
             "knowledge_context_updated",
             "Quest Knowledge context updated",
             serde_json::json!({ "knowledge_ids": normalized }),
+        )?;
+        self.get(id)
+    }
+
+    pub fn update_execution_config(
+        &self,
+        id: &str,
+        mode: QuestMode,
+        model_config: QuestModelConfig,
+        autonomy: Option<QuestAutonomyPolicy>,
+    ) -> EngineResult<QuestDetail> {
+        let mut detail = self.get(id)?;
+        if !matches!(
+            detail.record.status,
+            QuestStatus::Draft
+                | QuestStatus::Clarifying
+                | QuestStatus::Specified
+                | QuestStatus::Planning
+                | QuestStatus::WaitingForUser
+                | QuestStatus::Blocked
+        ) {
+            return Err(EngineError::config(
+                "Quest mode and model can only be changed before execution, while waiting, or while blocked",
+            ));
+        }
+        detail.record.mode = mode;
+        detail.record.model_config = normalize_model_config(model_config);
+        if let Some(autonomy) = autonomy {
+            detail.record.autonomy = autonomy;
+        }
+        detail.record.updated_at_ms = unix_time_ms();
+        normalize_record_metadata(&mut detail.record);
+        refresh_next_action(&mut detail.record);
+        self.save_snapshot(&detail.record)?;
+        self.append_event(
+            id,
+            "execution_config_updated",
+            "Quest execution mode and model updated",
+            serde_json::json!({
+                "mode": detail.record.mode,
+                "model_config": detail.record.model_config,
+                "autonomy": detail.record.autonomy,
+            }),
         )?;
         self.get(id)
     }
@@ -1752,6 +1884,14 @@ fn default_trace_path() -> String {
     "events.jsonl".to_owned()
 }
 
+fn default_quest_thinking_effort() -> String {
+    "medium".to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn default_artifact_links() -> Vec<QuestArtifactLink> {
     vec![
         QuestArtifactLink {
@@ -1773,6 +1913,8 @@ fn default_artifact_links() -> Vec<QuestArtifactLink> {
 }
 
 fn normalize_record_metadata(record: &mut QuestRecord) {
+    record.model_config = normalize_model_config(record.model_config.clone());
+    record.autonomy.active_project_apply_requires_approval = true;
     if record.intent_path.trim().is_empty() {
         record.intent_path = default_intent_path();
     }
@@ -1793,6 +1935,22 @@ fn normalize_record_metadata(record: &mut QuestRecord) {
     record
         .checkpoints
         .dedup_by(|left, right| left.id == right.id);
+}
+
+fn normalize_model_config(mut config: QuestModelConfig) -> QuestModelConfig {
+    config.provider = config.provider.trim().to_owned();
+    if config.provider.is_empty() {
+        config.provider = "inherit".to_owned();
+    }
+    config.model = config.model.trim().to_owned();
+    if config.max_tokens == 0 {
+        config.max_tokens = 4096;
+    }
+    config.thinking_effort = match config.thinking_effort.trim() {
+        "off" | "low" | "medium" | "high" => config.thinking_effort.trim().to_owned(),
+        _ => default_quest_thinking_effort(),
+    };
+    config
 }
 
 fn intent_markdown(title: &str, goal: &str) -> String {

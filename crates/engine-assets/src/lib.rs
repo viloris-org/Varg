@@ -3,10 +3,15 @@
 
 //! Asset database, registry, manifest, dependency, import, and reload primitives.
 
+pub mod amdl;
 pub mod registry;
 pub mod resource_trait;
 pub mod resource_types;
 
+pub use amdl::{
+    parse_amdl, AmdlArgument, AmdlCall, AmdlDocument, AmdlExpr, AmdlNamedBlock, AmdlObject,
+    AmdlParserError, AmdlStatement, AmdlValidationError, AmdlValidator, AmdlValue,
+};
 pub use registry::ResourceTypeRegistry;
 pub use resource_trait::{Resource, ResourceHandle as TypedResourceHandle};
 pub use resource_types::{
@@ -163,7 +168,7 @@ pub enum ResourceKind {
     SkinnedModel,
     /// Animation clip or animation set.
     Animation,
-    /// Script source for runtime engines (e.g., .rhai).
+    /// Script source for runtime engines (e.g., .aster).
     Script,
     /// Reusable scene object subset.
     Prefab,
@@ -2000,10 +2005,13 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         .map(str::to_ascii_lowercase)?;
     match extension.as_str() {
         "png" | "jpg" | "jpeg" => Some((ResourceKind::Texture, "image")),
+        "amdl" => Some((ResourceKind::Model, "amdl")),
         "gltf" | "glb" => Some((ResourceKind::Model, "gltf")),
         "wgsl" | "glsl" => Some((ResourceKind::Shader, "shader-source")),
         "wav" | "ogg" => Some((ResourceKind::Audio, "audio")),
         "py" => Some((ResourceKind::Script, "script-python")),
+        "aster" => Some((ResourceKind::Script, "script-rhai")),
+        // Legacy projects may still contain Rhai-named scripts.
         "rhai" => Some((ResourceKind::Script, "script-rhai")),
         "json" => {
             if path.to_string_lossy().contains("material") {
@@ -2465,9 +2473,7 @@ fn import_cpu_payload(
 ) -> ImportedCpuPayload {
     match kind {
         ResourceKind::Texture => import_texture_payload(path, importer, bytes),
-        ResourceKind::Model | ResourceKind::SkinnedModel => {
-            import_model_payload(path, importer, bytes)
-        }
+        ResourceKind::Model | ResourceKind::SkinnedModel => import_model_payload(path, importer, bytes),
         ResourceKind::Shader => import_shader_payload(path, importer, bytes),
         ResourceKind::Material => import_material_payload(path, importer, bytes),
         ResourceKind::Audio
@@ -2539,7 +2545,52 @@ fn import_texture_payload(path: &Path, importer: &str, bytes: &[u8]) -> Imported
 
 fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
     let mut diagnostics = Vec::new();
-    let (payload, summary) = if path
+    let (payload, summary) = if importer == "amdl" {
+        match std::str::from_utf8(bytes)
+            .map_err(|error| error.to_string())
+            .and_then(|source| {
+                let document = parse_amdl(source).map_err(|error| error.to_string())?;
+                AmdlValidator::validate(&document)
+                    .map_err(|errors| {
+                        errors
+                            .into_iter()
+                            .map(|error| error.message)
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .map(|_| document)
+            }) {
+            Ok(document) => match serde_json::to_vec(&document) {
+                Ok(encoded) => {
+                    let model_count = document.models.len();
+                    (
+                        Arc::from(encoded),
+                        format!("Aster model declaration imported by {importer}: {model_count} models"),
+                    )
+                }
+                Err(error) => {
+                    diagnostics.push(
+                        AssetDiagnostic::new(format!("Aster model encode failed: {error}"))
+                            .with_path(path),
+                    );
+                    (
+                        Arc::from(bytes),
+                        format!("{} bytes model source imported by {importer}", bytes.len()),
+                    )
+                }
+            },
+            Err(error) => {
+                diagnostics.push(
+                    AssetDiagnostic::new(format!("Aster model parse failed: {error}"))
+                        .with_path(path),
+                );
+                (
+                    Arc::from(bytes),
+                    format!("{} bytes model source imported by {importer}", bytes.len()),
+                )
+            }
+        }
+    } else if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
@@ -3106,8 +3157,8 @@ mod tests {
         std::fs::write(root.join("models/hero.gltf"), gltf_json).unwrap();
         // Shader: .wgsl file
         std::fs::write(root.join("shaders/pbr.wgsl"), "fn main() {}").unwrap();
-        // Script: .rhai file
-        std::fs::write(root.join("scripts/player.rhai"), "fn on_update(dt) {}").unwrap();
+        // Script: .aster file
+        std::fs::write(root.join("scripts/player.aster"), "fn on_update(dt) {}").unwrap();
         std::fs::write(
             root.join("scripts/player.py"),
             "def update(ctx):\n    pass\n",
@@ -3149,11 +3200,11 @@ mod tests {
         );
         assert_eq!(
             database
-                .entry_for_path(Path::new("scripts/player.rhai"))
+                .entry_for_path(Path::new("scripts/player.aster"))
                 .unwrap()
                 .kind,
             ResourceKind::Script,
-            "Rhai files should map to Script"
+            "Aster Script files should map to Script"
         );
         assert_eq!(
             database

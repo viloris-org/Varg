@@ -42,6 +42,7 @@ import {
   type QuestStatus,
 } from '../quest';
 import { rpc } from '../api';
+import { useTranslation } from '../i18n';
 import {
   contextMenuClass,
   contextMenuDangerItemClass,
@@ -236,14 +237,14 @@ const questClasses = {
 
 const panelTabs: Array<{
   id: Exclude<QuestPanel, 'artifact'>;
-  label: string;
+  labelKey: string;
   icon: React.ReactNode;
 }> = [
-  { id: 'overview', label: 'Overview', icon: <IconRefresh /> },
-  { id: 'intent', label: 'Intent', icon: <IconFile /> },
-  { id: 'spec', label: 'Spec', icon: <IconFile /> },
-  { id: 'review', label: 'Review', icon: <IconCheck /> },
-  { id: 'knowledge', label: 'Knowledge', icon: <IconSparkles /> },
+  { id: 'overview', labelKey: 'quest_tab_overview', icon: <IconRefresh /> },
+  { id: 'intent', labelKey: 'quest_tab_intent', icon: <IconFile /> },
+  { id: 'spec', labelKey: 'quest_tab_spec', icon: <IconFile /> },
+  { id: 'review', labelKey: 'quest_tab_review', icon: <IconCheck /> },
+  { id: 'knowledge', labelKey: 'quest_tab_knowledge', icon: <IconSparkles /> },
 ];
 
 function statusTextClass(status: QuestStatus | string): string {
@@ -423,15 +424,15 @@ function formatMetricScore(value?: number | null): string {
   return `${Math.round(value * 100)}%`;
 }
 
-function statusAction(status: QuestStatus): { label: string; next: QuestStatus } | null {
+function statusAction(status: QuestStatus): { labelKey: string; next: QuestStatus } | null {
   switch (status) {
     case 'running':
-      return { label: 'Pause', next: 'waiting_for_user' };
+      return { labelKey: 'quest_action_pause', next: 'waiting_for_user' };
     case 'waiting_for_user':
     case 'blocked':
-      return { label: 'Resume', next: 'running' };
+      return { labelKey: 'quest_action_resume', next: 'running' };
     case 'ready_for_review':
-      return { label: 'Accept', next: 'completed' };
+      return { labelKey: 'quest_action_accept', next: 'completed' };
     default:
       return null;
   }
@@ -441,11 +442,14 @@ function defaultPanelForQuest(detail: QuestDetail): QuestPanel {
   return detail.status === 'draft' || detail.status === 'specified' ? 'spec' : 'overview';
 }
 
-function progressItems(detail: QuestDetail): Array<{ title: string; status: 'done' | 'current' | 'pending' }> {
+function progressItems(
+  detail: QuestDetail,
+  t: (key: string) => string,
+): Array<{ title: string; status: 'done' | 'current' | 'pending' }> {
   const taskEvents = detail.events.filter(event => event.kind === 'task_created');
   const titles = taskEvents.length > 0
     ? taskEvents.map(event => event.summary)
-    : ['Review AI-generated spec', 'Approve Quest execution', 'Review evidence and decide'];
+    : [t('quest_progress_review_spec'), t('quest_progress_approve_execution'), t('quest_progress_review_evidence')];
   return titles.map((title, index) => {
     if (detail.status === 'completed') return { title, status: 'done' };
     if (detail.status === 'ready_for_review') return { title, status: index < titles.length - 1 ? 'done' : 'current' };
@@ -476,6 +480,7 @@ export default function QuestPage({
   onOpenEditor,
   onCloseProject,
 }: Props) {
+  const { t, t_fmt } = useTranslation();
   const voiceInputRef = React.useRef<RealtimeTranscriptionHandle | null>(null);
   const [quests, setQuests] = useState<QuestRecord[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
@@ -622,21 +627,21 @@ export default function QuestPage({
 
   const modelSelectOptions = useMemo<QuestSelectOption[]>(() => {
     if (modelOptions.length === 0) {
-      return [{ value: '', label: 'No models available' }];
+      return [{ value: '', label: t('quest_no_models_available') }];
     }
     return modelOptions.map(option => ({
       value: option.id,
       label: option.display_name || option.id,
       description: option.provider,
     }));
-  }, [modelOptions]);
+  }, [modelOptions, t]);
 
   const thinkingOptions = useMemo<QuestSelectOption[]>(() => [
-    { value: 'off', label: 'Thinking off' },
-    { value: 'low', label: 'Thinking low' },
-    { value: 'medium', label: 'Thinking medium' },
-    { value: 'high', label: 'Thinking high' },
-  ], []);
+    { value: 'off', label: t('quest_thinking_off') },
+    { value: 'low', label: t('quest_thinking_low') },
+    { value: 'medium', label: t('quest_thinking_medium') },
+    { value: 'high', label: t('quest_thinking_high') },
+  ], [t]);
 
   const selectQuest = useCallback(async (quest: QuestRecord) => {
     setError(null);
@@ -1422,13 +1427,13 @@ export default function QuestPage({
       <header className={questClasses.globalHeader}>
         <div className={questClasses.brand}>
           <span>Aster</span>
-          <strong>Quests</strong>
+          <strong>{t('quest_title')}</strong>
         </div>
         <nav>
-          <button className={cn(questClasses.topNavButton, questClasses.topNavButtonActive)}>Quests</button>
+          <button className={cn(questClasses.topNavButton, questClasses.topNavButtonActive)}>{t('quest_title')}</button>
         </nav>
         <div className={questClasses.globalActions}>
-          <button className={buttonBase} onClick={onCloseProject} title="Close project"><IconX /></button>
+          <button className={buttonBase} onClick={onCloseProject} title={t('quest_close_project')}><IconX /></button>
         </div>
       </header>
 
@@ -1436,26 +1441,26 @@ export default function QuestPage({
         <aside className={questClasses.sidebar}>
           <div className={questClasses.sidebarHeading}>
             <button className={questClasses.newButton} onClick={() => setSelected(null)} disabled={!currentProjectPath}>
-              <IconPlus /> New Quest <kbd>Ctrl N</kbd>
+              <IconPlus /> {t('quest_new')} <kbd>Ctrl N</kbd>
             </button>
           </div>
 
-          <QuestGroup label="Active" quests={visibleQuests.active} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
-          <QuestGroup label="History" quests={visibleQuests.history} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
+          <QuestGroup label={t('quest_group_active')} quests={visibleQuests.active} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
+          <QuestGroup label={t('quest_group_history')} quests={visibleQuests.history} selectedId={selected?.id} onSelect={selectQuest} onMenuAction={runQuestMenuAction} />
           <div className={questClasses.sidebarFooter}>
-            <button onClick={() => setPanel('knowledge')}>Knowledge <b>{knowledge.filter(entry => entry.status === 'pending').length}</b></button>
-            <button disabled>Marketplace</button>
+            <button onClick={() => setPanel('knowledge')}>{t('quest_knowledge')} <b>{knowledge.filter(entry => entry.status === 'pending').length}</b></button>
+            <button disabled>{t('quest_marketplace')}</button>
           </div>
         </aside>
 
         {!selected ? (
           <main className={questClasses.home}>
             <div className={questClasses.orb}><IconSparkles size={28} /></div>
-            <h1 className="m-0 mb-3 text-[clamp(28px,3vw,40px)] font-[650] leading-[1.1] text-[var(--text-primary)]">Quest on, hands off</h1>
+            <h1 className="m-0 mb-3 text-[clamp(28px,3vw,40px)] font-[650] leading-[1.1] text-[var(--text-primary)]">{t('quest_home_title')}</h1>
             <div className={questClasses.startLine}>
-              <span>Start in</span>
-              <b>{currentProjectPath ? 'Aster' : 'No project'}</b>
-              <span>Local</span>
+              <span>{t('quest_start_in')}</span>
+              <b>{currentProjectPath ? 'Aster' : t('quest_no_project')}</b>
+              <span>{t('quest_local')}</span>
               <span>main</span>
             </div>
             <div className={questClasses.promptBox}>
@@ -1470,7 +1475,7 @@ export default function QuestPage({
                     }
                   }
                 }}
-                placeholder="Describe a Quest outcome. AI will create the spec and task artifacts with tools."
+                placeholder={t('quest_goal_placeholder')}
                 disabled={!currentProjectPath}
               />
               <footer>
@@ -1478,8 +1483,8 @@ export default function QuestPage({
                   <QuestDropdown
                     value={questMode}
                     options={[
-                      { value: 'solo', label: 'Solo' },
-                      { value: 'extra', label: 'Experts' },
+                      { value: 'solo', label: t('quest_mode_solo') },
+                      { value: 'extra', label: t('quest_mode_experts') },
                     ]}
                     onChange={value => setQuestMode(value as QuestMode)}
                     disabled={busy}
@@ -1494,7 +1499,7 @@ export default function QuestPage({
                       onChange={event => setWorkspaceAutoWrite(event.target.checked)}
                       disabled={busy}
                     />
-                    Auto
+                    {t('quest_auto')}
                   </label>
                   <QuestDropdown
                     value={modelConfig.model}
@@ -1519,7 +1524,7 @@ export default function QuestPage({
                     className={questClasses.promptIconButton}
                     disabled={busy || (!rewritingPrompt && !goal.trim())}
                     onClick={rewritePrompt}
-                    title={rewritingPrompt ? 'Stop rewriting' : 'Prompt rewrite'}
+                    title={rewritingPrompt ? t('quest_stop_rewriting') : t('quest_prompt_rewrite')}
                     type="button"
                   >
                     <PromptRewriteIcon active={rewritingPrompt} />
@@ -1534,15 +1539,15 @@ export default function QuestPage({
                     title={
                       canUseOpenAIVoiceInput
                         ? voiceInputStatus === 'recording'
-                          ? 'Stop voice input'
-                          : 'Voice input'
-                        : 'Connect OpenAI API to enable voice input'
+                          ? t('quest_stop_voice_input')
+                          : t('quest_voice_input')
+                        : t('quest_voice_input_connect')
                     }
                     type="button"
                   >
                     <VoiceInputIcon status={voiceInputStatus} />
                   </button>
-                <button className={questClasses.promptSubmit} onClick={create} disabled={busy || rewritingPrompt || !goal.trim() || !currentProjectPath} title="Create Quest">
+                <button className={questClasses.promptSubmit} onClick={create} disabled={busy || rewritingPrompt || !goal.trim() || !currentProjectPath} title={t('quest_create')}>
                   {busy ? <QuestLoader /> : <IconSend />}
                 </button>
                 </div>
@@ -1551,8 +1556,8 @@ export default function QuestPage({
             <div className={questClasses.introCard}>
               <IconSparkles />
               <div>
-                <strong>Meet Quest Mode</strong>
-                <p>Describe the outcome. Aster drafts a named spec, tracks execution, and keeps review separate from active project changes.</p>
+                <strong>{t('quest_intro_title')}</strong>
+                <p>{t('quest_intro_desc')}</p>
               </div>
             </div>
           </main>
@@ -1567,7 +1572,7 @@ export default function QuestPage({
                   {selected.branch_of && (
                     <>
                       <IconChevronRight />
-                      <span>branched from {selected.branch_of}</span>
+                      <span>{t_fmt('quest_branched_from', { id: selected.branch_of })}</span>
                     </>
                   )}
                 </div>
@@ -1585,7 +1590,7 @@ export default function QuestPage({
                       }}
                       autoFocus
                     />
-                    <button onClick={rename} disabled={busy || !titleDraft.trim()}><IconCheck /> Save</button>
+                    <button onClick={rename} disabled={busy || !titleDraft.trim()}><IconCheck /> {t('btn_save')}</button>
                     <button onClick={() => { setTitleDraft(selected.title); setRenaming(false); }}><IconX /></button>
                   </div>
                 ) : (
@@ -1597,21 +1602,21 @@ export default function QuestPage({
                 <span className={cn('rounded-full border border-current px-2 py-[5px] text-[10px] font-extrabold uppercase', statusTextClass(selected.status))}>{selected.status}</span>
                 <button className={buttonBase} onClick={() => onOpenEditor(
                   selected.project.path,
-                  artifactFor('intent', 'Quest intent', selected.intent_path),
-                )}><IconCode /> Open Editor</button>
+                  artifactFor('intent', t('quest_artifact_intent'), selected.intent_path),
+                )}><IconCode /> {t('quest_open_editor')}</button>
                 {action && (
                   <button
                     className={buttonBase}
-                    onClick={() => action.label === 'Resume'
+                    onClick={() => action.labelKey === 'quest_action_resume'
                       ? continueSelectedQuest('Resume Quest from current evidence')
                       : transition(action.next)}
                     disabled={busy}
                   >
-                    {action.label}
+                    {t(action.labelKey)}
                   </button>
                 )}
                 {selected.status === 'ready_for_review' && (
-                  <button className={buttonBase} onClick={rejectSelectedQuest} disabled={busy}>Reject</button>
+                  <button className={buttonBase} onClick={rejectSelectedQuest} disabled={busy}>{t('quest_reject')}</button>
                 )}
               </div>
             </header>
@@ -1623,8 +1628,8 @@ export default function QuestPage({
                   <article className={questClasses.streamEntry}>
                     <span className={questClasses.timelineDot} />
                     <div>
-                      <header><strong>Quest goal accepted</strong><time>{formatTime(selected.created_at_ms)}</time></header>
-                      <small>user prompt</small>
+                      <header><strong>{t('quest_goal_accepted')}</strong><time>{formatTime(selected.created_at_ms)}</time></header>
+                      <small>{t('quest_user_prompt')}</small>
                     </div>
                   </article>
                   {selected.events.map((event, index) => (
@@ -1635,7 +1640,7 @@ export default function QuestPage({
                         <small>{event.kind.replaceAll('_', ' ')}</small>
                         {hasEventDetails(event.details) && (
                           <details>
-                            <summary>Evidence</summary>
+                            <summary>{t('quest_evidence')}</summary>
                             <pre>{formatEventDetails(event.details)}</pre>
                           </details>
                         )}
@@ -1645,7 +1650,7 @@ export default function QuestPage({
                   <article className={cn(questClasses.streamEntry, questClasses.nextEntry)}>
                     <span className={cn(questClasses.timelineDot, questClasses.timelineDotNext)} />
                     <div>
-                      <header><strong>{selected.next_action.label}</strong><time>next</time></header>
+                      <header><strong>{selected.next_action.label}</strong><time>{t('quest_time_next')}</time></header>
                       <small>{selected.next_action.reason}</small>
                     </div>
                   </article>
@@ -1653,8 +1658,8 @@ export default function QuestPage({
                     <article className={cn(questClasses.streamEntry, questClasses.nextEntry)}>
                       <span className={cn(questClasses.timelineDot, questClasses.timelineDotNext)} />
                       <div>
-                        <header><strong>Spec is ready for review</strong><time>next</time></header>
-                        <small>edit the spec in the right panel, then approve and execute</small>
+                        <header><strong>{t('quest_spec_ready')}</strong><time>{t('quest_time_next')}</time></header>
+                        <small>{t('quest_spec_ready_desc')}</small>
                       </div>
                     </article>
                   )}
@@ -1662,14 +1667,14 @@ export default function QuestPage({
                     <article className={cn(questClasses.streamEntry, questClasses.liveEntry)}>
                       <span className={cn(questClasses.timelineDot, questClasses.timelineDotLive, questClasses.timelineDotLast)} />
                       <div>
-                        <header><strong>Quest execution is running</strong><time>live</time></header>
-                        <small>waiting for workspace events and review bundle</small>
+                        <header><strong>{t('quest_execution_running')}</strong><time>{t('quest_time_live')}</time></header>
+                        <small>{t('quest_execution_running_desc')}</small>
                       </div>
                     </article>
                   )}
                   {selected.review && (
                     <button className={questClasses.reviewChip} onClick={() => setPanel('review')}>
-                      <IconCheck /> Review +{selected.review.changed_files.reduce((sum, file) => sum + file.additions, 0)}
+                      <IconCheck /> {t('quest_tab_review')} +{selected.review.changed_files.reduce((sum, file) => sum + file.additions, 0)}
                       <span>-{selected.review.changed_files.reduce((sum, file) => sum + file.deletions, 0)}</span>
                     </button>
                   )}
@@ -1680,10 +1685,10 @@ export default function QuestPage({
                     onChange={event => setQuestInputMode(event.target.value as QuestInputMode)}
                     disabled={busy}
                   >
-                    <option value="steer">Steer</option>
-                    <option value="clarify">Clarify</option>
-                    <option value="manual_intervention">Manual edit</option>
-                    <option value="pause">Pause note</option>
+                    <option value="steer">{t('quest_input_steer')}</option>
+                    <option value="clarify">{t('quest_input_clarify')}</option>
+                    <option value="manual_intervention">{t('quest_input_manual')}</option>
+                    <option value="pause">{t('quest_input_pause')}</option>
                   </select>
                   <input
                     value={questInput}
@@ -1691,7 +1696,7 @@ export default function QuestPage({
                     onKeyDown={event => {
                       if (event.key === 'Enter') submitQuestInput();
                     }}
-                    placeholder="Steer this Quest, answer a clarification, or record a manual edit"
+                    placeholder={t('quest_input_placeholder')}
                     disabled={busy || !selected}
                   />
                   <button className={questClasses.sendButton} onClick={submitQuestInput} disabled={busy || !questInput.trim()}>
@@ -1709,12 +1714,12 @@ export default function QuestPage({
                         key={tab.id}
                         className={cn(questClasses.panelTab, active && questClasses.panelTabActive)}
                         onClick={() => setPanel(tab.id)}
-                        title={tab.label}
-                        aria-label={tab.label}
+                        title={t(tab.labelKey)}
+                        aria-label={t(tab.labelKey)}
                         aria-current={active ? 'page' : undefined}
                       >
                         {tab.icon}
-                        {active && <span>{tab.label}</span>}
+                        {active && <span>{t(tab.labelKey)}</span>}
                       </button>
                     );
                   })}
@@ -1723,9 +1728,9 @@ export default function QuestPage({
                 {panel === 'overview' && (
                   <div className={questClasses.overview}>
                     <section>
-                      <h2>Progress</h2>
+                      <h2>{t('quest_progress')}</h2>
                       <ol className="m-0 grid list-none gap-[10px] p-0">
-                        {progressItems(selected).map((item, index) => (
+                        {progressItems(selected, t).map((item, index) => (
                           <li key={`${item.title}-${index}`} className={progressItemClass(item.status)}>
                             <span>{item.status === 'done' ? <IconCheck /> : null}</span>
                             <p>{item.title}</p>
@@ -1735,7 +1740,7 @@ export default function QuestPage({
 	                    </section>
 
 	                    <section>
-	                      <h2>Execution <b>{selected.mode}</b></h2>
+	                      <h2>{t('quest_execution')} <b>{selected.mode}</b></h2>
 	                      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
 	                        <div className={modeSwitchClass}>
 	                          {(['solo', 'extra'] as QuestMode[]).map(mode => (
@@ -1745,7 +1750,7 @@ export default function QuestPage({
 	                              onClick={() => setQuestMode(mode)}
 	                              disabled={busy || executionLockedStatuses.includes(selected.status)}
 	                            >
-	                              {mode === 'solo' ? 'Solo' : 'Extra'}
+	                              {mode === 'solo' ? t('quest_mode_solo') : t('quest_mode_extra')}
 	                            </button>
 	                          ))}
 	                        </div>
@@ -1787,29 +1792,29 @@ export default function QuestPage({
 	                            onChange={event => setWorkspaceAutoWrite(event.target.checked)}
 	                            disabled={busy || executionLockedStatuses.includes(selected.status)}
 	                          />
-	                          Workspace auto-write
+	                          {t('quest_workspace_auto_write')}
 	                        </label>
-	                        <span className="inline-flex h-8 items-center rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] px-[10px] text-[11px] text-[var(--text-muted)]">Active project apply: approval required</span>
+	                        <span className="inline-flex h-8 items-center rounded-[5px] border border-[var(--border)] bg-[var(--bg-base)] px-[10px] text-[11px] text-[var(--text-muted)]">{t('quest_active_apply_approval')}</span>
 	                        <button
 	                          className={sectionHeadingButton}
 	                          onClick={saveExecutionConfig}
 	                          disabled={busy || (questMode === selected.mode && workspaceAutoWrite === selected.autonomy.workspace_writes_automatic && JSON.stringify(modelConfig) === JSON.stringify(selected.model_config))}
 	                        >
-                          <IconEdit /> Save execution
+                          <IconEdit /> {t('quest_save_execution')}
                         </button>
                       </div>
                     </section>
 
                     <section>
-                      <h2>Artifacts</h2>
+                      <h2>{t('quest_artifacts')}</h2>
                       <button className={artifactRowClass} onClick={() => { setArtifact(null); setPanel('intent'); }}>
-                        <IconFile /><span><strong>Quest intent</strong><small>{selected.intent_path}</small></span>
+                        <IconFile /><span><strong>{t('quest_artifact_intent')}</strong><small>{selected.intent_path}</small></span>
                       </button>
                       <button className={artifactRowClass} onClick={() => { setArtifact(null); setPanel('spec'); }}>
-                        <IconFile /><span><strong>Quest spec</strong><small>{selected.spec_path ?? 'not generated'}</small></span>
+                        <IconFile /><span><strong>{t('quest_artifact_spec')}</strong><small>{selected.spec_path ?? t('quest_not_generated')}</small></span>
                       </button>
-                      <button className={artifactRowClass} onClick={() => openArtifact({ kind: 'trace', label: 'Timeline trace', path: selected.trace_path })}>
-                        <IconFile /><span><strong>Timeline trace</strong><small>{selected.trace_path}</small></span>
+                      <button className={artifactRowClass} onClick={() => openArtifact({ kind: 'trace', label: t('quest_timeline_trace'), path: selected.trace_path })}>
+                        <IconFile /><span><strong>{t('quest_timeline_trace')}</strong><small>{selected.trace_path}</small></span>
                       </button>
                       {selected.checkpoints.map(checkpoint => (
                         <button
@@ -1820,7 +1825,7 @@ export default function QuestPage({
                           <IconRefresh />
                           <span>
                             <strong>{checkpoint.label}</strong>
-                            <small>{checkpoint.workspace_id ?? 'workspace pending'} · {formatTime(checkpoint.timestamp_ms)}</small>
+                            <small>{checkpoint.workspace_id ?? t('quest_workspace_pending')} · {formatTime(checkpoint.timestamp_ms)}</small>
                           </span>
                         </button>
                       ))}
@@ -1830,16 +1835,16 @@ export default function QuestPage({
                           key={attempt.id}
                           onClick={() => openArtifact({ kind: 'exploration', label: attempt.label, path: attempt.artifact_path })}
                         >
-                          <IconSparkles /><span><strong>{attempt.label}</strong><small>{attempt.outcome}{attempt.selected ? ' · selected' : ''}</small></span>
+                          <IconSparkles /><span><strong>{attempt.label}</strong><small>{attempt.outcome}{attempt.selected ? ` · ${t('quest_selected')}` : ''}</small></span>
                         </button>
                       ))}
                       <button className={artifactRowClass} onClick={() => setPanel('review')} disabled={!selected.review}>
-                        <IconCheck /><span><strong>Review bundle</strong><small>{selected.review ? `${selected.review.changed_files.length} changed files` : 'not ready'}</small></span>
+                        <IconCheck /><span><strong>{t('quest_review_bundle')}</strong><small>{selected.review ? t_fmt('quest_changed_files_count', { count: String(selected.review.changed_files.length) }) : t('quest_not_ready')}</small></span>
                       </button>
                     </section>
 
                     <section>
-                      <h2>Changed files <b>{selected.review?.changed_files.length ?? 0}</b></h2>
+                      <h2>{t('quest_changed_files')} <b>{selected.review?.changed_files.length ?? 0}</b></h2>
                       {selected.review?.changed_files.map(file => (
                         <button
                           className={cn(fileRowClass, 'cursor-pointer')}
@@ -1849,11 +1854,11 @@ export default function QuestPage({
                           <IconFile /><span><strong>{file.path}</strong><small>{file.status}</small></span>
                           <b>+{file.additions} <i>-{file.deletions}</i></b>
                         </button>
-                      )) ?? <p className={mutedText}>No file changes yet</p>}
+                      )) ?? <p className={mutedText}>{t('quest_no_file_changes')}</p>}
                     </section>
 
                     <section>
-                      <h2>Validation</h2>
+                      <h2>{t('quest_validation')}</h2>
                       {selected.review?.validations.map(validation => (
                         <button
                           className={validationRowClass}
@@ -1865,19 +1870,19 @@ export default function QuestPage({
                             <strong>{validation.name}</strong>
                             <small>
                               {validation.summary}
-                              {validation.command && ` · ${validation.policy_approved ? 'policy-approved' : 'unapproved'}: ${validation.command}`}
-                              {validation.log && ' · log attached'}
+                              {validation.command && ` · ${validation.policy_approved ? t('quest_policy_approved') : t('quest_unapproved')}: ${validation.command}`}
+                              {validation.log && ` · ${t('quest_log_attached')}`}
                             </small>
                           </span>
                           <b>{validation.status}</b>
                         </button>
-                      )) ?? <p className={mutedText}>No validation evidence yet</p>}
+                      )) ?? <p className={mutedText}>{t('quest_no_validation')}</p>}
                     </section>
 
                     <section>
-                      <h2>References</h2>
+                      <h2>{t('quest_references')}</h2>
                       {selected.attached_knowledge.length === 0 ? (
-                        <p className={mutedText}>No Knowledge attached</p>
+                        <p className={mutedText}>{t('quest_no_knowledge_attached')}</p>
                       ) : selected.attached_knowledge.map(entry => (
                         <button className={artifactRowClass} key={entry.id} onClick={() => setPanel('knowledge')}>
                           <IconSparkles /><span><strong>{entry.category}</strong><small>{entry.content}</small></span>
@@ -1890,9 +1895,9 @@ export default function QuestPage({
                 {panel === 'intent' && (
                   <div className={documentPanelClass}>
                     <div className={questClasses.sectionHeading}>
-                      <div><span>DURABLE INTENT</span><strong>Edit the task brief before execution or during revision</strong></div>
+                      <div><span>{t('quest_durable_intent')}</span><strong>{t('quest_durable_intent_desc')}</strong></div>
                       <div>
-                        <button className={sectionHeadingButton} onClick={saveIntent} disabled={busy || intentDraft === selected.intent}><IconEdit /> Save</button>
+                        <button className={sectionHeadingButton} onClick={saveIntent} disabled={busy || intentDraft === selected.intent}><IconEdit /> {t('btn_save')}</button>
                       </div>
                     </div>
                     <textarea
@@ -1906,11 +1911,11 @@ export default function QuestPage({
                 {panel === 'spec' && (
                   <div className={documentPanelClass}>
                     <div className={questClasses.sectionHeading}>
-                      <div><span>AI TOOL SPEC</span><strong>Review the model-created artifact before execution</strong></div>
+                      <div><span>{t('quest_ai_tool_spec')}</span><strong>{t('quest_ai_tool_spec_desc')}</strong></div>
                       <div>
-                        <button className={sectionHeadingButton} onClick={saveSpec} disabled={busy || specDraft === selected.spec}><IconEdit /> Save</button>
+                        <button className={sectionHeadingButton} onClick={saveSpec} disabled={busy || specDraft === selected.spec}><IconEdit /> {t('btn_save')}</button>
                         <button className={cn(sectionHeadingButton, primaryButton)} onClick={execute} disabled={busy || selected.status === 'archived'}>
-                          {busy ? <QuestLoader /> : <IconPlay />} Approve
+                          {busy ? <QuestLoader /> : <IconPlay />} {t('quest_approve')}
                         </button>
                       </div>
                     </div>
@@ -1925,8 +1930,8 @@ export default function QuestPage({
                 {panel === 'artifact' && artifact && (
                   <div className={questClasses.artifactViewer}>
                     <header>
-                      <button className={sectionHeadingButton} onClick={() => setPanel('overview')}><IconChevronRight /> Overview</button>
-                      <button className={sectionHeadingButton} onClick={() => onOpenEditor(selected.project.path, artifactFor(artifact.kind, artifact.label, artifact.path))}><IconCode /> Open Editor</button>
+                      <button className={sectionHeadingButton} onClick={() => setPanel('overview')}><IconChevronRight /> {t('quest_tab_overview')}</button>
+                      <button className={sectionHeadingButton} onClick={() => onOpenEditor(selected.project.path, artifactFor(artifact.kind, artifact.label, artifact.path))}><IconCode /> {t('quest_open_editor')}</button>
                     </header>
                     <div>
                       <span>{artifact.kind.replace('_', ' ')}</span>
@@ -1934,7 +1939,7 @@ export default function QuestPage({
                       {artifact.path && <p>{artifact.path}</p>}
                     </div>
                     <pre>{artifact.kind === 'changed_file'
-                      ? selected.review?.changed_files.find(file => file.path === artifact.path)?.diff ?? 'No diff available'
+                      ? selected.review?.changed_files.find(file => file.path === artifact.path)?.diff ?? t('quest_no_diff')
                       : JSON.stringify(
                         artifact.kind === 'trace'
                           ? selected.events
@@ -1958,11 +1963,11 @@ export default function QuestPage({
                   <div className={questClasses.knowledge}>
                     <section>
                       <h2>
-                        Pending knowledge <b>{knowledge.filter(entry => entry.status === 'pending').length}</b>
-                        <button className={sectionHeadingButton} onClick={revalidateKnowledgeEntries} disabled={busy}>Revalidate</button>
+                        {t('quest_pending_knowledge')} <b>{knowledge.filter(entry => entry.status === 'pending').length}</b>
+                        <button className={sectionHeadingButton} onClick={revalidateKnowledgeEntries} disabled={busy}>{t('quest_revalidate')}</button>
                       </h2>
                       {knowledge.filter(entry => entry.status === 'pending').length === 0 ? (
-                        <p className={mutedText}>No pending memory proposals</p>
+                        <p className={mutedText}>{t('quest_no_pending_knowledge')}</p>
                       ) : knowledge.filter(entry => entry.status === 'pending').map(entry => (
                         <KnowledgeRow
                           key={entry.id}
@@ -1977,9 +1982,9 @@ export default function QuestPage({
                       ))}
                     </section>
                     <section>
-                      <h2>Approved knowledge <b>{knowledge.filter(entry => entry.status === 'approved').length}</b></h2>
+                      <h2>{t('quest_approved_knowledge')} <b>{knowledge.filter(entry => entry.status === 'approved').length}</b></h2>
                       {knowledge.filter(entry => entry.status === 'approved').length === 0 ? (
-                        <p className={mutedText}>No approved project knowledge yet</p>
+                        <p className={mutedText}>{t('quest_no_approved_knowledge')}</p>
                       ) : knowledge.filter(entry => entry.status === 'approved').map(entry => (
                         <KnowledgeRow
                           key={entry.id}
@@ -2001,48 +2006,48 @@ export default function QuestPage({
                     {!selected.review ? (
                       <div className={questClasses.reviewEmpty}>
                         <IconCheck size={24} />
-                        <strong>No review bundle yet</strong>
-                        <span>Approve the spec and execute the Quest first.</span>
+                        <strong>{t('quest_no_review_bundle')}</strong>
+                        <span>{t('quest_approve_spec_first')}</span>
                       </div>
                     ) : (
                       <>
                         <div className={questClasses.reviewSummary}>
-                          <div><span>RISK</span><strong>{selected.review.risk}</strong></div>
+                          <div><span>{t('quest_risk')}</span><strong>{selected.review.risk}</strong></div>
                           <p>{selected.review.summary}</p>
                         </div>
                         <section>
-                          <h2>Capability metrics</h2>
+                          <h2>{t('quest_capability_metrics')}</h2>
                           <div className={questClasses.reviewMetrics}>
                             <div>
-                              <span>First action</span>
+                              <span>{t('quest_metric_first_action')}</span>
                               <strong>{formatMetricDuration(selected.review.metrics?.intent_to_first_action_ms)}</strong>
                             </div>
                             <div>
-                              <span>Tool latency</span>
+                              <span>{t('quest_metric_tool_latency')}</span>
                               <strong>{formatMetricDuration(selected.review.metrics?.tool_call_latency_ms)}</strong>
                             </div>
                             <div>
-                              <span>Validators</span>
+                              <span>{t('quest_metric_validators')}</span>
                               <strong>{formatMetricDuration(selected.review.metrics?.validator_turnaround_ms)}</strong>
                             </div>
                             <div>
-                              <span>Context relevance</span>
+                              <span>{t('quest_metric_context_relevance')}</span>
                               <strong>{formatMetricScore(selected.review.metrics?.context_relevance_score)}</strong>
                             </div>
                             <div>
-                              <span>Recovery</span>
+                              <span>{t('quest_metric_recovery')}</span>
                               <strong>{formatMetricScore(selected.review.metrics?.failed_action_recovery_rate)}</strong>
                             </div>
                             <div>
-                              <span>Evidence quality</span>
+                              <span>{t('quest_metric_evidence_quality')}</span>
                               <strong>{formatMetricScore(selected.review.metrics?.review_evidence_quality_score)}</strong>
                             </div>
                             <div>
-                              <span>Attempts</span>
+                              <span>{t('quest_metric_attempts')}</span>
                               <strong>{selected.review.metrics?.isolated_attempt_count ?? 0}</strong>
                             </div>
                             <div>
-                              <span>Validation failures</span>
+                              <span>{t('quest_metric_validation_failures')}</span>
                               <strong>{selected.review.metrics?.validation_failure_count ?? 0}/{selected.review.metrics?.validation_count ?? 0}</strong>
                             </div>
                           </div>
@@ -2051,7 +2056,7 @@ export default function QuestPage({
                           )}
                         </section>
                         <section>
-                          <h2>Unresolved issues</h2>
+                          <h2>{t('quest_unresolved_issues')}</h2>
                           {(selected.review.findings ?? []).length > 0 ? (
                             (selected.review.findings ?? []).map(finding => (
                               <div className={issueClass} key={finding.id}>
@@ -2066,11 +2071,11 @@ export default function QuestPage({
                                   <IconAlertCircle /> {finding.title} <span>{finding.severity}</span>
                                 </button>
                                 <p>{finding.summary}</p>
-                                <button onClick={() => requestQuickFix(finding.summary)} disabled={busy}>Quick fix</button>
+                                <button onClick={() => requestQuickFix(finding.summary)} disabled={busy}>{t('quest_quick_fix')}</button>
                               </div>
                             ))
                           ) : selected.review.unresolved_issues.length === 0
-                            ? <div className={cn(issueClass, clearIssueClass)}><IconCheck /> No unresolved issues</div>
+                            ? <div className={cn(issueClass, clearIssueClass)}><IconCheck /> {t('quest_no_unresolved_issues')}</div>
                             : selected.review.unresolved_issues.map(issue => (
                               <div className={issueClass} key={issue}>
                                 <button
@@ -2079,14 +2084,14 @@ export default function QuestPage({
                                 >
                                   <IconAlertCircle /> {issue}
                                 </button>
-                                <button onClick={() => requestQuickFix(issue)} disabled={busy}>Quick fix</button>
+                                <button onClick={() => requestQuickFix(issue)} disabled={busy}>{t('quest_quick_fix')}</button>
                               </div>
                             ))}
                         </section>
                         <section>
-                          <h2>Next actions</h2>
+                          <h2>{t('quest_next_actions')}</h2>
                           {(selected.review.next_actions ?? []).length === 0 ? (
-                            <p className={mutedText}>No guided next action is attached to this review.</p>
+                            <p className={mutedText}>{t('quest_no_next_action')}</p>
                           ) : (
                             <div className={questClasses.reviewActions}>
                               {(selected.review.next_actions ?? []).map(action => {
@@ -2110,9 +2115,9 @@ export default function QuestPage({
                           )}
                         </section>
                         <section>
-                          <h2>Exploration attempts</h2>
+                          <h2>{t('quest_exploration_attempts')}</h2>
                           {selected.review.exploration_attempts.length === 0 ? (
-                            <p className={mutedText}>No alternative attempts were preserved for this result.</p>
+                            <p className={mutedText}>{t('quest_no_attempts')}</p>
                           ) : selected.review.exploration_attempts.map(attempt => (
                             <button
                               className={cn(artifactRowClass, 'min-h-12 grid-cols-[18px_minmax(0,1fr)_auto] py-[9px] [&_small]:whitespace-normal [&>b]:text-[10px] [&>b]:uppercase [&>b]:text-[#52525b]')}
@@ -2124,12 +2129,12 @@ export default function QuestPage({
                                 <strong>{attempt.label}</strong>
                                 <small>{attempt.summary}</small>
                               </span>
-                              <b>{attempt.selected ? 'selected' : attempt.outcome}</b>
+                              <b>{attempt.selected ? t('quest_selected') : attempt.outcome}</b>
                             </button>
                           ))}
                         </section>
                         <section>
-                          <h2>Transaction groups</h2>
+                          <h2>{t('quest_transaction_groups')}</h2>
                           {selected.review.transaction_groups.length > 0 ? (
                             selected.review.transaction_groups.map(group => {
                               const totals = group.files.reduce((acc, path) => {
@@ -2160,14 +2165,14 @@ export default function QuestPage({
                                   <IconFile />
                                   <span>
                                     <strong>{group.label}</strong>
-                                    <small>{group.summary} · {group.files.length} file(s) · {group.risk || 'risk pending'}</small>
+                                    <small>{group.summary} · {t_fmt('quest_files_count', { count: String(group.files.length) })} · {group.risk || t('quest_risk_pending')}</small>
                                   </span>
                                   <b>+{totals.additions} <i>-{totals.deletions}</i></b>
                                 </label>
                               );
                             })
                           ) : selected.review.changed_files.length === 0 ? (
-                            <p className={mutedText}>No changed files can be applied.</p>
+                            <p className={mutedText}>{t('quest_no_applicable_files')}</p>
                           ) : selected.review.changed_files.map(file => (
                             <label className={selectableFileRowClass} key={file.path}>
                               <input
@@ -2192,7 +2197,7 @@ export default function QuestPage({
                           ))}
                         </section>
                         <section>
-                          <h2>Final decision</h2>
+                          <h2>{t('quest_final_decision')}</h2>
                           <div className={questClasses.decisionRow}>
                             <button
                               className={cn(decisionButtonClass, primaryButton)}
@@ -2202,14 +2207,14 @@ export default function QuestPage({
                               }
                               disabled={busy || selected.status !== 'ready_for_review' || (selected.review.transaction_groups.length ? selectedReviewGroups.size === 0 : selectedReviewFiles.size === 0)}
                             >
-                              <IconCheck /> Apply selected
+                              <IconCheck /> {t('quest_apply_selected')}
                             </button>
                             <button
                               className={decisionButtonClass}
                               onClick={() => applySelectedQuest()}
                               disabled={busy || selected.status !== 'ready_for_review' || selected.review.changed_files.length === 0}
                             >
-                              Apply all
+                              {t('quest_apply_all')}
                             </button>
                             <button
                               className={decisionButtonClass}
@@ -2219,10 +2224,10 @@ export default function QuestPage({
                               }
                               disabled={busy || selected.status !== 'ready_for_review' || (selected.review.transaction_groups.length ? selectedReviewGroups.size === 0 : selectedReviewFiles.size === 0)}
                             >
-                              <IconX /> Discard selected
+                              <IconX /> {t('quest_discard_selected')}
                             </button>
-                            <button className={decisionButtonClass} onClick={rejectSelectedQuest} disabled={busy || selected.status !== 'ready_for_review'}><IconX /> Reject result</button>
-                            <button className={decisionButtonClass} onClick={reviseSelectedQuest} disabled={busy || !['ready_for_review', 'blocked', 'waiting_for_user'].includes(selected.status)}><IconRefresh /> Request revision</button>
+                            <button className={decisionButtonClass} onClick={rejectSelectedQuest} disabled={busy || selected.status !== 'ready_for_review'}><IconX /> {t('quest_reject_result')}</button>
+                            <button className={decisionButtonClass} onClick={reviseSelectedQuest} disabled={busy || !['ready_for_review', 'blocked', 'waiting_for_user'].includes(selected.status)}><IconRefresh /> {t('quest_request_revision')}</button>
                           </div>
                           {selected.decisions.length > 0 && (
                             <div className={questClasses.decisionHistory}>
@@ -2231,7 +2236,7 @@ export default function QuestPage({
                                   <small>{decision.kind.replace('_', ' ')} · {decision.summary}</small>
                                   {decision.rollback_id && decision.kind !== 'rollback' && (
                                     <button onClick={() => rollbackSelectedQuest(decision.rollback_id!)} disabled={busy}>
-                                      Roll back
+                                      {t('quest_roll_back')}
                                     </button>
                                   )}
                                 </div>
@@ -2249,30 +2254,30 @@ export default function QuestPage({
         )}
       </div>
       <footer className={questClasses.footer}>
-        <span>Registry: Aster user data · cross-project</span>
-        <span>{currentProjectPath ? `Current project: ${currentProjectPath}` : 'No project open'}</span>
+        <span>{t('quest_registry')}</span>
+        <span>{currentProjectPath ? t_fmt('quest_current_project', { path: currentProjectPath }) : t('quest_no_project_open')}</span>
       </footer>
       {error && (
-        <button className={questClasses.errorToast} onClick={() => setErrorOpen(true)} title="View error details">
+        <button className={questClasses.errorToast} onClick={() => setErrorOpen(true)} title={t('quest_view_error_details')}>
           <IconAlertCircle />
           <span>
-            <strong>Quest failed</strong>
+            <strong>{t('quest_failed')}</strong>
             <small>{error}</small>
           </span>
           <IconChevronRight />
         </button>
       )}
       {errorOpen && error && (
-        <div className={questClasses.errorModal} role="dialog" aria-modal="true" aria-label="Quest error details">
+        <div className={questClasses.errorModal} role="dialog" aria-modal="true" aria-label={t('quest_error_details')}>
           <div>
             <header>
-              <span><IconAlertCircle /> Quest error</span>
-              <button className={questClasses.modalButton} onClick={() => setErrorOpen(false)} title="Close"><IconX /></button>
+              <span><IconAlertCircle /> {t('quest_error')}</span>
+              <button className={questClasses.modalButton} onClick={() => setErrorOpen(false)} title={t('btn_close')}><IconX /></button>
             </header>
             <pre>{error}</pre>
             <footer>
-              <button className={questClasses.modalButton} onClick={() => setError(null)}>Dismiss</button>
-              <button className={cn(questClasses.modalButton, 'border-[#111827] bg-[#111827] text-white')} onClick={() => setErrorOpen(false)}>Close</button>
+              <button className={questClasses.modalButton} onClick={() => setError(null)}>{t('quest_dismiss')}</button>
+              <button className={cn(questClasses.modalButton, 'border-[#111827] bg-[#111827] text-white')} onClick={() => setErrorOpen(false)}>{t('btn_close')}</button>
             </footer>
           </div>
         </div>
@@ -2294,6 +2299,7 @@ function QuestGroup({
   onSelect: (quest: QuestRecord) => void;
   onMenuAction?: (quest: QuestRecord, action: QuestMenuAction) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -2320,26 +2326,26 @@ function QuestGroup({
     if (!contextMenu) return [];
     const quest = contextMenu.quest;
     const items: Array<{ action: QuestMenuAction; label: string; icon: React.ReactNode; danger?: boolean; confirm?: boolean }> = [
-      { action: 'open', label: 'Open', icon: <IconChevronRight size={menuIconSize} /> },
-      { action: 'open_editor', label: 'Open Editor', icon: <IconCode size={menuIconSize} /> },
-      { action: 'rename', label: 'Rename', icon: <IconEdit size={menuIconSize} /> },
-      { action: 'branch', label: 'Branch', icon: <IconSparkles size={menuIconSize} /> },
-      { action: 'export', label: 'Export', icon: <IconFile size={menuIconSize} /> },
+      { action: 'open', label: t('quest_menu_open'), icon: <IconChevronRight size={menuIconSize} /> },
+      { action: 'open_editor', label: t('quest_open_editor'), icon: <IconCode size={menuIconSize} /> },
+      { action: 'rename', label: t('action_rename'), icon: <IconEdit size={menuIconSize} /> },
+      { action: 'branch', label: t('quest_menu_branch'), icon: <IconSparkles size={menuIconSize} /> },
+      { action: 'export', label: t('quest_menu_export'), icon: <IconFile size={menuIconSize} /> },
     ];
     if (!['archived', 'canceled', 'completed', 'running'].includes(quest.status)) {
-      items.push({ action: 'cancel', label: 'Cancel', icon: <IconX size={menuIconSize} />, danger: true });
+      items.push({ action: 'cancel', label: t('dialog_cancel'), icon: <IconX size={menuIconSize} />, danger: true });
     }
     if (!['archived', 'canceled', 'running'].includes(quest.status)) {
-      items.push({ action: 'archive', label: 'Archive', icon: <IconTrash size={menuIconSize} />, danger: true });
+      items.push({ action: 'archive', label: t('quest_menu_archive'), icon: <IconTrash size={menuIconSize} />, danger: true });
     }
     if (['archived', 'canceled', 'completed'].includes(quest.status)) {
-      items.push({ action: 'reopen', label: 'Reopen', icon: <IconRefresh size={menuIconSize} /> });
+      items.push({ action: 'reopen', label: t('quest_menu_reopen'), icon: <IconRefresh size={menuIconSize} /> });
     }
     if (quest.status === 'archived') {
-      items.push({ action: 'delete', label: contextMenu.deleteConfirm ? 'Confirm delete' : 'Delete', icon: <IconTrash size={menuIconSize} />, danger: true, confirm: true });
+      items.push({ action: 'delete', label: contextMenu.deleteConfirm ? t('action_confirm_delete') : t('action_delete'), icon: <IconTrash size={menuIconSize} />, danger: true, confirm: true });
     }
     return items;
-  }, [contextMenu]);
+  }, [contextMenu, t]);
 
   const handleMenuAction = useCallback(async (action: QuestMenuAction, confirm?: boolean) => {
     if (!contextMenu || !onMenuAction) return;
@@ -2378,7 +2384,7 @@ function QuestGroup({
           </div>
         </button>
       ))}
-      {quests.length === 0 && <p>None</p>}
+      {quests.length === 0 && <p>{t('common_none')}</p>}
       {contextMenu && (
         <div
           className={`${contextMenuClass} fixed z-[1000] w-[190px] py-1.5`}
@@ -2420,6 +2426,7 @@ function KnowledgeRow({
   onReject: () => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <article className={questClasses.knowledgeRow}>
       <header>
@@ -2434,12 +2441,12 @@ function KnowledgeRow({
       <footer>
         {entry.status === 'approved' && (
           <button onClick={onToggleAttach} disabled={busy}>
-            {attached ? <IconX /> : <IconPlus />} {attached ? 'Detach' : 'Attach'}
+            {attached ? <IconX /> : <IconPlus />} {attached ? t('quest_detach') : t('quest_attach')}
           </button>
         )}
-        {entry.status !== 'approved' && <button onClick={onApprove} disabled={busy}><IconCheck /> Approve</button>}
-        {entry.status === 'pending' && <button onClick={onReject} disabled={busy}><IconX /> Reject</button>}
-        <button onClick={onRemove} disabled={busy}><IconTrash /> Remove</button>
+        {entry.status !== 'approved' && <button onClick={onApprove} disabled={busy}><IconCheck /> {t('quest_approve')}</button>}
+        {entry.status === 'pending' && <button onClick={onReject} disabled={busy}><IconX /> {t('quest_reject')}</button>}
+        <button onClick={onRemove} disabled={busy}><IconTrash /> {t('inspector_remove_component')}</button>
       </footer>
     </article>
   );

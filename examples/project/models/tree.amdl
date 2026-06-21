@@ -1,0 +1,11 @@
+model Tree {
+  mesh = asset("models/tree.glb")
+  material = ref("materials/bark.amat")
+
+  collider cylinder {
+    radius = 0.4m
+    height = 3.0m
+  }
+
+  rigidbody = static
+}

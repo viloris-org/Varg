@@ -1,5 +1,8 @@
 # LLM-Optimized Scripting Proposal
 
+> Current language-family decisions, file roles, and canonical extensions are tracked in
+> [`docs/aster-script-family-spec.md`](./aster-script-family-spec.md).
+
 ## 问题
 如果 Aster 引擎的主要用户是 LLM 而非人类开发者，当前的 Rhai 命令式脚本可能不是最优选择。
 

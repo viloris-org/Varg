@@ -157,7 +157,7 @@ function TreeNodeItem({
         onDoubleClick={() => {
           if (!node.isDir && onOpenScript) {
             const ext = node.name.split('.').pop()?.toLowerCase();
-            if (ext === 'rhai' || ext === 'py') {
+            if (ext === 'aster' || ext === 'rhai' || ext === 'py') {
               onOpenScript(node.path, ext === 'py' ? 'python' : 'rhai');
             }
           }
@@ -400,7 +400,7 @@ export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {
                     onChange={(e) => setScriptBackend(e.target.value as 'rhai' | 'python')}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <option value="rhai">.rhai</option>
+                    <option value="rhai">.aster</option>
                     <option value="python">.py</option>
                   </select>
                 </div>

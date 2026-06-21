@@ -248,7 +248,7 @@ function Sidebar({
       <nav className={navClass}>
         <button className={navItemClass()} onClick={onOpenQuests}>
           <IconSparkles />
-          Quests
+          {t('quest_title')}
         </button>
         {navItems.map(item => (
           <button

@@ -3,7 +3,6 @@ import HubPage from './pages/HubPage';
 import EditorPage from './pages/EditorPage';
 import QuestPage from './pages/QuestPage';
 import { rpc } from './api';
-import { promoteQuest } from './quest';
 import { I18nProvider, useTranslation } from './i18n';
 import { buttonClass } from './uiClasses';
 
@@ -63,12 +62,13 @@ function LoadingScreen() {
 }
 
 function StartupErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const { t } = useTranslation();
   return (
     <div className="grid h-full place-items-center p-6 text-[var(--text-secondary)]">
       <div className="flex w-[min(420px,100%)] flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] p-5">
-        <h1 className="text-base font-semibold text-[var(--text-primary)]">Aster Editor could not start</h1>
+        <h1 className="text-base font-semibold text-[var(--text-primary)]">{t('startup_error_title')}</h1>
         <p className="break-anywhere leading-[1.5]">{message}</p>
-        <button type="button" className={buttonClass('primary')} onClick={onRetry}>Retry</button>
+        <button type="button" className={buttonClass('primary')} onClick={onRetry}>{t('btn_retry')}</button>
       </div>
     </div>
   );
@@ -159,12 +159,6 @@ export default function App() {
     setScreen('quest');
   }, []);
 
-  const handlePromoteToQuest = useCallback(async (prompt: string, context: string) => {
-    const detail = await promoteQuest(prompt, context);
-    setInitialQuestId(detail.id);
-    setScreen('quest');
-  }, []);
-
   const handleOpenEditor = useCallback(async (projectPath: string, artifact?: QuestEditorArtifact) => {
     if (hubState?.open_project !== projectPath) {
       await rpc('hub/open_project', { path: projectPath });
@@ -251,7 +245,6 @@ export default function App() {
         onCloseProject={handleCloseProject}
         onOpenSettings={handleOpenSettings}
         onOpenQuest={handleOpenQuest}
-        onPromoteToQuest={handlePromoteToQuest}
         questArtifact={questArtifact}
         onDismissQuestArtifact={() => setQuestArtifact(null)}
       />

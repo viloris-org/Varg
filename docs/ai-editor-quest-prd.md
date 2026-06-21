@@ -81,7 +81,7 @@ Suitable tasks:
 - Create a material, prefab, script, behavior file, or scene from the Project panel.
 - Explain why a Rust compile error occurs.
 - Add a missing field to a selected component.
-- Generate a small Rhai script.
+- Generate a small `.aster` Aster Script file.
 - Refactor one function or one file.
 - Inspect a scene object and summarize its dependencies.
 - Run a targeted check and explain the result.

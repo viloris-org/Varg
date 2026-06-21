@@ -110,11 +110,22 @@ interface AssetReferenceRow {
   detail: string;
 }
 
+interface AsterScriptDiagnostic {
+  code: string;
+  severity: 'error' | 'warning';
+  line?: number;
+  column?: number;
+  message: string;
+  suggestion: string;
+  source_line?: string;
+}
+
+type TextAssetDiagnostic = AsterScriptDiagnostic;
+
 interface Props {
   onCloseProject: () => void;
   onOpenSettings?: () => void;
   onOpenQuest?: () => void;
-  onPromoteToQuest?: (prompt: string, context: string) => Promise<void>;
   questArtifact?: QuestEditorArtifact | null;
   onDismissQuestArtifact?: () => void;
 }
@@ -490,6 +501,10 @@ const scriptSurfaceClass = {
   gutterButtonSelected: 'bg-[var(--accent-dim)]',
   gutterLineNumber: 'select-none text-[#4b5563]',
   gutterLineText: 'pr-6 not-italic text-[var(--text-secondary)]',
+  diagnostics: 'max-h-32 overflow-auto border-t border-[var(--border)] bg-[var(--bg-overlay)] px-3 py-2 font-mono text-[10px]',
+  diagnostic: 'mb-1.5 grid gap-0.5 last:mb-0',
+  diagnosticMessage: 'text-[var(--danger)]',
+  diagnosticSuggestion: 'text-[var(--text-secondary)]',
 };
 
 function gameSurfaceClass(hierarchyOpen: boolean, inspectorOpen: boolean): string {
@@ -864,7 +879,7 @@ function ComponentFieldEditor({ componentType, fieldName, value, onCommit }: {
 }
 
 function isScriptPath(path?: string): boolean {
-  return Boolean(path && /\.(rhai|js|ts|tsx|lua|rs)$/i.test(path));
+  return Boolean(path && /\.(aster|rhai|js|ts|tsx|lua|rs)$/i.test(path));
 }
 
 // Infer a scene-tree icon from a node's name/tag, the way Godot shows a
@@ -1389,7 +1404,6 @@ export default function EditorPage({
   onCloseProject,
   onOpenSettings,
   onOpenQuest,
-  onPromoteToQuest,
   questArtifact,
   onDismissQuestArtifact,
 }: Props) {
@@ -1428,6 +1442,7 @@ export default function EditorPage({
   const [scriptSavedContent, setScriptSavedContent] = useState('');
   const [scriptSaving, setScriptSaving] = useState(false);
   const [scriptLineRange, setScriptLineRange] = useState<[number, number] | null>(null);
+  const [scriptDiagnostics, setScriptDiagnostics] = useState<AsterScriptDiagnostic[]>([]);
   const [consoleEntries, setConsoleEntries] = useState<EditorConsoleEntry[]>([]);
   const [consoleBusy, setConsoleBusy] = useState(false);
   const [buildTarget, setBuildTarget] = useState<BuildTarget>('linux-x64');
@@ -1441,8 +1456,6 @@ export default function EditorPage({
   const [artifactQuestionOpen, setArtifactQuestionOpen] = useState(false);
   const [artifactQuestion, setArtifactQuestion] = useState('');
   const [contextualRequest, setContextualRequest] = useState<{ id: number; prompt: string } | null>(null);
-  const [promotingQuest, setPromotingQuest] = useState(false);
-  const [promoteError, setPromoteError] = useState<string | null>(null);
   const [guides, setGuides] = useState<GuideEntity[]>([]);
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
@@ -1580,7 +1593,7 @@ export default function EditorPage({
       const result = await rpc<{ entries: Array<{ path: string; kind: string }>; assets: ProjectAssetMeta[] }>('project/list_assets');
       setAssets(result.assets);
       const paths = result.entries
-        .filter(entry => /script/i.test(entry.kind) || /\.(rhai|js|ts|lua)$/i.test(entry.path))
+        .filter(entry => /script|model/i.test(entry.kind) || /\.(aster|rhai|amdl|js|ts|lua)$/i.test(entry.path))
         .map(entry => entry.path);
       setScripts(paths);
       setSelectedScript(current => current && paths.includes(current) ? current : paths[0] ?? null);
@@ -1616,9 +1629,32 @@ export default function EditorPage({
 
   useEffect(() => {
     setScriptLineRange(null);
+    setScriptDiagnostics([]);
     setArtifactSelection(null);
     setArtifactQuestionOpen(false);
   }, [selectedScript, workspaceView]);
+
+  useEffect(() => {
+    const lowerPath = selectedScript?.toLowerCase() ?? '';
+    const checkMethod = lowerPath.endsWith('.aster')
+      ? 'project/check_script'
+      : lowerPath.endsWith('.amdl')
+        ? 'project/check_amdl'
+        : null;
+    if (!checkMethod) {
+      setScriptDiagnostics([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      rpc<{ valid: boolean; diagnostics: TextAssetDiagnostic[] }>(checkMethod, {
+        path: selectedScript,
+        source: scriptContent,
+      })
+        .then(result => setScriptDiagnostics(result.diagnostics))
+        .catch(() => setScriptDiagnostics([]));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [scriptContent, selectedScript]);
 
   useEffect(() => {
     if (!questArtifact) {
@@ -2109,6 +2145,20 @@ export default function EditorPage({
     if (!selectedScript) return;
     setScriptSaving(true);
     try {
+      const lowerPath = selectedScript.toLowerCase();
+      const checkMethod = lowerPath.endsWith('.aster')
+        ? 'project/check_script'
+        : lowerPath.endsWith('.amdl')
+          ? 'project/check_amdl'
+          : null;
+      if (checkMethod) {
+        const validation = await rpc<{ valid: boolean; diagnostics: TextAssetDiagnostic[] }>(
+          checkMethod,
+          { path: selectedScript, source: scriptContent },
+        );
+        setScriptDiagnostics(validation.diagnostics);
+        if (!validation.valid) return;
+      }
       await rpc('project/write_file', { path: selectedScript, content: scriptContent });
       setScriptSavedContent(scriptContent);
       await refreshConsoleEntries().catch(() => {});
@@ -2155,49 +2205,6 @@ export default function EditorPage({
     setWorkspaceView('scripts');
   }, [refreshProjectAssets, refreshSceneTree, selectSceneObject, selectedId]);
 
-  const promoteCurrentContext = useCallback(async () => {
-    if (!onPromoteToQuest || !shellState) return;
-    const currentSelectedObject = selectedId
-      ? sceneTree.find(object => object.id === selectedId) ?? null
-      : null;
-    const contextLines = [
-      `Project: ${shellState.project_name}`,
-      `Active editor view: ${workspaceView}`,
-      `Scene objects: ${sceneTree.length}`,
-      currentSelectedObject ? `Selected entity: ${currentSelectedObject.name} (${currentSelectedObject.id}) at ${currentSelectedObject.position.join(', ')}` : null,
-      selectedScript ? `Selected script: ${selectedScript}` : null,
-      scriptLineRange ? `Selected script lines: ${scriptLineRange[0]}-${scriptLineRange[1]}` : null,
-      artifactSelection ? `Selected artifact context:\n${artifactSelection.context}` : null,
-      questArtifact ? `Opened Quest artifact: ${questArtifact.kind} ${questArtifact.label}` : null,
-      openedQuestArtifact ? `Quest artifact inspection: ${openedQuestArtifact.title}\n${openedQuestArtifact.description}` : null,
-    ].filter(Boolean).join('\n');
-    const prompt = currentSelectedObject
-      ? `Continue this Editor work as a Quest for ${currentSelectedObject.name}`
-      : selectedScript
-        ? `Continue this Editor script work as a Quest`
-        : `Continue this Editor work as a Quest`;
-    setPromotingQuest(true);
-    setPromoteError(null);
-    try {
-      await onPromoteToQuest(prompt, contextLines);
-    } catch (reason) {
-      setPromoteError(String(reason));
-    } finally {
-      setPromotingQuest(false);
-    }
-  }, [
-    artifactSelection,
-    onPromoteToQuest,
-    openedQuestArtifact,
-    questArtifact,
-    sceneTree,
-    scriptLineRange,
-    selectedId,
-    selectedScript,
-    shellState,
-    workspaceView,
-  ]);
-
   // Derive selected entity name
   const selectedEntityName = selectedId
     ? sceneTree.find(o => o.id === selectedId)?.name ?? null
@@ -2206,7 +2213,7 @@ export default function EditorPage({
     ? sceneTree.find(o => o.id === selectedId) ?? null
     : null;
   const scriptDirty = scriptContent !== scriptSavedContent;
-  const hasDiagnostics = consoleEntries.length > 0 || Boolean(promoteError);
+  const hasDiagnostics = consoleEntries.length > 0;
   const visibleWorkspaceTabs = ([
     ['game', 'Scene', <IconView key="game" />] as const,
     ['assets', 'Assets', <IconFile key="assets" />] as const,
@@ -2267,15 +2274,7 @@ export default function EditorPage({
         </button>
         <button className={toolButtonClass({ variant: 'play', size: 'toolbar' })} onClick={openGameView} title={t('editor_open_game_view')}><IconPlay /></button>
         <button className={toolButtonClass({ size: 'toolbar' })} onClick={() => setWorkspaceView('build')} title="Build and package"><IconPackage /></button>
-        <button
-          className={toolButtonClass({ size: 'toolbar', extra: 'quest-mode-btn' })}
-          onClick={promoteCurrentContext}
-          disabled={!onPromoteToQuest || promotingQuest}
-          title="Promote current Editor context to Quest"
-        >
-          {promotingQuest ? <IconLoader className="animate-spin" /> : <IconSparkles />} <span>Promote</span>
-        </button>
-        <button className={toolButtonClass({ size: 'toolbar', extra: 'quest-mode-btn' })} onClick={onOpenQuest} title="Open Quest Mode"><IconProjects /> <span>Quests</span></button>
+        <button className={toolButtonClass({ size: 'toolbar', extra: 'quest-mode-btn select-none' })} onClick={onOpenQuest} title="Open Quest Mode"><IconProjects /> <span>Quests</span></button>
         <button className={toolButtonClass({ size: 'toolbar' })} onClick={handleClose} title={t('editor_close')}><IconX /></button>
       </div>
 
@@ -2292,16 +2291,6 @@ export default function EditorPage({
               </div>
               <button className={questBannerClass.button} onClick={onOpenQuest}><IconProjects /> Return</button>
               <button className={questBannerClass.iconButton} onClick={onDismissQuestArtifact} title="Dismiss"><IconX /></button>
-            </div>
-          )}
-          {promoteError && (
-            <div className={cx(questBannerClass.root, questBannerClass.error)}>
-              <IconAlertCircle className={questBannerClass.errorIcon} />
-              <div className={questBannerClass.content}>
-                <span className={questBannerClass.kicker}>Promote to Quest failed</span>
-                <small className={questBannerClass.meta}>{promoteError}</small>
-              </div>
-              <button className={questBannerClass.iconButton} onClick={() => setPromoteError(null)}><IconX /></button>
             </div>
           )}
           <nav className={workspaceClass.tabs} role="tablist" aria-label="Editor surfaces">
@@ -2655,6 +2644,7 @@ export default function EditorPage({
                 <header className={scriptSurfaceClass.editorHeader}>
                   <span>{selectedScript || t('scripts_select')}{scriptDirty ? ' *' : ''}</span>
                   <div className={scriptSurfaceClass.editorActions}>
+                    {scriptDiagnostics.length > 0 && <b className="text-[var(--danger)]">{scriptDiagnostics.length} errors</b>}
                     <b className={scriptSurfaceClass.editorHint}>{t('scripts_line_select_hint')}</b>
                     <button className={scriptSurfaceClass.editorButton} onClick={saveSelectedScript} disabled={!selectedScript || !scriptDirty || scriptSaving}>
                       {scriptSaving ? 'Saving' : 'Save'}
@@ -2686,6 +2676,14 @@ export default function EditorPage({
                   />
                   <pre className={scriptSurfaceClass.gutter}><code>{(scriptContent || '// Aster-generated scripts will appear here.').split('\n').map((line, index) => { const lineNumber = index + 1; const selected = scriptLineRange && lineNumber >= scriptLineRange[0] && lineNumber <= scriptLineRange[1]; return <button key={lineNumber} className={cx(scriptSurfaceClass.gutterButton, selected && scriptSurfaceClass.gutterButtonSelected)} onClick={event => selectScriptLine(lineNumber, event.shiftKey, event)}><span className={scriptSurfaceClass.gutterLineNumber}>{lineNumber}</span><i className={scriptSurfaceClass.gutterLineText}>{line || ' '}</i></button>; })}</code></pre>
                 </div>
+                {scriptDiagnostics.length > 0 && <div className={scriptSurfaceClass.diagnostics}>
+                  {scriptDiagnostics.map((diagnostic, index) => <div className={scriptSurfaceClass.diagnostic} key={`${diagnostic.code}-${diagnostic.line ?? 0}-${index}`}>
+                    <strong className={scriptSurfaceClass.diagnosticMessage}>
+                      {diagnostic.code} {diagnostic.line ? `line ${diagnostic.line}${diagnostic.column ? `:${diagnostic.column}` : ''}` : ''}: {diagnostic.message}
+                    </strong>
+                    <span className={scriptSurfaceClass.diagnosticSuggestion}>Fix: {diagnostic.suggestion}</span>
+                  </div>)}
+                </div>}
               </article>
             </div>}
 

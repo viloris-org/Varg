@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use engine_core::EngineResult;
 use engine_ecs::Entity;
 use engine_editor::{ConsoleEntry, ConsoleLevel, ConsoleSource};
-use rhai::{Scope, AST};
+use rhai::{ParseErrorType, Scope, AST};
 use threesh::scene::SceneContext;
 
 // ── UI draw commands (immediate-mode) ────────────────────────────────────────
@@ -116,6 +116,36 @@ pub struct RhaiConfig {
     pub enable_network: bool,
     /// Enable process execution (eval, command execution).
     pub enable_process_execution: bool,
+    /// Enable strict variable checking for language-service validation.
+    pub strict_variables: bool,
+}
+
+/// Severity reported by the Aster Script language service.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsterDiagnosticSeverity {
+    /// The script cannot be accepted until the issue is fixed.
+    Error,
+    /// The script is valid, but the issue is likely unintended.
+    Warning,
+}
+
+/// Structured Aster Script diagnostic suitable for editor and AI tooling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AsterScriptDiagnostic {
+    /// Stable machine-readable diagnostic code.
+    pub code: String,
+    /// Diagnostic severity.
+    pub severity: AsterDiagnosticSeverity,
+    /// One-based source line, when available.
+    pub line: Option<usize>,
+    /// One-based source column, when available.
+    pub column: Option<usize>,
+    /// Clear explanation of what is invalid.
+    pub message: String,
+    /// Concrete guidance for correcting the issue.
+    pub suggestion: String,
+    /// Source line containing the issue, when available.
+    pub source_line: Option<String>,
 }
 
 /// Rhai-based script backend for runtime-game builds.
@@ -242,6 +272,10 @@ impl RhaiScriptBackend {
         if !config.enable_network {
             engine.disable_symbol("http_get");
             engine.disable_symbol("http_post");
+        }
+
+        if config.strict_variables {
+            engine.set_strict_variables(true);
         }
 
         // Register input API functions
@@ -2614,8 +2648,7 @@ impl RhaiScriptBackend {
                 source: e,
             })?;
         let ast = self
-            .engine
-            .compile(&source)
+            .compile_aster_source(&source)
             .map_err(|e| engine_core::EngineError::other(format!("{}: {}", path.display(), e)))?;
         self.ast_cache.insert(path.to_path_buf(), ast);
         Ok(())
@@ -2636,11 +2669,122 @@ impl RhaiScriptBackend {
         logical_path: &std::path::Path,
         source: &str,
     ) -> EngineResult<()> {
-        let ast = self.engine.compile(source).map_err(|e| {
+        let ast = self.compile_aster_source(source).map_err(|e| {
             engine_core::EngineError::other(format!("{}: {}", logical_path.display(), e))
         })?;
         self.ast_cache.insert(logical_path.to_path_buf(), ast);
         Ok(())
+    }
+
+    /// Validates Aster Script source without modifying files or the AST cache.
+    ///
+    /// Validation uses strict variable rules and verifies lifecycle hook
+    /// signatures. Every error includes a stable code, source location, and a
+    /// concrete correction hint.
+    pub fn diagnose_source(&self, logical_path: &Path, source: &str) -> Vec<AsterScriptDiagnostic> {
+        if !self.engine.strict_variables() {
+            let validator = Self::with_config(RhaiConfig {
+                strict_variables: true,
+                ..RhaiConfig::default()
+            });
+            return validator.diagnose_source(logical_path, source);
+        }
+
+        if logical_path.extension().and_then(|ext| ext.to_str()) != Some("aster") {
+            return vec![AsterScriptDiagnostic {
+                code: "ASTER0001".to_owned(),
+                severity: AsterDiagnosticSeverity::Error,
+                line: None,
+                column: None,
+                message: format!(
+                    "Aster Script files must use the .aster extension: {}",
+                    logical_path.display()
+                ),
+                suggestion: "Rename the file so its path ends in `.aster`.".to_owned(),
+                source_line: None,
+            }];
+        }
+
+        let ast = match self.compile_aster_source(source) {
+            Ok(ast) => ast,
+            Err(error) => {
+                let position = error.position();
+                let line = position.line();
+                return vec![AsterScriptDiagnostic {
+                    code: parse_error_code(error.err_type()).to_owned(),
+                    severity: AsterDiagnosticSeverity::Error,
+                    line,
+                    column: position.position(),
+                    message: error.err_type().to_string(),
+                    suggestion: parse_error_suggestion(error.err_type()),
+                    source_line: line.and_then(|line| {
+                        source
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .map(str::to_owned)
+                    }),
+                }];
+            }
+        };
+
+        let expected_hooks = [
+            ("on_start", 0usize),
+            ("on_update", 1),
+            ("on_fixed_update", 1),
+            ("on_collision_enter", 8),
+            ("on_collision_exit", 8),
+        ];
+        let mut diagnostics = Vec::new();
+        for function in ast.iter_functions() {
+            let Some((_, expected)) = expected_hooks
+                .iter()
+                .find(|(name, _)| *name == function.name)
+            else {
+                continue;
+            };
+            if function.params.len() == *expected {
+                continue;
+            }
+            let (line, column, source_line) = find_function_declaration(source, function.name);
+            diagnostics.push(AsterScriptDiagnostic {
+                code: "ASTER0101".to_owned(),
+                severity: AsterDiagnosticSeverity::Error,
+                line,
+                column,
+                message: format!(
+                    "Lifecycle hook `{}` has {} parameters; expected {}.",
+                    function.name,
+                    function.params.len(),
+                    expected
+                ),
+                suggestion: lifecycle_signature(function.name).to_owned(),
+                source_line,
+            });
+        }
+        diagnostics
+    }
+
+    /// Validates an Aster Script file from disk.
+    pub fn diagnose_file(&self, path: &Path) -> EngineResult<Vec<AsterScriptDiagnostic>> {
+        let source = std::fs::read_to_string(path).map_err(|source| {
+            engine_core::EngineError::Filesystem {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        Ok(self.diagnose_source(path, &source))
+    }
+
+    fn compile_aster_source(&self, source: &str) -> Result<AST, rhai::ParseError> {
+        if !self.engine.strict_variables() {
+            return self.engine.compile(source);
+        }
+        let mut scope = Scope::new();
+        scope.push("self_entity", String::new());
+        for name in top_level_variable_names(source) {
+            scope.push_dynamic(name, rhai::Dynamic::UNIT);
+        }
+        self.engine.compile_with_scope(&scope, source)
     }
 
     /// Creates or overwrites a script file on disk and compiles it.
@@ -2660,7 +2804,7 @@ impl RhaiScriptBackend {
         if relative_path.as_os_str().is_empty() {
             return Err(engine_core::EngineError::config(
                 "write_script: 'path' must not be empty — provide a file name such as \
-                 'scripts/my_script.rhai'",
+                 'scripts/my_script.aster'",
             ));
         }
         let file_name = relative_path
@@ -2669,18 +2813,19 @@ impl RhaiScriptBackend {
             .ok_or_else(|| {
                 engine_core::EngineError::config(format!(
                     "write_script: '{}' has no file name component — the path must end with a \
-                     file name, e.g. 'scripts/my_script.rhai'",
+                     file name, e.g. 'scripts/my_script.aster'",
                     relative_path.display()
                 ))
             })?;
-        // Enforce .rhai extension so we don't accidentally create or overwrite arbitrary files.
+        // Enforce the public Aster Script extension so we don't accidentally
+        // create or overwrite arbitrary files.
         if std::path::Path::new(file_name)
             .extension()
-            .map(|ext| ext != "rhai")
+            .map(|ext| ext != "aster")
             .unwrap_or(true)
         {
             return Err(engine_core::EngineError::config(format!(
-                "write_script: '{}' must have a .rhai extension",
+                "write_script: '{}' must have a .aster extension",
                 relative_path.display()
             )));
         }
@@ -2698,6 +2843,36 @@ impl RhaiScriptBackend {
             });
         }
 
+        let diagnostics = self.diagnose_source(relative_path, source);
+        if !diagnostics.is_empty() {
+            let details = diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    let location = match (diagnostic.line, diagnostic.column) {
+                        (Some(line), Some(column)) => format!("line {line}, column {column}"),
+                        (Some(line), None) => format!("line {line}"),
+                        _ => "unknown location".to_owned(),
+                    };
+                    format!(
+                        "{} at {}: {} Suggestion: {}",
+                        diagnostic.code, location, diagnostic.message, diagnostic.suggestion
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(engine_core::EngineError::config(format!(
+                "write_script: validation failed for '{}':\n{details}",
+                relative_path.display()
+            )));
+        }
+        let ast = self.compile_aster_source(source).map_err(|error| {
+            engine_core::EngineError::config(format!(
+                "write_script: validation failed for '{}': {}",
+                relative_path.display(),
+                error
+            ))
+        })?;
+
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| engine_core::EngineError::Filesystem {
                 path: parent.to_path_buf(),
@@ -2708,7 +2883,7 @@ impl RhaiScriptBackend {
             path: full_path.clone(),
             source: e,
         })?;
-        self.load_script(&full_path)?;
+        self.ast_cache.insert(full_path.clone(), ast);
         Ok(full_path)
     }
 
@@ -2947,8 +3122,131 @@ impl RhaiScriptBackend {
 
 /// Resolves a script path with `project:/` or `builtin:/` prefix.
 ///
-/// - `project:/path/to/script.rhai` → `<asset_root>/path/to/script.rhai`
-/// - `builtin:/path/to/script.rhai` → `<asset_root>/builtin/path/to/script.rhai`
+fn top_level_variable_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for line in source.lines() {
+        if brace_depth == 0 {
+            let trimmed = line.trim_start();
+            let declaration = trimmed
+                .strip_prefix("let ")
+                .or_else(|| trimmed.strip_prefix("const "));
+            if let Some(declaration) = declaration {
+                let name = declaration
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .collect::<String>();
+                if !name.is_empty() && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+
+        let mut characters = line.chars().peekable();
+        while let Some(character) = characters.next() {
+            if !in_string && character == '/' && characters.peek() == Some(&'/') {
+                break;
+            }
+            if character == '"' && !escaped {
+                in_string = !in_string;
+            }
+            if !in_string {
+                match character {
+                    '{' => brace_depth = brace_depth.saturating_add(1),
+                    '}' => brace_depth = brace_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            escaped = in_string && character == '\\' && !escaped;
+            if character != '\\' {
+                escaped = false;
+            }
+        }
+    }
+    names
+}
+
+fn parse_error_code(error: &ParseErrorType) -> &'static str {
+    match error {
+        ParseErrorType::UnexpectedEOF => "ASTER1001",
+        ParseErrorType::MissingToken(..) | ParseErrorType::MissingSymbol(..) => "ASTER1002",
+        ParseErrorType::VariableUndefined(..) => "ASTER1003",
+        ParseErrorType::AssignmentToConstant(..) => "ASTER1004",
+        ParseErrorType::FnDuplicatedDefinition(..) => "ASTER1005",
+        ParseErrorType::FnDuplicatedParam(..) => "ASTER1006",
+        ParseErrorType::MismatchedType(..) => "ASTER1007",
+        ParseErrorType::UnknownOperator(..) => "ASTER1008",
+        _ => "ASTER1099",
+    }
+}
+
+fn parse_error_suggestion(error: &ParseErrorType) -> String {
+    match error {
+        ParseErrorType::UnexpectedEOF => {
+            "Complete the unfinished expression or add the missing closing `}`, `]`, or `)`."
+                .to_owned()
+        }
+        ParseErrorType::MissingToken(token, _) => {
+            format!("Insert the missing `{token}` near the reported position.")
+        }
+        ParseErrorType::MissingSymbol(description) => {
+            format!("Add the required symbol: {description}.")
+        }
+        ParseErrorType::VariableUndefined(name) => format!(
+            "Declare `{name}` with `let` before it is used, correct its spelling, or replace it with an API listed in the Aster Script reference."
+        ),
+        ParseErrorType::AssignmentToConstant(name) => format!(
+            "Do not assign to constant `{name}`. Declare mutable state with `let` if it must change."
+        ),
+        ParseErrorType::FnDuplicatedDefinition(name, arity) => format!(
+            "Keep only one `{name}` function with {arity} parameter(s), or rename the helper function."
+        ),
+        ParseErrorType::FnDuplicatedParam(function, parameter) => format!(
+            "Rename one `{parameter}` parameter in `{function}` so every parameter name is unique."
+        ),
+        ParseErrorType::MismatchedType(expected, actual) => format!(
+            "Change the expression to produce `{expected}` instead of `{actual}`."
+        ),
+        ParseErrorType::UnknownOperator(operator) => format!(
+            "Replace `{operator}` with a supported Aster Script operator."
+        ),
+        _ => "Correct the syntax at the reported location. Compare it with the closest Aster Script example and use only documented engine APIs.".to_owned(),
+    }
+}
+
+fn lifecycle_signature(name: &str) -> &'static str {
+    match name {
+        "on_start" => "Change the declaration to `fn on_start() { ... }`.",
+        "on_update" => "Change the declaration to `fn on_update(dt) { ... }`.",
+        "on_fixed_update" => "Change the declaration to `fn on_fixed_update(fixed_dt) { ... }`.",
+        "on_collision_enter" => {
+            "Use `fn on_collision_enter(other, px, py, pz, nx, ny, nz, is_trigger) { ... }`."
+        }
+        "on_collision_exit" => {
+            "Use `fn on_collision_exit(other, px, py, pz, nx, ny, nz, is_trigger) { ... }`."
+        }
+        _ => "Use the lifecycle signature documented in the Aster Script reference.",
+    }
+}
+
+fn find_function_declaration(
+    source: &str,
+    function_name: &str,
+) -> (Option<usize>, Option<usize>, Option<String>) {
+    let needle = format!("fn {function_name}");
+    for (index, line) in source.lines().enumerate() {
+        if let Some(column) = line.find(&needle) {
+            return (Some(index + 1), Some(column + 1), Some(line.to_owned()));
+        }
+    }
+    (None, None, None)
+}
+
+/// - `project:/path/to/script.aster` → `<asset_root>/path/to/script.aster`
+/// - `builtin:/path/to/script.aster` → `<asset_root>/builtin/path/to/script.aster`
 /// - Relative paths are resolved relative to `asset_root`
 fn resolve_script_path(script_path: &str, asset_root: &Path) -> EngineResult<PathBuf> {
     if let Some(stripped) = script_path.strip_prefix("project:/") {
@@ -4382,7 +4680,7 @@ fn on_start() { value = 100; }
     fn create_script_writes_file_and_compiles() {
         let dir = std::env::temp_dir().join("aster_test_create_script");
         std::fs::create_dir_all(&dir).unwrap();
-        let relative = std::path::PathBuf::from("scripts/ai_generated.rhai");
+        let relative = std::path::PathBuf::from("scripts/ai_generated.aster");
 
         let mut backend = RhaiScriptBackend::new();
         let full_path = backend
@@ -4490,7 +4788,7 @@ fn on_start() {
     #[test]
     fn create_script_creates_parent_directories() {
         let dir = std::env::temp_dir().join("aster_test_create_script_nested");
-        let relative = std::path::PathBuf::from("deep/nested/path/script.rhai");
+        let relative = std::path::PathBuf::from("deep/nested/path/script.aster");
 
         let mut backend = RhaiScriptBackend::new();
         let full_path = backend
@@ -4500,6 +4798,63 @@ fn on_start() {
         assert!(full_path.exists());
         assert!(full_path.parent().unwrap().exists());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn language_service_reports_undefined_variable_with_fix() {
+        let backend = RhaiScriptBackend::new();
+        let diagnostics = backend.diagnose_source(
+            Path::new("scripts/player.aster"),
+            "fn on_update(dt) { translate(speed * dt, 0.0, 0.0); }",
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "ASTER1003");
+        assert_eq!(diagnostics[0].line, Some(1));
+        assert!(diagnostics[0].message.contains("speed"));
+        assert!(diagnostics[0].suggestion.contains("Declare `speed`"));
+    }
+
+    #[test]
+    fn language_service_reports_invalid_lifecycle_signature() {
+        let backend = RhaiScriptBackend::new();
+        let diagnostics =
+            backend.diagnose_source(Path::new("scripts/player.aster"), "fn on_update() {}");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "ASTER0101");
+        assert_eq!(diagnostics[0].line, Some(1));
+        assert!(diagnostics[0].suggestion.contains("fn on_update(dt)"));
+    }
+
+    #[test]
+    fn language_service_requires_aster_extension() {
+        let backend = RhaiScriptBackend::new();
+        let diagnostics =
+            backend.diagnose_source(Path::new("scripts/player.rhai"), "fn on_start() {}");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "ASTER0001");
+        assert!(diagnostics[0].suggestion.contains(".aster"));
+    }
+
+    #[test]
+    fn create_script_does_not_overwrite_file_when_validation_fails() {
+        let dir = std::env::temp_dir().join("aster_test_invalid_script_write");
+        let relative = PathBuf::from("scripts/player.aster");
+        let full_path = dir.join(&relative);
+        std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
+        std::fs::write(&full_path, "fn on_start() {}").unwrap();
+
+        let mut backend = RhaiScriptBackend::new();
+        let result = backend.create_script(&dir, &relative, "fn on_start() { let broken = ; }");
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&full_path).unwrap(),
+            "fn on_start() {}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

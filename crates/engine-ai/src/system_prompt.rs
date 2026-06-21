@@ -47,12 +47,14 @@ explain what you plan to do, then call the appropriate tools.
 5. **Natural language queries**: Use `query_scene_semantic` to find entities before modifying them.
 6. **Conversational responses**: Never call a tool for a request that only needs a conversational answer.
 7. **Complete build plans**: The full project context is already attached to every request. For a build or modification request, do not return a scene query as the only tool unless its result is genuinely required before concrete writes can be proposed.
+8. **Final script acceptance**: After all `.aster` writes are finished, call `check_script` once for all changed scripts. Fix all diagnostics and only then call `complete`. Do not validate after every individual write.
 
 ## Best Practices
 
 - Start with `query_scene_semantic` to understand what entities exist
 - Use `write_script` for all gameplay logic — scripts are powerful and flexible
-- Attach scripts to entities via the `Script` component with `backend: "rhai"`
+- Write Aster Script files with the `.aster` extension
+- Attach them via the `Script` component with internal backend identifier `"rhai"`
 - Provide helpful explanations before calling tools
 - If unsure about entity names/IDs, query first
 - When multiple operations are needed, call them in logical order
@@ -91,7 +93,42 @@ mod tests {
         let prompt = build(&commands);
         assert!(prompt.contains("create_object"));
         assert!(prompt.contains("write_script"));
+        assert!(prompt.contains("check_script"));
         assert!(prompt.contains("tool calling interface"));
         assert!(prompt.contains("natural language"));
+    }
+
+    #[test]
+    fn system_prompt_teaches_aster_script_with_compact_examples() {
+        let prompt = build(&[]);
+        assert!(prompt.contains("Aster Script Examples"));
+        assert!(prompt.contains("scripts/player.aster"));
+        assert!(prompt.contains("### 10. Create a child entity at startup"));
+        assert!(prompt.contains("Do not validate after every individual write"));
+        assert!(!prompt.contains("scripts/player.rhai"));
+    }
+
+    #[test]
+    fn every_aster_example_passes_language_service_validation() {
+        let prompt = build(&[]);
+        let backend = engine_script_rhai::RhaiScriptBackend::new();
+        let examples = prompt
+            .split("```aster\n")
+            .skip(1)
+            .filter_map(|section| section.split("\n```").next())
+            .collect::<Vec<_>>();
+
+        assert_eq!(examples.len(), 10);
+        for (index, example) in examples.into_iter().enumerate() {
+            let diagnostics = backend.diagnose_source(
+                std::path::Path::new("scripts/prompt_example.aster"),
+                example,
+            );
+            assert!(
+                diagnostics.is_empty(),
+                "example {} failed validation: {diagnostics:?}",
+                index + 1
+            );
+        }
     }
 }

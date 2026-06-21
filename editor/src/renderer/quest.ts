@@ -1,4 +1,6 @@
 import { rpc } from './api';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 export type QuestStatus =
   | 'draft'
@@ -17,6 +19,38 @@ export type QuestStatus =
   | 'canceled'
   | 'archived';
 
+export type QuestMode = 'solo' | 'extra';
+
+export type QuestProvider =
+  | 'inherit'
+  | 'stub'
+  | 'anthropic'
+  | 'openai'
+  | 'codex_oauth'
+  | 'gemini'
+  | 'ollama'
+  | 'custom'
+  | 'mimo'
+  | 'deepseek'
+  | 'glm';
+
+export type QuestThinkingEffort = 'off' | 'low' | 'medium' | 'high';
+
+export interface QuestModelConfig {
+  provider: QuestProvider | string;
+  model: string;
+  api_endpoint?: string | null;
+  max_tokens: number;
+  thinking_effort: QuestThinkingEffort | string;
+}
+
+export interface QuestAutonomyPolicy {
+  workspace_writes_automatic: boolean;
+  active_project_apply_requires_approval: boolean;
+  allowlisted_commands_automatic: boolean;
+  high_risk_requires_confirmation: boolean;
+}
+
 export interface QuestNextAction {
   label: string;
   reason: string;
@@ -32,6 +66,9 @@ export interface QuestRecord {
     name: string;
     path: string;
   };
+  mode: QuestMode;
+  model_config: QuestModelConfig;
+  autonomy: QuestAutonomyPolicy;
   created_at_ms: number;
   updated_at_ms: number;
   workspace_id: string | null;
@@ -168,8 +205,96 @@ export function getQuest(id: string): Promise<QuestDetail> {
   return rpc('quest/get', { id });
 }
 
-export function createQuest(title: string, goal: string): Promise<QuestDetail> {
-  return rpc('quest/create', { title, goal });
+interface QuestAiStreamEvent {
+  request_id: string;
+  kind: 'text' | 'thinking' | 'tool_call';
+  delta: string;
+}
+
+export interface QuestAiStreamHandle<T> {
+  promise: Promise<T>;
+  cancel: () => void;
+}
+
+let nextQuestAiRequestId = 1;
+
+function streamQuestAiRequest<T>(
+  kind: 'create' | 'rewrite',
+  params: Record<string, unknown>,
+  onDelta?: (delta: string, kind: QuestAiStreamEvent['kind']) => void,
+): QuestAiStreamHandle<T> {
+  const requestId = `${Date.now()}-${nextQuestAiRequestId++}`;
+  let rejectCancelled: ((reason?: unknown) => void) | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    rejectCancelled = reject;
+  });
+  let resolveComplete: (() => void) | undefined;
+  const completed = new Promise<void>((resolve) => {
+    resolveComplete = resolve;
+  });
+
+  const setupPromise = (async () => {
+    const unlistenDelta = await listen<QuestAiStreamEvent>('quest-ai-stream', event => {
+      if (event.payload.request_id === requestId) {
+        onDelta?.(event.payload.delta, event.payload.kind ?? 'text');
+      }
+    });
+    const unlistenComplete = await listen<{ request_id: string }>('quest-ai-stream-complete', event => {
+      if (event.payload.request_id === requestId) {
+        resolveComplete?.();
+      }
+    });
+
+    try {
+      await invoke('start_quest_ai_request', { requestId, kind, params });
+      await completed;
+      return await invoke<T>('finish_quest_ai_request', { requestId });
+    } finally {
+      unlistenDelta();
+      unlistenComplete();
+    }
+  })();
+
+  return {
+    promise: Promise.race([setupPromise, cancelled]),
+    cancel: () => {
+      rejectCancelled?.(new Error('cancelled'));
+      rejectCancelled = undefined;
+      invoke('cancel_quest_ai_request', { requestId }).catch(() => {});
+    },
+  };
+}
+
+export function createQuest(
+  title: string,
+  goal: string,
+  options?: { mode?: QuestMode; model_config?: QuestModelConfig },
+): Promise<QuestDetail> {
+  return streamQuestAiRequest<QuestDetail>('create', { title, goal, ...options }).promise;
+}
+
+export interface OpenAIRealtimeTranscriptionSession {
+  session: {
+    client_secret?: {
+      value?: string;
+    };
+    [key: string]: unknown;
+  };
+  model: 'gpt-realtime-whisper' | string;
+  endpoint: string;
+  realtime_url: string;
+}
+
+export function createOpenAIRealtimeTranscriptionSession(): Promise<OpenAIRealtimeTranscriptionSession> {
+  return invoke('create_openai_realtime_transcription_session');
+}
+
+export function rewriteQuestPrompt(
+  prompt: string,
+  modelConfig?: QuestModelConfig,
+  onDelta?: (delta: string, kind: QuestAiStreamEvent['kind']) => void,
+): QuestAiStreamHandle<{ prompt: string }> {
+  return streamQuestAiRequest('rewrite', { prompt, model_config: modelConfig }, onDelta);
 }
 
 export function promoteQuest(prompt: string, context: string): Promise<QuestDetail> {
@@ -182,6 +307,15 @@ export function updateQuestSpec(id: string, spec: string): Promise<QuestDetail> 
 
 export function updateQuestIntent(id: string, intent: string): Promise<QuestDetail> {
   return rpc('quest/update_intent', { id, intent });
+}
+
+export function updateQuestExecutionConfig(
+  id: string,
+  mode: QuestMode,
+  modelConfig: QuestModelConfig,
+  autonomy?: QuestAutonomyPolicy,
+): Promise<QuestDetail> {
+  return rpc('quest/update_execution_config', { id, mode, model_config: modelConfig, autonomy });
 }
 
 export function updateQuestKnowledgeContext(id: string, knowledgeIds: string[]): Promise<QuestDetail> {

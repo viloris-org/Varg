@@ -34,6 +34,7 @@ tracing-appender.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor.workspace = true
+engine-script-rhai.workspace = true
 engine-i18n.workspace = true
 engine-render.workspace = true
 engine-render-wgpu.workspace = true

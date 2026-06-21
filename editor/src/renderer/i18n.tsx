@@ -51,7 +51,7 @@ export function I18nProvider({
   const loadTranslations = useCallback(async (loc: string) => {
     setLoading(true);
     try {
-      const result = await rpc<TranslationsPayload>('hub/get_translations');
+      const result = await rpc<TranslationsPayload>('hub/get_translations', { locale: loc });
       const entryMap: Record<string, string> = {};
       for (const { key, value } of result.entries) {
         entryMap[key] = value;
@@ -67,7 +67,7 @@ export function I18nProvider({
   // Load on mount
   useEffect(() => {
     loadTranslations(locale);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadTranslations, locale]);
 
   // Reload when locale changes
   useEffect(() => {

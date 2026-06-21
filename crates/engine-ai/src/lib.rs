@@ -225,12 +225,17 @@ pub enum AgentOperation {
         #[serde(default)]
         params: serde_json::Value,
     },
-    /// Create or update a Rhai script file.
+    /// Create or update an Aster Script file.
     WriteScript {
-        /// Path relative to the asset root (e.g. "scripts/player.rhai").
+        /// Path relative to the asset root (e.g. "scripts/player.aster").
         path: String,
-        /// Rhai source code.
+        /// Aster Script source code.
         source: String,
+    },
+    /// Run final language-service validation on one or more Aster Script files.
+    CheckScript {
+        /// Paths relative to the asset root.
+        paths: Vec<String>,
     },
     /// Create or update a text file relative to the project root.
     WriteFile {
@@ -397,6 +402,7 @@ impl AgentOperation {
         match self {
             Self::ExecuteCommand { .. } => "execute_command",
             Self::WriteScript { .. } => "write_script",
+            Self::CheckScript { .. } => "check_script",
             Self::WriteFile { .. } => "write_file",
             Self::CreateObject { .. } => "create_object",
             Self::SetProperty { .. } => "set_property",
@@ -774,6 +780,61 @@ impl AgentSession {
                         line: None,
                     },
                     message: format!("Created script: {path}"),
+                });
+                Ok(())
+            }
+            AgentOperation::CheckScript { paths } => {
+                if paths.is_empty() {
+                    return Err(EngineError::config(
+                        "check_script requires at least one .aster path",
+                    ));
+                }
+                let mut error_count = 0usize;
+                for path in paths {
+                    let relative = sanitize_project_relative_path(path)?;
+                    let full_path = self.asset_root.join(&relative);
+                    let diagnostics = self.script_backend.diagnose_file(&full_path)?;
+                    for diagnostic in diagnostics {
+                        error_count += 1;
+                        self.console.push(ConsoleEntry {
+                            timestamp: "now".into(),
+                            level: ConsoleLevel::Error,
+                            source: ConsoleSource {
+                                subsystem: "aster-language-service".into(),
+                                file: Some(full_path.clone()),
+                                line: diagnostic.line.map(|line| line as u32),
+                            },
+                            message: format!(
+                                "{}: {} Suggestion: {}{}",
+                                diagnostic.code,
+                                diagnostic.message,
+                                diagnostic.suggestion,
+                                diagnostic
+                                    .source_line
+                                    .as_ref()
+                                    .map(|line| format!(" Source: `{}`", line.trim()))
+                                    .unwrap_or_default()
+                            ),
+                        });
+                    }
+                }
+                if error_count > 0 {
+                    return Err(EngineError::config(format!(
+                        "Aster Script acceptance failed with {error_count} diagnostic(s). Fix every diagnostic and run check_script again."
+                    )));
+                }
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "aster-language-service".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message: format!(
+                        "Aster Script acceptance passed for {} file(s).",
+                        paths.len()
+                    ),
                 });
                 Ok(())
             }
@@ -1736,6 +1797,7 @@ struct OperationAccess {
 fn operation_access(operation: &AgentOperation) -> OperationAccess {
     match operation {
         AgentOperation::ReadFile { .. }
+        | AgentOperation::CheckScript { .. }
         | AgentOperation::Complete { .. }
         | AgentOperation::QueryDependencyGraph { .. }
         | AgentOperation::QuerySceneSemantic { .. }
@@ -1838,7 +1900,10 @@ fn preview_operation(operation: &AgentOperation) -> String {
             format!("Execute editor command `{command}`")
         }
         AgentOperation::WriteScript { path, .. } => {
-            format!("Create or update Rhai script `{path}`")
+            format!("Create or update Aster Script `{path}`")
+        }
+        AgentOperation::CheckScript { paths } => {
+            format!("Validate {} Aster Script file(s)", paths.len())
         }
         AgentOperation::WriteFile { path, .. } => {
             format!("Create or update project file `{path}`")
@@ -1953,6 +2018,9 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         AgentOperation::WriteScript { .. } | AgentOperation::WriteFile { .. } => {
             "Review the generated script under the asset root and use version control or file history to revert it."
         }
+        AgentOperation::CheckScript { .. } => {
+            "No recovery needed; language-service validation is read-only."
+        }
         AgentOperation::ReadFile { .. }
         | AgentOperation::QuerySceneSemantic { .. } => {
             "No recovery needed; this operation only read project data."
@@ -1988,6 +2056,9 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
     match operation {
         AgentOperation::WriteScript { .. } => {
             "Fix the script path or source, then regenerate or reapply the plan."
+        }
+        AgentOperation::CheckScript { .. } => {
+            "Apply each diagnostic suggestion, then run check_script once more as the final acceptance step."
         }
         AgentOperation::WriteFile { .. } => {
             "Fix the file path or content, then regenerate or reapply the plan."
@@ -2091,6 +2162,18 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let path = args["path"].as_str().unwrap_or("").to_owned();
             let source = args["source"].as_str().unwrap_or("").to_owned();
             Ok(AgentOperation::WriteScript { path, source })
+        }
+        "check_script" => {
+            let paths = args["paths"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(|path| path.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(AgentOperation::CheckScript { paths })
         }
         "write_file" => {
             let path = args["path"].as_str().unwrap_or("").to_owned();
@@ -2280,14 +2363,30 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write_script".into(),
-            description: "Create or update a Rhai script file in the project.".into(),
+            description: "Create or update an Aster Script file in the project.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to asset root, e.g. scripts/player.rhai" },
-                    "source": { "type": "string", "description": "Rhai source code" }
+                    "path": { "type": "string", "description": "Path relative to asset root, using the .aster extension, e.g. scripts/player.aster" },
+                    "source": { "type": "string", "description": "Aster Script source code" }
                 },
                 "required": ["path", "source"]
+            }),
+        },
+        ToolDefinition {
+            name: "check_script".into(),
+            description: "Run strict final acceptance validation for one or more .aster files. Returns precise diagnostics with location, cause, source line, and a concrete fix suggestion. Call once after all script edits, before complete.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Asset-root-relative .aster paths to validate together"
+                    }
+                },
+                "required": ["paths"]
             }),
         },
         ToolDefinition {
@@ -2547,6 +2646,30 @@ mod tests {
 
         let entity = parse_entity_id("entity:2:3").unwrap();
         assert_eq!(entity.handle().slot(), 2);
+    }
+
+    #[test]
+    fn check_script_tool_is_exposed_as_read_only_final_validation() {
+        let tool = agent_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == "check_script")
+            .expect("check_script tool should be exposed");
+        assert!(tool.description.contains("final acceptance"));
+        assert_eq!(tool.parameters["required"][0], "paths");
+
+        let operation = tool_call_to_operation(&ToolCall {
+            id: "check-1".into(),
+            name: "check_script".into(),
+            arguments: serde_json::json!({
+                "paths": ["scripts/player.aster", "scripts/enemy.aster"]
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            operation,
+            AgentOperation::CheckScript { ref paths } if paths.len() == 2
+        ));
+        assert!(!operation_access(&operation).requires_write);
     }
 
     #[test]

@@ -179,6 +179,7 @@ dependencies = [
  "engine-i18n",
  "engine-render",
  "engine-render-wgpu",
+ "engine-script-rhai",
  "image",
  "rfd",
  "runtime-min",

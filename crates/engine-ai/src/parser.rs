@@ -121,7 +121,7 @@ mod tests {
         let input = r#"Here are the operations:
 ```json
 [
-    {"action": "write_script", "path": "test.rhai", "source": "fn on_start() {}"}
+    {"action": "write_script", "path": "test.aster", "source": "fn on_start() {}"}
 ]
 ```
 Done."#;

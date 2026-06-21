@@ -1,0 +1,25 @@
+model Barrel {
+  mesh = asset("models/barrel.glb")
+  material = ref("materials/rusted_metal.amat")
+
+  collider capsule {
+    radius = 0.45m
+    height = 1.2m
+  }
+
+  rigidbody dynamic {
+    mass = 18kg
+    friction = 0.8
+    restitution = 0.2
+  }
+
+  socket Top {
+    position = [0, 1.2, 0]
+    rotation = [0, 0, 0]
+  }
+
+  lod 1 {
+    mesh = asset("models/barrel_low.glb")
+    distance = 25m
+  }
+}

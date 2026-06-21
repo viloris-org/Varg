@@ -868,7 +868,7 @@ pub enum ScriptTemplateBackend {
     /// Python script using the runtime-min subprocess context API.
     #[default]
     Python,
-    /// Rhai script using the engine-script-rhai lifecycle API.
+    /// Aster Script using the engine-script-rhai lifecycle API.
     Rhai,
 }
 
@@ -877,7 +877,7 @@ impl ScriptTemplateBackend {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Python => "py",
-            Self::Rhai => "rhai",
+            Self::Rhai => "aster",
         }
     }
 
