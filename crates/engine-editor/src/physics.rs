@@ -6,8 +6,46 @@ use engine_core::EntityId;
 use engine_ecs::{ColliderComponentData, ComponentData, Scene};
 use engine_physics::{
     BodyHandle, BodyKind, ColliderDesc, ColliderHandle, ColliderShape, PhysicsWorld, RigidbodyDesc,
-    built_in_physical_material,
+    Vec3, built_in_physical_material,
 };
+
+/// Distance-based activation settings for large scenes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsActivationConfig {
+    /// Center of the active physics area, typically the player or camera.
+    pub center: Vec3,
+    /// Entities within this radius are bound into the physics backend.
+    pub active_radius: f32,
+    /// Already-bound entities beyond this radius are removed from the backend.
+    pub release_radius: f32,
+    /// Dynamic entities beyond this radius are put to sleep while still bound.
+    pub sleep_radius: f32,
+}
+
+impl PhysicsActivationConfig {
+    /// Creates activation settings with a release hysteresis band.
+    pub fn new(center: Vec3, active_radius: f32) -> Self {
+        let active_radius = active_radius.max(0.0);
+        Self {
+            center,
+            active_radius,
+            release_radius: active_radius * 1.25,
+            sleep_radius: active_radius,
+        }
+    }
+
+    fn should_activate(&self, position: Vec3) -> bool {
+        distance_squared(position, self.center) <= self.active_radius * self.active_radius
+    }
+
+    fn should_release(&self, position: Vec3) -> bool {
+        distance_squared(position, self.center) > self.release_radius * self.release_radius
+    }
+
+    fn should_sleep(&self, position: Vec3) -> bool {
+        distance_squared(position, self.center) > self.sleep_radius * self.sleep_radius
+    }
+}
 
 /// Synchronizes ECS RigidbodyComponent/ColliderComponent with the physics backend.
 ///
@@ -18,6 +56,8 @@ pub struct PhysicsSync {
     body_map: HashMap<EntityId, (BodyHandle, BodyKind)>,
     /// Mapping from (entity ID, collider index) to collider handle.
     collider_map: HashMap<(EntityId, usize), ColliderHandle>,
+    /// Optional distance-based activation for large scenes.
+    activation: Option<PhysicsActivationConfig>,
 }
 
 impl Default for PhysicsSync {
@@ -32,11 +72,30 @@ impl PhysicsSync {
         Self {
             body_map: HashMap::new(),
             collider_map: HashMap::new(),
+            activation: None,
+        }
+    }
+
+    /// Sets distance-based activation settings.
+    pub fn set_activation(&mut self, activation: Option<PhysicsActivationConfig>) {
+        self.activation = activation;
+    }
+
+    /// Returns the current activation settings.
+    pub fn activation(&self) -> Option<PhysicsActivationConfig> {
+        self.activation
+    }
+
+    /// Updates the activation center without changing configured radii.
+    pub fn set_activation_center(&mut self, center: Vec3) {
+        if let Some(activation) = &mut self.activation {
+            activation.center = center;
         }
     }
 
     /// Synchronizes creation: creates physics bodies for entities with RigidbodyComponent
-    /// that don't yet have a body handle, and creates colliders for ColliderComponents.
+    /// that don't yet have a body handle, creates colliders for ColliderComponents,
+    /// and applies configured distance-based activation.
     pub fn sync_creation(
         &mut self,
         scene: &Scene,
@@ -55,6 +114,15 @@ impl PhysicsSync {
             let Some(rb_data) = rigidbody else {
                 continue;
             };
+
+            if let Some(activation) = self.activation {
+                let transform = scene.transforms().local(entity).unwrap_or_default();
+                if !self.body_map.contains_key(&object.id)
+                    && !activation.should_activate(transform.translation)
+                {
+                    continue;
+                }
+            }
 
             let body = match self.body_map.get(&object.id).copied() {
                 Some((handle, _)) => handle,
@@ -107,7 +175,55 @@ impl PhysicsSync {
             }
         }
 
+        if self.activation.is_some() {
+            let _ = self.sync_activation(scene, physics)?;
+        }
+
         Ok(())
+    }
+
+    /// Applies distance-based activation and returns entity IDs that were released.
+    pub fn sync_activation(
+        &mut self,
+        scene: &Scene,
+        physics: &mut PhysicsWorld,
+    ) -> engine_core::EngineResult<Vec<EntityId>> {
+        let Some(activation) = self.activation else {
+            return Ok(Vec::new());
+        };
+
+        let bodies_to_release = self
+            .body_map
+            .iter()
+            .filter_map(|(eid, (handle, _))| {
+                let entity = scene.find_by_id(*eid)?;
+                let transform = scene.transforms().local(entity).unwrap_or_default();
+                activation
+                    .should_release(transform.translation)
+                    .then_some((*eid, *handle))
+            })
+            .collect::<Vec<_>>();
+
+        let mut released = Vec::new();
+        for (eid, handle) in bodies_to_release {
+            self.remove_binding(eid, handle, physics);
+            released.push(eid);
+        }
+
+        for (eid, (body_handle, body_kind)) in &self.body_map {
+            if *body_kind != BodyKind::Dynamic {
+                continue;
+            }
+            let Some(entity) = scene.find_by_id(*eid) else {
+                continue;
+            };
+            let transform = scene.transforms().local(entity).unwrap_or_default();
+            physics
+                .backend_mut()
+                .set_body_sleep(*body_handle, activation.should_sleep(transform.translation))?;
+        }
+
+        Ok(released)
     }
 
     /// Synchronizes destruction: removes physics bodies for entities that have been destroyed.
@@ -131,21 +247,7 @@ impl PhysicsSync {
             .collect();
 
         for (eid, handle) in bodies_to_remove {
-            let colliders_to_remove: Vec<_> = self
-                .collider_map
-                .iter()
-                .filter(|((entity_id, _), _)| *entity_id == eid)
-                .map(|(_, collider)| *collider)
-                .collect();
-
-            for collider_handle in colliders_to_remove {
-                let _ = physics.backend_mut().remove_collider(collider_handle);
-            }
-            self.collider_map
-                .retain(|(entity_id, _), _| *entity_id != eid);
-
-            let _ = physics.backend_mut().destroy_body(handle);
-            self.body_map.remove(&eid);
+            self.remove_binding(eid, handle, physics);
             destroyed.push(eid);
         }
 
@@ -205,6 +307,29 @@ impl PhysicsSync {
     pub fn collider_count(&self) -> usize {
         self.collider_map.len()
     }
+
+    fn remove_binding(
+        &mut self,
+        entity_id: EntityId,
+        body_handle: BodyHandle,
+        physics: &mut PhysicsWorld,
+    ) {
+        let colliders_to_remove: Vec<_> = self
+            .collider_map
+            .iter()
+            .filter(|((mapped_entity_id, _), _)| *mapped_entity_id == entity_id)
+            .map(|(_, collider)| *collider)
+            .collect();
+
+        for collider_handle in colliders_to_remove {
+            let _ = physics.backend_mut().remove_collider(collider_handle);
+        }
+        self.collider_map
+            .retain(|(mapped_entity_id, _), _| *mapped_entity_id != entity_id);
+
+        let _ = physics.backend_mut().destroy_body(body_handle);
+        self.body_map.remove(&entity_id);
+    }
 }
 
 /// Helper to convert ColliderComponentData to ColliderShape.
@@ -220,6 +345,11 @@ fn collider_shape_from_data(data: &ColliderComponentData) -> ColliderShape {
         },
         _ => ColliderShape::Box { half_extents: half },
     }
+}
+
+fn distance_squared(left: Vec3, right: Vec3) -> f32 {
+    let delta = left - right;
+    delta.length_squared()
 }
 
 #[cfg(feature = "physics")]
@@ -314,6 +444,131 @@ mod tests {
         sync.sync_creation(&scene, &mut world).unwrap();
 
         assert_eq!(sync.body_count(), 0);
+    }
+
+    #[test]
+    fn physics_sync_activation_skips_far_entities_until_they_enter_range() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("FarObject").unwrap();
+        scene.transforms_mut().set_local(
+            entity,
+            engine_core::math::Transform {
+                translation: Vec3::new(100.0, 0.0, 0.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        scene
+            .upsert_component(
+                entity,
+                ComponentData::Rigidbody(RigidbodyComponentData::default()),
+            )
+            .unwrap();
+
+        let mut sync = PhysicsSync::new();
+        sync.set_activation(Some(PhysicsActivationConfig::new(Vec3::ZERO, 10.0)));
+        let mut world = PhysicsWorld::new(SimplePhysicsBackend::new());
+
+        sync.sync_creation(&scene, &mut world).unwrap();
+        assert_eq!(sync.body_count(), 0);
+
+        scene.transforms_mut().set_local(
+            entity,
+            engine_core::math::Transform {
+                translation: Vec3::new(5.0, 0.0, 0.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        sync.sync_creation(&scene, &mut world).unwrap();
+
+        assert_eq!(sync.body_count(), 1);
+    }
+
+    #[test]
+    fn physics_sync_activation_releases_bodies_outside_release_radius() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("StreamingObject").unwrap();
+        let object_id = scene.object(entity).unwrap().id;
+        scene
+            .upsert_component(
+                entity,
+                ComponentData::Rigidbody(RigidbodyComponentData::default()),
+            )
+            .unwrap();
+        scene
+            .upsert_component(
+                entity,
+                ComponentData::Collider(ColliderComponentData::default()),
+            )
+            .unwrap();
+
+        let mut sync = PhysicsSync::new();
+        sync.set_activation(Some(PhysicsActivationConfig::new(Vec3::ZERO, 10.0)));
+        let mut world = PhysicsWorld::new(SimplePhysicsBackend::new());
+
+        sync.sync_creation(&scene, &mut world).unwrap();
+        assert_eq!(sync.body_count(), 1);
+        assert_eq!(sync.collider_count(), 1);
+
+        scene.transforms_mut().set_local(
+            entity,
+            engine_core::math::Transform {
+                translation: Vec3::new(20.0, 0.0, 0.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        let released = sync.sync_activation(&scene, &mut world).unwrap();
+
+        assert_eq!(released, vec![object_id]);
+        assert_eq!(sync.body_count(), 0);
+        assert_eq!(sync.collider_count(), 0);
+        assert_eq!(world.stats().body_count, 0);
+    }
+
+    #[test]
+    fn physics_sync_activation_sleeps_dynamic_bodies_outside_sleep_radius() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("SleepyObject").unwrap();
+        scene.transforms_mut().set_local(
+            entity,
+            engine_core::math::Transform {
+                translation: Vec3::new(9.0, 0.0, 0.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        scene
+            .upsert_component(
+                entity,
+                ComponentData::Rigidbody(RigidbodyComponentData {
+                    body_type: "dynamic".to_string(),
+                    ..RigidbodyComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let mut sync = PhysicsSync::new();
+        sync.set_activation(Some(PhysicsActivationConfig {
+            center: Vec3::ZERO,
+            active_radius: 10.0,
+            release_radius: 20.0,
+            sleep_radius: 8.0,
+        }));
+        let mut world = PhysicsWorld::new(SimplePhysicsBackend::new());
+
+        sync.sync_creation(&scene, &mut world).unwrap();
+        sync.sync_activation(&scene, &mut world).unwrap();
+
+        assert_eq!(world.stats().sleeping_count, 1);
+
+        scene.transforms_mut().set_local(
+            entity,
+            engine_core::math::Transform {
+                translation: Vec3::new(2.0, 0.0, 0.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+        );
+        sync.sync_activation(&scene, &mut world).unwrap();
+
+        assert_eq!(world.stats().sleeping_count, 0);
     }
 
     #[test]

@@ -53,3 +53,48 @@ Runtime telemetry exposes:
 Actual pass-level GPU timing remains a required follow-up before performance
 budgets can be enforced per shadow, forward, SSAO, bloom, and post-processing
 pass.
+
+## Physics stress policy
+
+The MVP physics target is not "full open world simulation everywhere". It is a
+bounded bad-case scene that keeps the active physics set healthy when gameplay,
+queries, triggers, and collision events spike around the player.
+
+Run the Rapier stress benchmark:
+
+```bash
+cargo run -p engine-physics --features rapier --release --example stress_benchmark
+```
+
+The default scenario creates:
+
+- 1 large ground collider.
+- 32×32 static obstacle colliders.
+- 768 dynamic rigid bodies, with CCD enabled on every tenth body.
+- 16×16 trigger volumes.
+- 512 raycast/overlap/sweep queries per fixed step.
+- 240 measured fixed steps after warmup.
+
+Environment overrides:
+
+```text
+ASTER_PHYSICS_BENCH_FRAMES=240
+ASTER_PHYSICS_STATIC_GRID=32
+ASTER_PHYSICS_DYNAMIC_BODIES=768
+ASTER_PHYSICS_TRIGGER_GRID=16
+ASTER_PHYSICS_QUERY_COUNT=512
+ASTER_PHYSICS_DT=0.016666667
+```
+
+Interpretation:
+
+- `step_us p95` should stay below the fixed-step budget on the target machine.
+- `max` is useful for spotting pathological stalls but should not be treated as
+  a deterministic CI threshold.
+- `frame_wall_ms` includes benchmark query work around the physics step.
+- `stats sleeping` should rise once the pile settles; if it does not, inspect
+  damping, rest thresholds, and constantly-woken contact/event paths.
+
+For open-world work, scale active bodies by streaming radius rather than total
+map size. Static terrain and far-away objects should be chunked, unloaded,
+represented by coarse colliders, or left outside the active physics world.
