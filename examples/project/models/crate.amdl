@@ -1,17 +1,21 @@
-model Crate {
-  mesh = primitive.box(size: [1, 1, 1])
+amdl 2
 
-  material = material {
+model Crate {
+  mesh primitive.box {
+    size = [1, 1, 1]
+  }
+
+  material inline {
     base_color = "#8a5a2b"
     roughness = 0.75
     metallic = 0.0
   }
 
-  collider = collider.box {
+  collider box {
     size = [1, 1, 1]
   }
 
-  rigidbody = dynamic {
+  rigidbody dynamic {
     mass = 12kg
   }
 }

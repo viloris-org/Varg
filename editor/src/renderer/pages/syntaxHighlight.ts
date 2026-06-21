@@ -46,12 +46,12 @@ const PY_RULES: TokenRule[] = [
 
 // ─── Aster Model Language ──────────────────────────────────────────────────
 
-const AMDL_KEYWORDS = /\b(model|mesh|material|collider|rigidbody|socket|lod|metadata|asset|ref|primitive|static|dynamic|kinematic|true|false)\b/g;
-const AMDL_CONSTRUCTORS = /\b(?:primitive|collider)\.[A-Za-z_][A-Za-z0-9_-]*\b/g;
+const AMDL_KEYWORDS = /\b(amdl|model|mesh|material|collider|rigidbody|socket|lod|metadata|asset|ref|inline|primitive|static|dynamic|kinematic|true|false)\b/g;
+const AMDL_CONSTRUCTORS = /\bprimitive\.[A-Za-z_][A-Za-z0-9_-]*\b/g;
 const AMDL_STRING = /"(?:[^"\\]|\\.)*"/g;
 const AMDL_NUMBER = /-?\b\d+(?:\.\d+)?(?:[a-zA-Z_%]+)?\b/g;
 const AMDL_COMMENT_SINGLE = /\/\/[^\n]*|#[^\n]*/g;
-const AMDL_OPERATOR = /[=:\[\]{},().]/g;
+const AMDL_OPERATOR = /[=\[\]{},.]/g;
 
 const AMDL_RULES: TokenRule[] = [
   { pattern: AMDL_COMMENT_SINGLE, className: 'text-[#546E7A] italic' },

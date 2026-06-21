@@ -115,7 +115,7 @@ export const settingsSelectOptionClass = 'bg-[var(--bg-surface)] text-[var(--tex
 
 export function themeOptionClass(active: boolean): string {
   return active
-    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-[var(--accent)] px-2 font-[var(--font-sans)] text-xs leading-none text-white transition-colors duration-[120ms] ease-in'
+    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-[var(--brand)] px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--bg-base)] shadow-[var(--shadow-sm)] transition-colors duration-[120ms] ease-in hover:bg-[var(--brand-hover)]'
     : 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-transparent px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--text-muted)] transition-colors duration-[120ms] ease-in hover:text-[var(--text-primary)]';
 }
 

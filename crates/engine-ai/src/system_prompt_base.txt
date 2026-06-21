@@ -387,14 +387,22 @@ no loops, conditions, scene placement, or gameplay logic.
 
 Short example:
 ```amdl
+amdl 2
+
 model Crate {
-  mesh = primitive.box(size: [1, 1, 1])
-  material = material {
+  mesh primitive.box {
+    size = [1, 1, 1]
+  }
+  material inline {
     base_color = "#8a5a2b"
     roughness = 0.75
   }
-  collider = collider.box { size = [1, 1, 1] }
-  rigidbody = dynamic { mass = 12kg }
+  collider box {
+    size = [1, 1, 1]
+  }
+  rigidbody dynamic {
+    mass = 12kg
+  }
 }
 ```
 
@@ -415,6 +423,16 @@ cause, source line, and suggestion; then run the final check again. Do not call
 
 ```json
 { "action": "check_script", "paths": ["scripts/player.aster", "scripts/enemy.aster"] }
+```
+
+### check_amdl — Final AMDL model acceptance
+After all `.amdl` edits are complete, call `check_amdl` once with every changed
+model declaration. Fix every diagnostic using its location, cause, source line,
+and suggestion; then run the final check again. Do not call `complete` until the
+final check passes.
+
+```json
+{ "action": "check_amdl", "paths": ["models/crate.amdl"] }
 ```
 
 ### create_object — Create entity with components

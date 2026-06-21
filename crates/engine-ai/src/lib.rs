@@ -237,6 +237,11 @@ pub enum AgentOperation {
         /// Paths relative to the asset root.
         paths: Vec<String>,
     },
+    /// Run final language-service validation on one or more AMDL model files.
+    CheckAmdl {
+        /// Paths relative to the asset root.
+        paths: Vec<String>,
+    },
     /// Create or update a text file relative to the project root.
     WriteFile {
         /// Path relative to the project root.
@@ -403,6 +408,7 @@ impl AgentOperation {
             Self::ExecuteCommand { .. } => "execute_command",
             Self::WriteScript { .. } => "write_script",
             Self::CheckScript { .. } => "check_script",
+            Self::CheckAmdl { .. } => "check_amdl",
             Self::WriteFile { .. } => "write_file",
             Self::CreateObject { .. } => "create_object",
             Self::SetProperty { .. } => "set_property",
@@ -835,6 +841,69 @@ impl AgentSession {
                         "Aster Script acceptance passed for {} file(s).",
                         paths.len()
                     ),
+                });
+                Ok(())
+            }
+            AgentOperation::CheckAmdl { paths } => {
+                if paths.is_empty() {
+                    return Err(EngineError::config(
+                        "check_amdl requires at least one .amdl path",
+                    ));
+                }
+                let mut error_count = 0usize;
+                for path in paths {
+                    let relative = sanitize_project_relative_path(path)?;
+                    if relative.extension().and_then(|ext| ext.to_str()) != Some("amdl") {
+                        return Err(EngineError::config(format!(
+                            "check_amdl path must use .amdl extension: {path}"
+                        )));
+                    }
+                    let full_path = self.asset_root.join(&relative);
+                    let source = std::fs::read_to_string(&full_path).map_err(|source| {
+                        EngineError::Filesystem {
+                            path: full_path.clone(),
+                            source,
+                        }
+                    })?;
+                    let diagnostics = engine_assets::diagnose_amdl(&source);
+                    for diagnostic in diagnostics {
+                        error_count += 1;
+                        self.console.push(ConsoleEntry {
+                            timestamp: "now".into(),
+                            level: ConsoleLevel::Error,
+                            source: ConsoleSource {
+                                subsystem: "amdl-language-service".into(),
+                                file: Some(full_path.clone()),
+                                line: diagnostic.line.map(|line| line as u32),
+                            },
+                            message: format!(
+                                "{}: {} Suggestion: {}{}",
+                                diagnostic.code,
+                                diagnostic.message,
+                                diagnostic.suggestion,
+                                diagnostic
+                                    .source_line
+                                    .as_ref()
+                                    .map(|line| format!(" Source: `{}`", line.trim()))
+                                    .unwrap_or_default()
+                            ),
+                        });
+                    }
+                }
+                if error_count > 0 {
+                    return Err(EngineError::config(format!(
+                        "AMDL acceptance failed with {error_count} diagnostic(s). Fix every diagnostic and run check_amdl again."
+                    )));
+                }
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "amdl-language-service".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message: format!("AMDL acceptance passed for {} file(s).", paths.len()),
                 });
                 Ok(())
             }
@@ -1798,6 +1867,7 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
     match operation {
         AgentOperation::ReadFile { .. }
         | AgentOperation::CheckScript { .. }
+        | AgentOperation::CheckAmdl { .. }
         | AgentOperation::Complete { .. }
         | AgentOperation::QueryDependencyGraph { .. }
         | AgentOperation::QuerySceneSemantic { .. }
@@ -1904,6 +1974,9 @@ fn preview_operation(operation: &AgentOperation) -> String {
         }
         AgentOperation::CheckScript { paths } => {
             format!("Validate {} Aster Script file(s)", paths.len())
+        }
+        AgentOperation::CheckAmdl { paths } => {
+            format!("Validate {} AMDL model file(s)", paths.len())
         }
         AgentOperation::WriteFile { path, .. } => {
             format!("Create or update project file `{path}`")
@@ -2018,7 +2091,7 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         AgentOperation::WriteScript { .. } | AgentOperation::WriteFile { .. } => {
             "Review the generated script under the asset root and use version control or file history to revert it."
         }
-        AgentOperation::CheckScript { .. } => {
+        AgentOperation::CheckScript { .. } | AgentOperation::CheckAmdl { .. } => {
             "No recovery needed; language-service validation is read-only."
         }
         AgentOperation::ReadFile { .. }
@@ -2059,6 +2132,9 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
         }
         AgentOperation::CheckScript { .. } => {
             "Apply each diagnostic suggestion, then run check_script once more as the final acceptance step."
+        }
+        AgentOperation::CheckAmdl { .. } => {
+            "Apply each AMDL diagnostic suggestion, then run check_amdl once more as the final acceptance step."
         }
         AgentOperation::WriteFile { .. } => {
             "Fix the file path or content, then regenerate or reapply the plan."
@@ -2174,6 +2250,18 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
                 })
                 .unwrap_or_default();
             Ok(AgentOperation::CheckScript { paths })
+        }
+        "check_amdl" => {
+            let paths = args["paths"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(|path| path.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(AgentOperation::CheckAmdl { paths })
         }
         "write_file" => {
             let path = args["path"].as_str().unwrap_or("").to_owned();
@@ -2384,6 +2472,22 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                         "items": { "type": "string" },
                         "minItems": 1,
                         "description": "Asset-root-relative .aster paths to validate together"
+                    }
+                },
+                "required": ["paths"]
+            }),
+        },
+        ToolDefinition {
+            name: "check_amdl".into(),
+            description: "Run strict final acceptance validation for one or more .amdl model declaration files. Returns precise diagnostics with location, cause, source line, and a concrete fix suggestion. Call once after all AMDL edits, before complete.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Asset-root-relative .amdl paths to validate together"
                     }
                 },
                 "required": ["paths"]
@@ -2668,6 +2772,30 @@ mod tests {
         assert!(matches!(
             operation,
             AgentOperation::CheckScript { ref paths } if paths.len() == 2
+        ));
+        assert!(!operation_access(&operation).requires_write);
+    }
+
+    #[test]
+    fn check_amdl_tool_is_exposed_as_read_only_final_validation() {
+        let tool = agent_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == "check_amdl")
+            .expect("check_amdl tool should be exposed");
+        assert!(tool.description.contains("final acceptance"));
+        assert_eq!(tool.parameters["required"][0], "paths");
+
+        let operation = tool_call_to_operation(&ToolCall {
+            id: "check-amdl-1".into(),
+            name: "check_amdl".into(),
+            arguments: serde_json::json!({
+                "paths": ["models/crate.amdl"]
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            operation,
+            AgentOperation::CheckAmdl { ref paths } if paths == &vec!["models/crate.amdl".to_string()]
         ));
         assert!(!operation_access(&operation).requires_write);
     }

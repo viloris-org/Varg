@@ -3292,37 +3292,10 @@ fn on_update(entity, dt) {
         let asset_root = project.root.join(&project.manifest.asset_root);
         let _full_path = resolve_writable_relative_path(&asset_root, path_str)?;
 
-        let diagnostics = match engine_assets::parse_amdl(source) {
-            Ok(document) => match engine_assets::AmdlValidator::validate(&document) {
-                Ok(()) => Vec::new(),
-                Err(errors) => errors
-                    .into_iter()
-                    .map(|error| {
-                        serde_json::json!({
-                            "code": "AMDL_VALIDATION",
-                            "severity": "error",
-                            "line": null,
-                            "column": null,
-                            "message": error.message,
-                            "suggestion": "Keep .amdl declarative: declare one model with mesh, material, collider, rigidbody, sockets, and LODs only.",
-                            "source_line": null,
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            },
-            Err(error) => serde_json::json!([{
-                "code": "AMDL_PARSE",
-                "severity": "error",
-                "line": null,
-                "column": null,
-                "message": error.to_string(),
-                "suggestion": "Use Aster Model syntax such as: model Crate { mesh = primitive.box(size: [1, 1, 1]) }",
-                "source_line": null,
-            }])
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
-        };
+        let diagnostics = engine_assets::diagnose_amdl(source)
+            .into_iter()
+            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
 
         Ok(serde_json::json!({
             "valid": diagnostics.is_empty(),

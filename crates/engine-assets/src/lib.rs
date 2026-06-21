@@ -9,8 +9,10 @@ pub mod resource_trait;
 pub mod resource_types;
 
 pub use amdl::{
-    parse_amdl, AmdlArgument, AmdlCall, AmdlDocument, AmdlExpr, AmdlNamedBlock, AmdlObject,
-    AmdlParserError, AmdlStatement, AmdlValidationError, AmdlValidator, AmdlValue,
+    compile_amdl, diagnose_amdl, parse_amdl, AmdlColliderDecl, AmdlColliderShape, AmdlDiagnostic,
+    AmdlDocument, AmdlLodDecl, AmdlMaterialDecl, AmdlMeshDecl, AmdlMeshSource, AmdlModelDecl,
+    AmdlParserError, AmdlPrimitiveKind, AmdlRigidbodyDecl, AmdlRigidbodyMode, AmdlSocketDecl,
+    AmdlValidator, AmdlValue, AMDL_VERSION,
 };
 pub use registry::ResourceTypeRegistry;
 pub use resource_trait::{Resource, ResourceHandle as TypedResourceHandle};
@@ -2473,7 +2475,9 @@ fn import_cpu_payload(
 ) -> ImportedCpuPayload {
     match kind {
         ResourceKind::Texture => import_texture_payload(path, importer, bytes),
-        ResourceKind::Model | ResourceKind::SkinnedModel => import_model_payload(path, importer, bytes),
+        ResourceKind::Model | ResourceKind::SkinnedModel => {
+            import_model_payload(path, importer, bytes)
+        }
         ResourceKind::Shader => import_shader_payload(path, importer, bytes),
         ResourceKind::Material => import_material_payload(path, importer, bytes),
         ResourceKind::Audio
@@ -2549,36 +2553,35 @@ fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCp
         match std::str::from_utf8(bytes)
             .map_err(|error| error.to_string())
             .and_then(|source| {
-                let document = parse_amdl(source).map_err(|error| error.to_string())?;
-                AmdlValidator::validate(&document)
-                    .map_err(|errors| {
-                        errors
-                            .into_iter()
-                            .map(|error| error.message)
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    })
-                    .map(|_| document)
+                compile_amdl(source).map_err(|diagnostics| {
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
             }) {
-            Ok(document) => match serde_json::to_vec(&document) {
-                Ok(encoded) => {
-                    let model_count = document.models.len();
-                    (
+            Ok(document) => {
+                match serde_json::to_vec(&document) {
+                    Ok(encoded) => {
+                        let model_count = document.models.len();
+                        (
                         Arc::from(encoded),
                         format!("Aster model declaration imported by {importer}: {model_count} models"),
                     )
+                    }
+                    Err(error) => {
+                        diagnostics.push(
+                            AssetDiagnostic::new(format!("Aster model encode failed: {error}"))
+                                .with_path(path),
+                        );
+                        (
+                            Arc::from(bytes),
+                            format!("{} bytes model source imported by {importer}", bytes.len()),
+                        )
+                    }
                 }
-                Err(error) => {
-                    diagnostics.push(
-                        AssetDiagnostic::new(format!("Aster model encode failed: {error}"))
-                            .with_path(path),
-                    );
-                    (
-                        Arc::from(bytes),
-                        format!("{} bytes model source imported by {importer}", bytes.len()),
-                    )
-                }
-            },
+            }
             Err(error) => {
                 diagnostics.push(
                     AssetDiagnostic::new(format!("Aster model parse failed: {error}"))
@@ -2595,7 +2598,8 @@ fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCp
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
-        }) {
+        })
+    {
         match import_gltf_model(path) {
             Ok(model) => {
                 let primitive_count = model.meshes.len();

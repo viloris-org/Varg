@@ -174,7 +174,7 @@ function navItemClass(active = false): string {
 function themeToggleButtonClass(active: boolean): string {
   return [
     'cursor-pointer rounded-[4px] border-0 px-2 py-1 font-[var(--font-sans)] text-xs transition-all duration-[120ms] ease-in hover:text-[var(--text-primary)]',
-    active ? 'bg-[var(--accent)] text-white shadow-[var(--shadow-sm)]' : 'bg-transparent text-[var(--text-muted)]',
+    active ? 'bg-[var(--brand)] text-[var(--bg-base)] shadow-[var(--shadow-sm)] hover:bg-[var(--brand-hover)]' : 'bg-transparent text-[var(--text-muted)]',
   ].join(' ');
 }
 
@@ -201,7 +201,7 @@ function settingsRowClass(divided = false, extra = ''): string {
 
 function themeOptionButtonClass(active: boolean): string {
   return active
-    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[4px] border-0 bg-[var(--accent)] px-2 font-[var(--font-sans)] text-xs leading-none text-white shadow-[var(--shadow-sm)] transition-colors duration-[120ms] ease-in'
+    ? 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[4px] border-0 bg-[var(--brand)] px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--bg-base)] shadow-[var(--shadow-sm)] transition-colors duration-[120ms] ease-in hover:bg-[var(--brand-hover)]'
     : 'flex h-[26px] min-w-0 cursor-pointer items-center justify-center whitespace-nowrap rounded-[4px] border-0 bg-transparent px-2 font-[var(--font-sans)] text-xs leading-none text-[var(--text-muted)] transition-colors duration-[120ms] ease-in hover:text-[var(--text-primary)]';
 }
 
