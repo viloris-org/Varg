@@ -47,9 +47,9 @@ pub use crate::stream_player::{
     AudioStreamPlayer2DComponentData, AudioStreamPlayer3DComponentData,
 };
 pub use crate::types::{
-    AudioDebugSnapshot, AudioDiagnostics, AudioObjectTransform, AudioOutputCapabilities,
-    AudioRendererConfig, AudioSourceShape, HrtfQuality, OutputMode, PropagationFrame, SpatialMode,
-    VirtualizationPolicy, VoiceCategory,
+    AudioDebugSnapshot, AudioDiagnostics, AudioLatencyProfile, AudioObjectTransform,
+    AudioOutputCapabilities, AudioOutputSettings, AudioRendererConfig, AudioSourceShape,
+    HrtfQuality, OutputMode, PropagationFrame, SpatialMode, VirtualizationPolicy, VoiceCategory,
 };
 pub use engine_core::math::Vec3;
 
@@ -782,6 +782,12 @@ impl AudioContext {
     #[cfg(feature = "device-output")]
     pub fn device_default() -> EngineResult<Self> {
         Ok(Self::new(DeviceAudioBackend::open_default()?))
+    }
+
+    /// Opens the operating system's default output device with explicit latency preferences.
+    #[cfg(feature = "device-output")]
+    pub fn device_with_settings(settings: AudioOutputSettings) -> EngineResult<Self> {
+        Ok(Self::new(DeviceAudioBackend::open_with_settings(settings)?))
     }
 
     /// Returns a mutable reference to the backend.

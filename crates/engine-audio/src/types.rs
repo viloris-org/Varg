@@ -60,6 +60,51 @@ impl HrtfQuality {
     }
 }
 
+/// Project-level latency preference for the output device.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioLatencyProfile {
+    /// Use the platform default buffer policy for maximum compatibility.
+    #[default]
+    Default,
+    /// Prefer lower callback latency while preserving a conservative fallback path.
+    Interactive,
+    /// Prefer the smallest practical callback latency for timing-sensitive games.
+    Critical,
+}
+
+impl AudioLatencyProfile {
+    /// Returns built-in fixed-buffer candidates for this latency profile.
+    pub fn preferred_buffer_frames(self) -> &'static [u32] {
+        match self {
+            Self::Default => &[],
+            Self::Interactive => &[512, 256],
+            Self::Critical => &[256, 128, 512],
+        }
+    }
+}
+
+/// Output device selection and latency preferences.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AudioOutputSettings {
+    /// Latency preference used when opening the platform output stream.
+    pub latency_profile: AudioLatencyProfile,
+    /// Optional fixed buffer size to try before the profile's built-in candidates.
+    pub preferred_buffer_frames: Option<u32>,
+}
+
+impl AudioOutputSettings {
+    /// Returns the candidate fixed buffer sizes to try before falling back to platform defaults.
+    pub fn buffer_frame_candidates(self) -> impl Iterator<Item = u32> {
+        self.preferred_buffer_frames.into_iter().chain(
+            self.latency_profile
+                .preferred_buffer_frames()
+                .iter()
+                .copied(),
+        )
+    }
+}
+
 /// Voice category used for reservation and deterministic fallback policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +263,10 @@ pub struct AudioOutputCapabilities {
     pub channels: u16,
     /// Preferred callback block size when known.
     pub preferred_block_frames: Option<u32>,
+    /// Latency profile requested when opening the output stream.
+    pub latency_profile: AudioLatencyProfile,
+    /// Estimated callback latency from the active block size, in microseconds.
+    pub estimated_latency_micros: Option<u32>,
     /// Whether the backend accepts platform spatial objects.
     pub platform_spatial_audio: bool,
     /// Maximum dynamic spatial objects currently available.
@@ -235,6 +284,8 @@ impl Default for AudioOutputCapabilities {
             sample_rate: 48_000,
             channels: 2,
             preferred_block_frames: None,
+            latency_profile: AudioLatencyProfile::Default,
+            estimated_latency_micros: None,
             platform_spatial_audio: false,
             max_dynamic_objects: 0,
             output_mode: OutputMode::default(),

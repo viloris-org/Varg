@@ -31,12 +31,12 @@ import {
 } from '../icons';
 import {
   closeNativeSceneView,
-  openExperimentalEmbeddedSceneView,
+  openWaylandEmbeddedCompositorSceneView,
   openZeroCopySceneView,
   openGameView,
   rpc,
   syncEditorCompositorViewport,
-  syncExperimentalEmbeddedSceneView,
+  syncWaylandEmbeddedCompositorViewport,
   syncZeroCopySceneView,
   viewportPresentationCapabilities,
   type ViewportPresentationAdapter,
@@ -129,6 +129,14 @@ interface EditorConsoleEntry {
 
 function isNativeHostPresentation(mode: ViewportPresentationMode) {
   return mode === 'native-host-window' || mode === 'editor-compositor';
+}
+
+function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode) {
+  return mode === 'wayland-embedded-compositor';
+}
+
+function isZeroCopyPresentation(mode: ViewportPresentationMode) {
+  return isNativeHostPresentation(mode) || isWaylandEmbeddedCompositorPresentation(mode);
 }
 
 interface BuildTargetOption {
@@ -949,11 +957,9 @@ export default function CalmEditorPrototype({
   });
 
   const selectedEntity = entities.find((entity) => entity.id === selectedEntityId) ?? entities[0];
-  const embeddedNativeAdapter = viewportPresentationAdapters.find((adapter) => adapter.mode === 'embedded-native-experimental');
-  const embeddedNativeAvailable = embeddedNativeAdapter?.available ?? false;
   const nativeHostAdapter = viewportPresentationAdapters.find((adapter) => adapter.mode === 'native-host-window')
     ?? viewportPresentationAdapters.find((adapter) => adapter.mode === 'editor-compositor');
-  const nativeHostAvailable = nativeHostAdapter?.available ?? false;
+  const waylandEmbeddedAdapter = viewportPresentationAdapters.find((adapter) => adapter.mode === 'wayland-embedded-compositor');
   const inspectorEntity = selectedEntityDetails
     ? {
       ...selectedEntity,
@@ -1083,9 +1089,9 @@ export default function CalmEditorPrototype({
     const viewport = embeddedSceneViewport();
     if (!viewport) throw new Error('Scene View frame is not ready yet.');
     const camera = cameraRef.current;
-    const openSceneView = isNativeHostPresentation(viewportPresentation)
-      ? openZeroCopySceneView
-      : openExperimentalEmbeddedSceneView;
+    const openSceneView = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+      ? openWaylandEmbeddedCompositorSceneView
+      : openZeroCopySceneView;
     await openSceneView({
       viewport,
       yaw: camera.yaw,
@@ -1098,14 +1104,12 @@ export default function CalmEditorPrototype({
   }, [embeddedSceneViewport, viewportPresentation]);
 
   const zeroCopySceneActive = backendReady
-    && (viewportPresentation === 'embedded-native-experimental' || isNativeHostPresentation(viewportPresentation))
+    && isZeroCopyPresentation(viewportPresentation)
     && viewMode === '3d'
     && !isPlaying
     && !nativeSceneError;
 
-  const experimentalEmbeddedNativeActive = zeroCopySceneActive
-    && viewportPresentation === 'embedded-native-experimental';
-  const nativeHostSceneActive = zeroCopySceneActive && isNativeHostPresentation(viewportPresentation);
+  const nativeHostSceneActive = zeroCopySceneActive && isZeroCopyPresentation(viewportPresentation);
 
   const setSelectedTransform = async (axis: 'position' | 'rotation' | 'scale', index: number, value: number) => {
     setEntities((current) =>
@@ -1261,10 +1265,7 @@ export default function CalmEditorPrototype({
     viewportPresentationCapabilities()
       .then((capabilities) => {
         setViewportPresentationAdapters(capabilities.adapters);
-        setViewportPresentation((current) => {
-          const currentAdapter = capabilities.adapters.find((adapter) => adapter.mode === current);
-          return currentAdapter?.available ? current : capabilities.default_mode;
-        });
+        setViewportPresentation(capabilities.default_mode);
       })
       .catch(() => {});
     const interval = window.setInterval(() => {
@@ -1277,7 +1278,7 @@ export default function CalmEditorPrototype({
   useEffect(() => {
     if (
       !backendReady
-      || (viewportPresentation !== 'embedded-native-experimental' && !isNativeHostPresentation(viewportPresentation))
+      || !isZeroCopyPresentation(viewportPresentation)
       || viewMode !== '3d'
       || isPlaying
     ) return;
@@ -1307,18 +1308,18 @@ export default function CalmEditorPrototype({
         const viewport = embeddedSceneViewport();
         if (!viewport) return;
         const camera = cameraRef.current;
-        const syncSceneView = isNativeHostPresentation(viewportPresentation)
-          ? syncZeroCopySceneView
-          : syncExperimentalEmbeddedSceneView;
-        syncSceneView({
-          viewport,
-          yaw: camera.yaw,
-          pitch: camera.pitch,
-          distance: camera.distance,
-          targetX: camera.targetX,
-          targetY: camera.targetY,
-          targetZ: camera.targetZ,
-        }).catch((error) => {
+        const syncPromise = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+          ? syncWaylandEmbeddedCompositorViewport({ viewport })
+          : syncZeroCopySceneView({
+            viewport,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+            distance: camera.distance,
+            targetX: camera.targetX,
+            targetY: camera.targetY,
+            targetZ: camera.targetZ,
+          });
+        syncPromise.catch((error) => {
           setNativeSceneError(error instanceof Error ? error.message : String(error));
         });
       });
@@ -1347,7 +1348,10 @@ export default function CalmEditorPrototype({
         raf = null;
         const viewport = embeddedSceneViewport();
         if (!viewport) return;
-        syncEditorCompositorViewport({ viewport }).catch(() => {});
+        const syncCompositorViewport = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+          ? syncWaylandEmbeddedCompositorViewport
+          : syncEditorCompositorViewport;
+        syncCompositorViewport({ viewport }).catch(() => {});
       });
     };
     const observer = new ResizeObserver(syncViewport);
@@ -1361,11 +1365,11 @@ export default function CalmEditorPrototype({
       window.removeEventListener('scroll', syncViewport, true);
       if (raf !== null) window.cancelAnimationFrame(raf);
     };
-  }, [backendReady, embeddedSceneViewport]);
+  }, [backendReady, embeddedSceneViewport, viewportPresentation]);
 
   useEffect(() => {
     if (
-      (viewportPresentation === 'embedded-native-experimental' || isNativeHostPresentation(viewportPresentation))
+      isZeroCopyPresentation(viewportPresentation)
       && viewMode === '3d'
       && !isPlaying
       && !nativeSceneError
@@ -1848,49 +1852,6 @@ export default function CalmEditorPrototype({
               <button type="button" className="h-7 rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 Lit
               </button>
-              <button
-                type="button"
-                className={cx(
-                  'h-7 rounded-[var(--radius-sm)] px-2 text-[11px] transition-colors',
-                  isNativeHostPresentation(viewportPresentation)
-                    ? 'bg-[rgba(34,197,94,0.12)] text-[var(--brand)]'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
-                )}
-                title={nativeHostAdapter?.reason ?? 'Native host window owns Scene View and embeds Web UI panels.'}
-                disabled={!nativeHostAvailable}
-                onClick={() => {
-                  setNativeSceneError(null);
-                  setViewportPresentation((value) => (
-                    isNativeHostPresentation(value)
-                      ? 'canvas-readback'
-                      : 'native-host-window'
-                  ));
-                }}
-              >
-                Zero-copy
-              </button>
-              {embeddedNativeAvailable && (
-                <button
-                  type="button"
-                  className={cx(
-                    'h-7 rounded-[var(--radius-sm)] px-2 text-[11px] transition-colors',
-                    viewportPresentation === 'embedded-native-experimental'
-                      ? 'bg-[rgba(245,158,11,0.12)] text-[#fbbf24]'
-                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
-                  )}
-                  title={embeddedNativeAdapter?.reason ?? 'Experimental zero-copy child surface.'}
-                  onClick={() => {
-                    setNativeSceneError(null);
-                    setViewportPresentation((value) => (
-                      value === 'embedded-native-experimental'
-                        ? 'canvas-readback'
-                        : 'embedded-native-experimental'
-                    ));
-                  }}
-                >
-                  Child surface
-                </button>
-              )}
               <div className="ml-1 flex rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5">
                 {(['3d', '2d'] as ViewMode[]).map((mode) => (
                   <button
@@ -1912,9 +1873,9 @@ export default function CalmEditorPrototype({
               <span>{isPlaying ? 'Play mode' : 'Editor mode'}</span>
               <span>
                 {zeroCopySceneActive
-                  ? isNativeHostPresentation(viewportPresentation)
-                    ? 'native host · zero-copy'
-                    : 'experimental native · zero-copy'
+                  ? isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+                    ? 'wayland compositor · zero-copy'
+                    : 'native host · zero-copy'
                   : 'canvas 1080p fallback'}
               </span>
               <span>{viewportSize.width}x{viewportSize.height}</span>
@@ -1936,7 +1897,7 @@ export default function CalmEditorPrototype({
                 <div className="absolute right-3 top-3 rounded-[var(--radius-sm)] border border-[rgba(245,158,11,0.30)] bg-[rgba(7,10,15,0.72)] px-2 py-1 font-mono text-[10px] text-[#fbbf24] backdrop-blur-xl">
                   {isNativeHostPresentation(viewportPresentation)
                     ? 'zero-copy · native host'
-                    : 'zero-copy · experimental child surface'}
+                    : 'zero-copy · wayland compositor'}
                 </div>
               </div>
             ) : !zeroCopySceneActive ? (

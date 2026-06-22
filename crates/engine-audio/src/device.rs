@@ -12,8 +12,8 @@ use crate::renderer::{AudioCommand, AudioEvent, AudioRenderer, PcmClip};
 use crate::stream::{AudioStreamPoll, AudioStreamReader};
 use crate::{
     AudioBackend, AudioClipInfo, AudioDiagnostics, AudioListenerDesc, AudioObjectTransform,
-    AudioOutputCapabilities, AudioRendererConfig, AudioSourceDesc, ClipHandle, HrtfQuality,
-    OutputMode, PlaybackState, PropagationFrame, SourceHandle,
+    AudioOutputCapabilities, AudioOutputSettings, AudioRendererConfig, AudioSourceDesc, ClipHandle,
+    HrtfQuality, OutputMode, PlaybackState, PropagationFrame, SourceHandle,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
@@ -111,6 +111,11 @@ impl std::fmt::Debug for DeviceAudioBackend {
 impl DeviceAudioBackend {
     /// Opens the default output device and starts its real-time stream.
     pub fn open_default() -> EngineResult<Self> {
+        Self::open_with_settings(AudioOutputSettings::default())
+    }
+
+    /// Opens the default output device with explicit latency preferences.
+    pub fn open_with_settings(settings: AudioOutputSettings) -> EngineResult<Self> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -122,71 +127,40 @@ impl DeviceAudioBackend {
             EngineError::other(format!("query default audio output failed: {error}"))
         })?;
         let sample_format = supported.sample_format();
-        let stream_config: cpal::StreamConfig = supported.into();
-        let renderer_config = AudioRendererConfig {
-            sample_rate: stream_config.sample_rate.0,
-            channels: stream_config.channels,
-            ..AudioRendererConfig::default()
+        let stream_configs =
+            stream_config_candidates(&supported.config(), supported.buffer_size(), settings);
+        let diagnostics = Arc::new(SharedDiagnostics::default());
+        let opened = open_stream_from_candidates(
+            &device,
+            sample_format,
+            &stream_configs,
+            Arc::clone(&diagnostics),
+        )?;
+        let preferred_block_frames = match opened.stream_config.buffer_size {
+            cpal::BufferSize::Fixed(frames) => Some(frames),
+            cpal::BufferSize::Default => None,
         };
         let capabilities = AudioOutputCapabilities {
             device_name,
-            sample_rate: renderer_config.sample_rate,
-            channels: renderer_config.channels,
-            preferred_block_frames: match stream_config.buffer_size {
-                cpal::BufferSize::Fixed(frames) => Some(frames),
-                cpal::BufferSize::Default => None,
-            },
+            sample_rate: opened.stream_config.sample_rate.0,
+            channels: opened.stream_config.channels,
+            preferred_block_frames,
+            latency_profile: settings.latency_profile,
+            estimated_latency_micros: preferred_block_frames
+                .map(|frames| latency_micros(frames, opened.stream_config.sample_rate.0)),
             platform_spatial_audio: false,
             max_dynamic_objects: 0,
             output_mode: OutputMode::Stereo,
             hrtf_quality: HrtfQuality::Medium,
         };
-        let (commands, receiver) = sync_channel(COMMAND_CAPACITY);
-        let (event_sender, events) = sync_channel(COMMAND_CAPACITY);
-        let diagnostics = Arc::new(SharedDiagnostics::default());
-        let error_diagnostics = Arc::clone(&diagnostics);
-        let error_callback = move |_error: cpal::StreamError| {
-            error_diagnostics.underruns.fetch_add(1, Ordering::Relaxed);
-        };
-        let stream = match sample_format {
-            cpal::SampleFormat::F32 => build_stream_f32(
-                &device,
-                &stream_config,
-                receiver,
-                renderer_config,
-                Arc::clone(&diagnostics),
-                event_sender,
-                error_callback,
-            ),
-            cpal::SampleFormat::I16 => build_stream_i16(
-                &device,
-                &stream_config,
-                receiver,
-                renderer_config,
-                Arc::clone(&diagnostics),
-                event_sender,
-                error_callback,
-            ),
-            cpal::SampleFormat::U16 => build_stream_u16(
-                &device,
-                &stream_config,
-                receiver,
-                renderer_config,
-                Arc::clone(&diagnostics),
-                event_sender,
-                error_callback,
-            ),
-            format => Err(EngineError::other(format!(
-                "unsupported output sample format: {format:?}"
-            ))),
-        }?;
-        stream
+        opened
+            .stream
             .play()
             .map_err(|error| EngineError::other(format!("start audio output failed: {error}")))?;
         Ok(Self {
-            _stream: stream,
-            commands,
-            events,
+            _stream: opened.stream,
+            commands: opened.commands,
+            events: opened.events,
             next_clip: 1,
             next_source: 1,
             clips: HashMap::new(),
@@ -209,7 +183,10 @@ impl DeviceAudioBackend {
     }
 
     fn reopened(&self) -> EngineResult<Self> {
-        let mut replacement = Self::open_default()?;
+        let mut replacement = Self::open_with_settings(AudioOutputSettings {
+            latency_profile: self.capabilities.latency_profile,
+            preferred_buffer_frames: self.capabilities.preferred_block_frames,
+        })?;
         replacement.next_clip = self.next_clip;
         replacement.next_source = self.next_source;
         for (handle, clip) in &self.clips {
@@ -277,6 +254,117 @@ impl DeviceAudioBackend {
         self.streams.insert(handle, reader);
         Ok(())
     }
+}
+
+fn stream_config_candidates(
+    default_config: &cpal::StreamConfig,
+    supported_buffer_size: &cpal::SupportedBufferSize,
+    settings: AudioOutputSettings,
+) -> Vec<cpal::StreamConfig> {
+    let mut configs = Vec::new();
+    for frames in settings.buffer_frame_candidates() {
+        if !buffer_size_supported(frames, supported_buffer_size) {
+            continue;
+        }
+        let mut config = default_config.clone();
+        config.buffer_size = cpal::BufferSize::Fixed(frames);
+        if !configs.contains(&config) {
+            configs.push(config);
+        }
+    }
+    if !configs.contains(default_config) {
+        configs.push(default_config.clone());
+    }
+    configs
+}
+
+fn buffer_size_supported(frames: u32, supported: &cpal::SupportedBufferSize) -> bool {
+    match *supported {
+        cpal::SupportedBufferSize::Range { min, max } => (min..=max).contains(&frames),
+        cpal::SupportedBufferSize::Unknown => true,
+    }
+}
+
+fn latency_micros(frames: u32, sample_rate: u32) -> u32 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    ((frames as u64 * 1_000_000) / sample_rate as u64).min(u32::MAX as u64) as u32
+}
+
+struct OpenedStream {
+    stream: cpal::Stream,
+    stream_config: cpal::StreamConfig,
+    commands: SyncSender<AudioCommand>,
+    events: Receiver<AudioEvent>,
+}
+
+fn open_stream_from_candidates(
+    device: &cpal::Device,
+    sample_format: cpal::SampleFormat,
+    configs: &[cpal::StreamConfig],
+    diagnostics: Arc<SharedDiagnostics>,
+) -> EngineResult<OpenedStream> {
+    let mut last_error = None;
+    for config in configs {
+        let (commands, receiver) = sync_channel(COMMAND_CAPACITY);
+        let (event_sender, events) = sync_channel(COMMAND_CAPACITY);
+        let error_diagnostics = Arc::clone(&diagnostics);
+        let error_callback = move |_error: cpal::StreamError| {
+            error_diagnostics.underruns.fetch_add(1, Ordering::Relaxed);
+        };
+        let renderer_config = AudioRendererConfig {
+            sample_rate: config.sample_rate.0,
+            channels: config.channels,
+            ..AudioRendererConfig::default()
+        };
+        let result = match sample_format {
+            cpal::SampleFormat::F32 => build_stream_f32(
+                device,
+                config,
+                receiver,
+                renderer_config,
+                Arc::clone(&diagnostics),
+                event_sender,
+                error_callback,
+            ),
+            cpal::SampleFormat::I16 => build_stream_i16(
+                device,
+                config,
+                receiver,
+                renderer_config,
+                Arc::clone(&diagnostics),
+                event_sender,
+                error_callback,
+            ),
+            cpal::SampleFormat::U16 => build_stream_u16(
+                device,
+                config,
+                receiver,
+                renderer_config,
+                Arc::clone(&diagnostics),
+                event_sender,
+                error_callback,
+            ),
+            format => Err(EngineError::other(format!(
+                "unsupported output sample format: {format:?}"
+            ))),
+        };
+        match result {
+            Ok(stream) => {
+                return Ok(OpenedStream {
+                    stream,
+                    stream_config: config.clone(),
+                    commands,
+                    events,
+                });
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| EngineError::other("no audio stream configs available")))
 }
 
 impl AudioBackend for DeviceAudioBackend {
@@ -678,4 +766,77 @@ fn build_stream_u16(
             None,
         )
         .map_err(|error| EngineError::other(format!("create audio output failed: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> cpal::StreamConfig {
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48_000),
+            buffer_size: cpal::BufferSize::Default,
+        }
+    }
+
+    #[test]
+    fn default_latency_profile_keeps_platform_default_config() {
+        let configs = stream_config_candidates(
+            &default_config(),
+            &cpal::SupportedBufferSize::Range { min: 64, max: 512 },
+            AudioOutputSettings::default(),
+        );
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].buffer_size, cpal::BufferSize::Default);
+    }
+
+    #[test]
+    fn critical_latency_profile_prefers_small_supported_buffers_before_default() {
+        let configs = stream_config_candidates(
+            &default_config(),
+            &cpal::SupportedBufferSize::Range { min: 128, max: 512 },
+            AudioOutputSettings {
+                latency_profile: crate::AudioLatencyProfile::Critical,
+                preferred_buffer_frames: None,
+            },
+        );
+
+        let buffer_sizes: Vec<_> = configs.iter().map(|config| config.buffer_size).collect();
+        assert_eq!(
+            buffer_sizes,
+            vec![
+                cpal::BufferSize::Fixed(256),
+                cpal::BufferSize::Fixed(128),
+                cpal::BufferSize::Fixed(512),
+                cpal::BufferSize::Default,
+            ]
+        );
+    }
+
+    #[test]
+    fn preferred_buffer_frames_are_deduplicated() {
+        let configs = stream_config_candidates(
+            &default_config(),
+            &cpal::SupportedBufferSize::Range { min: 128, max: 512 },
+            AudioOutputSettings {
+                latency_profile: crate::AudioLatencyProfile::Critical,
+                preferred_buffer_frames: Some(128),
+            },
+        );
+
+        let fixed_128_count = configs
+            .iter()
+            .filter(|config| config.buffer_size == cpal::BufferSize::Fixed(128))
+            .count();
+        assert_eq!(fixed_128_count, 1);
+    }
+
+    #[test]
+    fn latency_estimate_uses_frames_over_sample_rate() {
+        assert_eq!(latency_micros(128, 48_000), 2_666);
+        assert_eq!(latency_micros(0, 48_000), 0);
+        assert_eq!(latency_micros(128, 0), 0);
+    }
 }

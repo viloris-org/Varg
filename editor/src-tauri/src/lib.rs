@@ -42,6 +42,7 @@ mod game_window;
 mod native_host_window;
 mod quest;
 mod scene_window;
+mod wayland_embedded_compositor;
 
 #[cfg(test)]
 fn claim_native_event_loop_test_slot(test_name: &str) -> bool {
@@ -1030,6 +1031,8 @@ pub struct EditorHost {
     scene_window: Option<scene_window::SceneWindowHandle>,
     /// Full-window editor compositor seam for the future zero-copy viewport.
     editor_compositor: editor_compositor::EditorCompositor,
+    /// Wayland production zero-copy presentation seam backed by an embedded compositor.
+    wayland_embedded_compositor: wayland_embedded_compositor::WaylandEmbeddedCompositor,
     /// Cross-project Quest registry and append-only history store.
     quest_store: QuestStore,
 }
@@ -1089,6 +1092,8 @@ impl EditorHost {
             game_window: None,
             scene_window: None,
             editor_compositor: editor_compositor::EditorCompositor::default(),
+            wayland_embedded_compositor:
+                wayland_embedded_compositor::WaylandEmbeddedCompositor::default(),
             quest_store: QuestStore::new(quest_root),
         };
 
@@ -7626,6 +7631,22 @@ fn sync_editor_compositor_viewport(
 }
 
 #[tauri::command]
+fn sync_wayland_embedded_compositor_viewport(
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+) -> Result<(), String> {
+    let viewport =
+        wayland_embedded_compositor::WaylandEmbeddedViewport::from_scene_rect(viewport.into_rect());
+    state.with_host(|host| {
+        host.wayland_embedded_compositor.set_viewport(viewport);
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.set_viewport(viewport.into_scene_rect())?;
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
 fn sync_zero_copy_scene_view(
     _app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
@@ -7680,6 +7701,14 @@ fn open_zero_copy_scene_view(
     target_y: f32,
     target_z: f32,
 ) -> Result<(), String> {
+    let wayland_support = wayland_embedded_compositor::support();
+    if wayland_support.available {
+        return open_wayland_embedded_compositor_scene_view(
+            state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
+        )
+        .map(|_| ());
+    }
+
     let support = editor_compositor::platform_support();
     if !editor_compositor_requested() || !support.available {
         return Err(format!(
@@ -7753,6 +7782,71 @@ fn open_editor_compositor_scene_view(
     open_zero_copy_scene_view(
         app, state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
     )
+}
+
+#[tauri::command]
+fn open_wayland_embedded_compositor_scene_view(
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    _yaw: f32,
+    _pitch: f32,
+    _distance: f32,
+    _target_x: f32,
+    _target_y: f32,
+    _target_z: f32,
+) -> Result<wayland_embedded_compositor::WaylandEmbeddedCompositorRuntimeStatus, String> {
+    if !editor_compositor_requested() {
+        return Err("wayland-embedded-compositor requires ASTER_EDITOR_COMPOSITOR=1".to_owned());
+    }
+
+    let viewport =
+        wayland_embedded_compositor::WaylandEmbeddedViewport::from_scene_rect(viewport.into_rect());
+    state.with_host(|host| {
+        host.wayland_embedded_compositor.set_viewport(viewport);
+        let status = host.wayland_embedded_compositor.open_scene_view()?;
+        let socket_name = status
+            .socket_name
+            .clone()
+            .ok_or_else(|| "Wayland embedded compositor socket is unavailable".to_owned())?;
+        let scene_viewport = viewport.into_scene_rect();
+        host.poll_scene_window();
+        let snapshot = host
+            .create_scene_runtime_snapshot()
+            .map_err(|error| error.to_string())?;
+        let camera = scene_window::SceneCameraState {
+            yaw: _yaw,
+            pitch: _pitch,
+            distance: _distance,
+            target: engine_core::math::Vec3::new(_target_x, _target_y, _target_z),
+        };
+
+        if host.scene_window.as_ref().is_some_and(|scene_window| {
+            scene_window.kind() != scene_window::SceneWindowKind::Embedded
+        }) {
+            host.scene_window = None;
+        }
+
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.set_viewport(scene_viewport)?;
+            scene_window.restart(snapshot, camera)?;
+            scene_window.show()?;
+            return Ok(status);
+        }
+
+        let handle = scene_window::spawn_scene_window_with_mode(
+            "Wayland Embedded Scene View".to_owned(),
+            scene_viewport.width,
+            scene_viewport.height,
+            snapshot,
+            camera,
+            scene_window::SceneWindowMode::WaylandEmbedded {
+                socket_name,
+                viewport: scene_viewport,
+            },
+        );
+        host.scene_window = Some(handle);
+        Ok(status)
+    })
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -7890,7 +7984,6 @@ fn set_game_render_scaling(
 
 #[tauri::command]
 fn open_native_scene_view(
-    app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     yaw: f32,
     pitch: f32,
@@ -7900,7 +7993,6 @@ fn open_native_scene_view(
     target_z: f32,
 ) -> Result<(), String> {
     tracing::info!(target: "editor", "opening floating Scene View via winit window");
-    native_host_window::hide_experimental_child_scene_surface(app);
     state.with_host(|host| {
         host.poll_scene_window();
         let snapshot = host
@@ -7952,120 +8044,7 @@ impl EmbeddedSceneViewport {
 }
 
 #[tauri::command]
-fn open_embedded_scene_view(
-    app: tauri::AppHandle,
-    state: State<'_, EditorHostState>,
-    viewport: EmbeddedSceneViewport,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-    target_x: f32,
-    target_y: f32,
-    target_z: f32,
-) -> Result<(), String> {
-    let viewport = viewport.into_rect();
-    if !editor_compositor::experimental_child_surface_available() {
-        return Err(
-            "experimental child-surface Scene View is disabled; use native-host-window zero-copy presentation"
-                .to_owned(),
-        );
-    }
-    let target = native_host_window::experimental_child_scene_target(&app, viewport)?;
-    state.with_host(|host| {
-        host.poll_scene_window();
-        let snapshot = host
-            .create_scene_runtime_snapshot()
-            .map_err(|error| error.to_string())?;
-        let camera = scene_window::SceneCameraState {
-            yaw,
-            pitch,
-            distance,
-            target: engine_core::math::Vec3::new(target_x, target_y, target_z),
-        };
-
-        if host.scene_window.as_ref().is_some_and(|scene_window| {
-            scene_window.kind() != scene_window::SceneWindowKind::Embedded
-        }) {
-            host.scene_window = None;
-        }
-
-        if let Some(scene_window) = host.scene_window.as_ref() {
-            scene_window.set_viewport(viewport)?;
-            scene_window.restart(snapshot, camera)?;
-            return scene_window.show();
-        }
-
-        let mode = match target {
-            native_host_window::ExperimentalChildSceneTarget::Raw(surface) => {
-                scene_window::SceneWindowMode::EmbeddedRaw { surface, viewport }
-            }
-        };
-        let handle = scene_window::spawn_scene_window_with_mode(
-            "Scene View".to_owned(),
-            viewport.width,
-            viewport.height,
-            snapshot,
-            camera,
-            mode,
-        );
-        host.scene_window = Some(handle);
-        Ok(())
-    })
-}
-
-#[tauri::command]
-fn sync_embedded_scene_view(
-    app: tauri::AppHandle,
-    state: State<'_, EditorHostState>,
-    viewport: EmbeddedSceneViewport,
-    yaw: Option<f32>,
-    pitch: Option<f32>,
-    distance: Option<f32>,
-    target_x: Option<f32>,
-    target_y: Option<f32>,
-    target_z: Option<f32>,
-) -> Result<(), String> {
-    let viewport = viewport.into_rect();
-    if !editor_compositor::experimental_child_surface_available() {
-        return Err(
-            "experimental child-surface Scene View is disabled; use native-host-window zero-copy presentation"
-                .to_owned(),
-        );
-    }
-    native_host_window::sync_experimental_child_scene_surface(app, viewport);
-    state.with_host(|host| {
-        host.poll_scene_window();
-        let scene_window = host
-            .scene_window
-            .as_ref()
-            .ok_or_else(|| "embedded scene window is not running".to_owned())?;
-        scene_window.set_viewport(viewport)?;
-        if let (
-            Some(yaw),
-            Some(pitch),
-            Some(distance),
-            Some(target_x),
-            Some(target_y),
-            Some(target_z),
-        ) = (yaw, pitch, distance, target_x, target_y, target_z)
-        {
-            scene_window.set_camera(scene_window::SceneCameraState {
-                yaw,
-                pitch,
-                distance,
-                target: engine_core::math::Vec3::new(target_x, target_y, target_z),
-            })?;
-        }
-        Ok(())
-    })
-}
-
-#[tauri::command]
-fn close_native_scene_view(
-    app: tauri::AppHandle,
-    state: State<'_, EditorHostState>,
-) -> Result<(), String> {
-    native_host_window::hide_experimental_child_scene_surface(app);
+fn close_native_scene_view(state: State<'_, EditorHostState>) -> Result<(), String> {
     state.with_host(|host| {
         host.poll_scene_window();
         if let Some(scene_window) = host.scene_window.as_ref() {
@@ -8260,13 +8239,13 @@ pub fn run() {
             open_game_view,
             set_game_render_scaling,
             open_native_scene_view,
-            open_embedded_scene_view,
-            sync_embedded_scene_view,
             close_native_scene_view,
             viewport_presentation_capabilities,
             sync_editor_compositor_viewport,
+            sync_wayland_embedded_compositor_viewport,
             open_zero_copy_scene_view,
             sync_zero_copy_scene_view,
+            open_wayland_embedded_compositor_scene_view,
             open_editor_compositor_scene_view,
             select_project_location,
             viewport_readback_raw,
@@ -8278,13 +8257,21 @@ pub fn run() {
             create_main_window(app)?;
             apply_desktop_window_adaptations(app)?;
             if editor_compositor_requested() {
-                let layout_mode =
-                    native_host_window::install_bridge_host_on_main_thread(app.handle())?;
-                tracing::info!(
-                    target: "editor",
-                    ?layout_mode,
-                    "native host window bridge installed"
-                );
+                if wayland_embedded_compositor::is_wayland_session() {
+                    tracing::info!(
+                        target: "editor",
+                        backend = wayland_embedded_compositor::BACKEND_ID,
+                        "skipping GTK native host bridge on Wayland; embedded compositor adapter owns zero-copy presentation"
+                    );
+                } else {
+                    let layout_mode =
+                        native_host_window::install_bridge_host_on_main_thread(app.handle())?;
+                    tracing::info!(
+                        target: "editor",
+                        ?layout_mode,
+                        "native host window bridge installed"
+                    );
+                }
             }
             Ok(())
         })

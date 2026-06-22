@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,11 +68,11 @@ impl SceneViewportRect {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum SceneWindowMode {
     Floating,
-    EmbeddedRaw {
-        surface: SceneRawSurface,
+    WaylandEmbedded {
+        socket_name: String,
         viewport: SceneViewportRect,
     },
     CompositorRaw {
@@ -251,16 +251,13 @@ pub fn spawn_scene_window_with_mode(
 ) -> SceneWindowHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<SceneCommand>();
     let (event_tx, event_rx) = mpsc::channel::<SceneEvent>();
-    let kind = match mode {
+    let kind = match &mode {
         SceneWindowMode::Floating => SceneWindowKind::Floating,
-        SceneWindowMode::EmbeddedRaw { .. } | SceneWindowMode::CompositorRaw { .. } => {
+        SceneWindowMode::WaylandEmbedded { .. } | SceneWindowMode::CompositorRaw { .. } => {
             SceneWindowKind::Embedded
         }
     };
     let thread = thread::spawn(move || match mode {
-        SceneWindowMode::EmbeddedRaw { surface, viewport } => {
-            run_raw_scene_surface(surface, viewport, None, snapshot, camera, cmd_rx, event_tx);
-        }
         SceneWindowMode::CompositorRaw {
             surface,
             surface_width,
@@ -282,7 +279,7 @@ pub fn spawn_scene_window_with_mode(
                 event_tx,
             );
         }
-        SceneWindowMode::Floating => {
+        SceneWindowMode::Floating | SceneWindowMode::WaylandEmbedded { .. } => {
             run_scene_window(
                 title, width, height, snapshot, camera, mode, cmd_rx, event_tx,
             );
@@ -307,12 +304,9 @@ fn run_scene_window(
     event_tx: mpsc::Sender<SceneEvent>,
 ) {
     let mut builder = EventLoop::builder();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use winit::platform::x11::EventLoopBuilderExtX11;
-        builder.with_any_thread(true);
-    }
-    let event_loop = match builder.build() {
+    configure_event_loop_builder_for_mode(&mut builder, &mode);
+
+    let event_loop = match build_event_loop_for_mode(&mut builder, &mode) {
         Ok(event_loop) => event_loop,
         Err(error) => {
             let _ = event_tx.send(SceneEvent::Error(format!("event loop: {error}")));
@@ -320,6 +314,11 @@ fn run_scene_window(
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    let initial_viewport = match mode {
+        SceneWindowMode::WaylandEmbedded { viewport, .. } => Some(viewport.sanitized()),
+        _ => None,
+    };
 
     let mut app = SceneApp {
         title,
@@ -337,6 +336,7 @@ fn run_scene_window(
         dirty: true,
         dragging: None,
         last_cursor: None,
+        initial_viewport,
     };
     let run_result = event_loop.run_app(&mut app);
     if let Err(error) = run_result {
@@ -344,6 +344,71 @@ fn run_scene_window(
             .event_tx
             .send(SceneEvent::Error(format!("run: {error}")));
     }
+}
+
+fn configure_event_loop_builder_for_mode(
+    builder: &mut winit::event_loop::EventLoopBuilder<()>,
+    mode: &SceneWindowMode,
+) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        match mode {
+            SceneWindowMode::WaylandEmbedded { .. } => {
+                use winit::platform::wayland::EventLoopBuilderExtWayland;
+                EventLoopBuilderExtWayland::with_any_thread(builder, true);
+                builder.with_wayland();
+            }
+            _ => {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                EventLoopBuilderExtX11::with_any_thread(builder, true);
+            }
+        }
+    }
+    let _ = mode;
+}
+
+fn build_event_loop_for_mode(
+    builder: &mut winit::event_loop::EventLoopBuilder<()>,
+    mode: &SceneWindowMode,
+) -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    match mode {
+        SceneWindowMode::WaylandEmbedded { socket_name, .. } => {
+            with_wayland_display(socket_name, || builder.build())
+        }
+        _ => builder.build(),
+    }
+}
+
+fn wayland_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_wayland_display<T>(socket_name: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = wayland_env_lock()
+        .lock()
+        .expect("Wayland environment lock poisoned");
+    let previous_display = std::env::var_os("WAYLAND_DISPLAY");
+    let previous_socket = std::env::var_os("WAYLAND_SOCKET");
+
+    unsafe {
+        std::env::set_var("WAYLAND_DISPLAY", socket_name);
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+    let result = f();
+
+    unsafe {
+        match previous_display {
+            Some(value) => std::env::set_var("WAYLAND_DISPLAY", value),
+            None => std::env::remove_var("WAYLAND_DISPLAY"),
+        }
+        match previous_socket {
+            Some(value) => std::env::set_var("WAYLAND_SOCKET", value),
+            None => std::env::remove_var("WAYLAND_SOCKET"),
+        }
+    }
+
+    result
 }
 
 struct SceneApp {
@@ -362,6 +427,7 @@ struct SceneApp {
     dirty: bool,
     dragging: Option<MouseButton>,
     last_cursor: Option<(f64, f64)>,
+    initial_viewport: Option<SceneViewportRect>,
 }
 
 impl ApplicationHandler for SceneApp {
@@ -381,6 +447,9 @@ impl ApplicationHandler for SceneApp {
             }
         };
 
+        if let Some(viewport) = self.initial_viewport.take() {
+            let _ = window.request_inner_size(LogicalSize::new(viewport.width, viewport.height));
+        }
         self.window = Some(window);
         let Some(snapshot) = self.pending_snapshot.take() else {
             let _ = self.event_tx.send(SceneEvent::Error(
@@ -513,7 +582,9 @@ impl SceneApp {
             .with_inner_size(LogicalSize::new(self.width, self.height));
         match self.mode {
             SceneWindowMode::Floating => attrs,
-            SceneWindowMode::EmbeddedRaw { .. } | SceneWindowMode::CompositorRaw { .. } => attrs,
+            SceneWindowMode::WaylandEmbedded { .. } | SceneWindowMode::CompositorRaw { .. } => {
+                attrs
+            }
         }
     }
 
@@ -522,7 +593,9 @@ impl SceneApp {
         self.width = viewport.width;
         self.height = viewport.height;
         if let Some(window) = self.window.as_ref() {
-            window.set_outer_position(LogicalPosition::new(viewport.x, viewport.y));
+            if !matches!(self.mode, SceneWindowMode::WaylandEmbedded { .. }) {
+                window.set_outer_position(LogicalPosition::new(viewport.x, viewport.y));
+            }
             let _ = window.request_inner_size(LogicalSize::new(viewport.width, viewport.height));
             window.set_visible(true);
         }

@@ -16,6 +16,7 @@ use engine_render_wgpu::SurfaceViewportRect;
 use serde::Serialize;
 
 use crate::scene_window;
+use crate::wayland_embedded_compositor;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -109,8 +110,8 @@ pub fn platform_support() -> EditorCompositorSupport {
 #[serde(rename_all = "kebab-case")]
 pub enum ViewportPresentationMode {
     CanvasReadback,
-    EmbeddedNativeExperimental,
     NativeHostWindow,
+    WaylandEmbeddedCompositor,
     /// Legacy compatibility name for the native host-window architecture.
     EditorCompositor,
 }
@@ -136,18 +137,21 @@ pub fn presentation_capabilities(compositor_requested: bool) -> ViewportPresenta
     presentation_capabilities_for(
         compositor_requested,
         platform_support(),
-        experimental_child_surface_available(),
+        wayland_embedded_compositor::support(),
     )
 }
 
 pub fn presentation_capabilities_for(
     compositor_requested: bool,
     support: EditorCompositorSupport,
-    experimental_child_surface_available: bool,
+    wayland_support: wayland_embedded_compositor::WaylandEmbeddedCompositorSupport,
 ) -> ViewportPresentationCapabilities {
     let native_host_available = compositor_requested && support.available;
+    let wayland_embedded_available = compositor_requested && wayland_support.available;
     ViewportPresentationCapabilities {
-        default_mode: if native_host_available {
+        default_mode: if wayland_embedded_available {
+            ViewportPresentationMode::WaylandEmbeddedCompositor
+        } else if native_host_available {
             ViewportPresentationMode::NativeHostWindow
         } else {
             ViewportPresentationMode::CanvasReadback
@@ -163,18 +167,18 @@ pub fn presentation_capabilities_for(
                 reason: "Stable WebView-composited fallback. Copies pixels through readback, so it is not the final performance path.",
             },
             ViewportPresentationAdapter {
-                mode: ViewportPresentationMode::EmbeddedNativeExperimental,
-                available: experimental_child_surface_available,
-                default: false,
+                mode: ViewportPresentationMode::WaylandEmbeddedCompositor,
+                available: wayland_embedded_available,
+                default: wayland_embedded_available,
                 zero_copy: true,
-                experimental: true,
-                backend: "linux-gtk-child-surface",
-                reason: "Legacy GTK child-surface adapter. It is disabled by default because Wayland/WebView child-surface ownership can crash or drift; use native-host-window for zero-copy.",
+                experimental: false,
+                backend: wayland_embedded_compositor::BACKEND_ID,
+                reason: wayland_support.reason,
             },
             ViewportPresentationAdapter {
                 mode: ViewportPresentationMode::NativeHostWindow,
-                available: native_host_available,
-                default: native_host_available,
+                available: native_host_available && !wayland_embedded_available,
+                default: native_host_available && !wayland_embedded_available,
                 zero_copy: true,
                 experimental: false,
                 backend: support.backend.id(),
@@ -191,19 +195,6 @@ pub fn presentation_capabilities_for(
             },
         ],
     }
-}
-
-pub fn experimental_child_surface_available() -> bool {
-    cfg!(target_os = "linux") && experimental_child_surface_requested()
-}
-
-pub fn experimental_child_surface_requested() -> bool {
-    std::env::var("ASTER_ENABLE_EXPERIMENTAL_CHILD_SURFACE").is_ok_and(|value| {
-        matches!(
-            value.as_str(),
-            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-        )
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +253,24 @@ impl EditorCompositor {
 mod tests {
     use super::*;
 
+    fn unavailable_wayland_support() -> wayland_embedded_compositor::WaylandEmbeddedCompositorSupport
+    {
+        wayland_embedded_compositor::WaylandEmbeddedCompositorSupport {
+            status: wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::FeatureDisabled,
+            available: false,
+            reason: "feature disabled",
+        }
+    }
+
+    fn available_wayland_support() -> wayland_embedded_compositor::WaylandEmbeddedCompositorSupport
+    {
+        wayland_embedded_compositor::WaylandEmbeddedCompositorSupport {
+            status: wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::Available,
+            available: true,
+            reason: "available",
+        }
+    }
+
     #[test]
     fn editor_compositor_viewport_sanitizes_dom_rects_for_surface_use() {
         let viewport = EditorCompositorViewport::from_scene_rect(scene_window::SceneViewportRect {
@@ -302,7 +311,7 @@ mod tests {
                 available: true,
                 reason: "available",
             },
-            false,
+            unavailable_wayland_support(),
         );
 
         assert_eq!(
@@ -326,7 +335,7 @@ mod tests {
                 available: true,
                 reason: "available",
             },
-            false,
+            unavailable_wayland_support(),
         );
 
         assert_eq!(
@@ -353,7 +362,7 @@ mod tests {
                 available: false,
                 reason: "not implemented",
             },
-            false,
+            unavailable_wayland_support(),
         );
 
         assert_eq!(
@@ -367,39 +376,28 @@ mod tests {
     }
 
     #[test]
-    fn presentation_capabilities_keep_child_surface_unavailable_without_opt_in() {
+    fn presentation_capabilities_prefer_wayland_embedded_compositor_when_available() {
         let capabilities = presentation_capabilities_for(
             true,
             EditorCompositorSupport {
                 backend: EditorCompositorBackend::LinuxGtk,
                 available: true,
-                reason: "available",
+                reason: "native host available",
             },
-            false,
+            available_wayland_support(),
         );
 
-        assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
-            == ViewportPresentationMode::EmbeddedNativeExperimental
-            && !adapter.available
-            && adapter.experimental));
-    }
-
-    #[test]
-    fn presentation_capabilities_can_expose_child_surface_for_explicit_diagnostics() {
-        let capabilities = presentation_capabilities_for(
-            true,
-            EditorCompositorSupport {
-                backend: EditorCompositorBackend::LinuxGtk,
-                available: true,
-                reason: "available",
-            },
-            true,
+        assert_eq!(
+            capabilities.default_mode,
+            ViewportPresentationMode::WaylandEmbeddedCompositor
         );
-
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
-            == ViewportPresentationMode::EmbeddedNativeExperimental
+            == ViewportPresentationMode::WaylandEmbeddedCompositor
             && adapter.available
-            && adapter.experimental
+            && adapter.default
+            && adapter.zero_copy));
+        assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
+            == ViewportPresentationMode::NativeHostWindow
             && !adapter.default));
     }
 }
