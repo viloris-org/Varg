@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import HubPage from './pages/HubPage';
-import EditorPage from './pages/EditorPage';
+import CalmEditorPrototype from './pages/CalmEditorPrototype';
 import QuestPage from './pages/QuestPage';
 import { rpc } from './api';
 import { I18nProvider, useTranslation } from './i18n';
@@ -121,6 +121,19 @@ export default function App() {
       setScreen(state.open_project ? 'editor' : 'hub');
     }).catch((err) => {
       console.error('Failed to connect to host:', err);
+      if (import.meta.env.DEV) {
+        document.documentElement.dataset.theme = 'dark';
+        setHubState({
+          page: 'projects',
+          theme: 'dark',
+          locale: 'en',
+          recent_projects: [],
+          installs: [],
+          open_project: '/prototype/Meadow Run',
+        });
+        setScreen('editor');
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       setStartupError(message || 'The editor backend did not respond.');
       setScreen('loading');
@@ -241,7 +254,7 @@ export default function App() {
 
   return (
     <I18nProvider locale={locale}>
-      <EditorPage
+      <CalmEditorPrototype
         onCloseProject={handleCloseProject}
         onOpenSettings={handleOpenSettings}
         onOpenQuest={handleOpenQuest}
