@@ -1,6 +1,7 @@
 //! Native editor Scene View with direct GPU surface presentation.
 
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,13 +12,14 @@ use engine_render::{RenderCamera, RenderDevice, RenderFrame, RenderProjection};
 use engine_render_wgpu::WgpuRenderDevice;
 use runtime_min::RuntimeServices;
 use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{
     DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-const MIN_FRAME_DT: Duration = Duration::from_millis(16);
+const EDITOR_TARGET_FRAME_DT: Duration = Duration::from_micros(13_333);
 
 #[derive(Clone, Copy, Debug)]
 pub struct SceneCameraState {
@@ -41,7 +43,76 @@ impl Default for SceneCameraState {
 pub enum SceneCommand {
     Restart(SceneRuntimeSnapshot, SceneCameraState),
     Show,
+    Hide,
+    SetCamera(SceneCameraState),
+    SetViewport(SceneViewportRect),
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SceneViewportRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl SceneViewportRect {
+    pub fn sanitized(self) -> Self {
+        Self {
+            x: self.x,
+            y: self.y,
+            width: self.width.max(1),
+            height: self.height.max(1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SceneWindowMode {
+    Floating,
+    EmbeddedRaw {
+        surface: SceneRawSurface,
+        viewport: SceneViewportRect,
+    },
+    CompositorRaw {
+        surface: SceneRawSurface,
+        surface_width: u32,
+        surface_height: u32,
+        viewport: SceneViewportRect,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SceneRawSurface {
+    Xlib {
+        display: usize,
+        window: u64,
+    },
+    Wayland {
+        display: usize,
+        surface: usize,
+    },
+    Win32 {
+        hwnd: isize,
+        hinstance: Option<isize>,
+    },
+    AppKit {
+        ns_view: usize,
+    },
+    UiKit {
+        ui_view: usize,
+        ui_view_controller: Option<usize>,
+    },
+    AndroidNdk {
+        a_native_window: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneWindowKind {
+    Floating,
+    Embedded,
 }
 
 pub struct SceneRuntimeSnapshot {
@@ -89,9 +160,14 @@ pub struct SceneWindowHandle {
     cmd_tx: mpsc::Sender<SceneCommand>,
     event_rx: mpsc::Receiver<SceneEvent>,
     thread: Option<thread::JoinHandle<()>>,
+    kind: SceneWindowKind,
 }
 
 impl SceneWindowHandle {
+    pub fn kind(&self) -> SceneWindowKind {
+        self.kind
+    }
+
     pub fn restart(
         &self,
         snapshot: SceneRuntimeSnapshot,
@@ -105,6 +181,24 @@ impl SceneWindowHandle {
     pub fn show(&self) -> Result<(), String> {
         self.cmd_tx
             .send(SceneCommand::Show)
+            .map_err(|_| "scene window thread is not running".to_owned())
+    }
+
+    pub fn hide(&self) -> Result<(), String> {
+        self.cmd_tx
+            .send(SceneCommand::Hide)
+            .map_err(|_| "scene window thread is not running".to_owned())
+    }
+
+    pub fn set_viewport(&self, viewport: SceneViewportRect) -> Result<(), String> {
+        self.cmd_tx
+            .send(SceneCommand::SetViewport(viewport.sanitized()))
+            .map_err(|_| "scene window thread is not running".to_owned())
+    }
+
+    pub fn set_camera(&self, camera: SceneCameraState) -> Result<(), String> {
+        self.cmd_tx
+            .send(SceneCommand::SetCamera(camera))
             .map_err(|_| "scene window thread is not running".to_owned())
     }
 
@@ -137,15 +231,68 @@ pub fn spawn_scene_window(
     snapshot: SceneRuntimeSnapshot,
     camera: SceneCameraState,
 ) -> SceneWindowHandle {
+    spawn_scene_window_with_mode(
+        title,
+        width,
+        height,
+        snapshot,
+        camera,
+        SceneWindowMode::Floating,
+    )
+}
+
+pub fn spawn_scene_window_with_mode(
+    title: String,
+    width: u32,
+    height: u32,
+    snapshot: SceneRuntimeSnapshot,
+    camera: SceneCameraState,
+    mode: SceneWindowMode,
+) -> SceneWindowHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<SceneCommand>();
     let (event_tx, event_rx) = mpsc::channel::<SceneEvent>();
-    let thread = thread::spawn(move || {
-        run_scene_window(title, width, height, snapshot, camera, cmd_rx, event_tx);
+    let kind = match mode {
+        SceneWindowMode::Floating => SceneWindowKind::Floating,
+        SceneWindowMode::EmbeddedRaw { .. } | SceneWindowMode::CompositorRaw { .. } => {
+            SceneWindowKind::Embedded
+        }
+    };
+    let thread = thread::spawn(move || match mode {
+        SceneWindowMode::EmbeddedRaw { surface, viewport } => {
+            run_raw_scene_surface(surface, viewport, None, snapshot, camera, cmd_rx, event_tx);
+        }
+        SceneWindowMode::CompositorRaw {
+            surface,
+            surface_width,
+            surface_height,
+            viewport,
+        } => {
+            run_raw_scene_surface(
+                surface,
+                SceneViewportRect {
+                    x: 0,
+                    y: 0,
+                    width: surface_width,
+                    height: surface_height,
+                },
+                Some(viewport),
+                snapshot,
+                camera,
+                cmd_rx,
+                event_tx,
+            );
+        }
+        SceneWindowMode::Floating => {
+            run_scene_window(
+                title, width, height, snapshot, camera, mode, cmd_rx, event_tx,
+            );
+        }
     });
     SceneWindowHandle {
         cmd_tx,
         event_rx,
         thread: Some(thread),
+        kind,
     }
 }
 
@@ -155,6 +302,7 @@ fn run_scene_window(
     height: u32,
     snapshot: SceneRuntimeSnapshot,
     camera: SceneCameraState,
+    mode: SceneWindowMode,
     cmd_rx: mpsc::Receiver<SceneCommand>,
     event_tx: mpsc::Sender<SceneEvent>,
 ) {
@@ -184,6 +332,7 @@ fn run_scene_window(
         last_frame: Instant::now(),
         pending_snapshot: Some(snapshot),
         camera,
+        mode,
         visible: true,
         dirty: true,
         dragging: None,
@@ -208,6 +357,7 @@ struct SceneApp {
     last_frame: Instant,
     pending_snapshot: Option<SceneRuntimeSnapshot>,
     camera: SceneCameraState,
+    mode: SceneWindowMode,
     visible: bool,
     dirty: bool,
     dragging: Option<MouseButton>,
@@ -219,11 +369,8 @@ impl ApplicationHandler for SceneApp {
         if self.window.is_some() {
             return;
         }
-        let window = match event_loop.create_window(
-            WindowAttributes::default()
-                .with_title(&self.title)
-                .with_inner_size(winit::dpi::LogicalSize::new(self.width, self.height)),
-        ) {
+        let window_attrs = self.window_attributes();
+        let window = match event_loop.create_window(window_attrs) {
             Ok(window) => window,
             Err(error) => {
                 let _ = self
@@ -248,12 +395,14 @@ impl ApplicationHandler for SceneApp {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 self.visible = false;
+                if let Some(window) = self.window.as_ref() {
+                    window.set_visible(false);
+                }
                 let _ = self.event_tx.send(SceneEvent::Closed);
-                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 self.width = size.width.max(1);
@@ -304,9 +453,28 @@ impl ApplicationHandler for SceneApp {
                     self.visible = true;
                     if let Some(window) = self.window.as_ref() {
                         window.set_visible(true);
-                        window.focus_window();
+                        if matches!(self.mode, SceneWindowMode::Floating) {
+                            window.focus_window();
+                        }
+                        window.request_redraw();
                     }
                     self.dirty = true;
+                }
+                SceneCommand::Hide => {
+                    self.visible = false;
+                    self.dragging = None;
+                    self.last_cursor = None;
+                    if let Some(window) = self.window.as_ref() {
+                        window.set_visible(false);
+                    }
+                    let _ = self.event_tx.send(SceneEvent::Closed);
+                }
+                SceneCommand::SetCamera(camera) => {
+                    self.camera = camera;
+                    self.dirty = true;
+                }
+                SceneCommand::SetViewport(viewport) => {
+                    self.apply_viewport(viewport);
                 }
                 SceneCommand::Shutdown => {
                     event_loop.exit();
@@ -319,7 +487,9 @@ impl ApplicationHandler for SceneApp {
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + MIN_FRAME_DT));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + EDITOR_TARGET_FRAME_DT,
+            ));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
@@ -337,6 +507,33 @@ impl ApplicationHandler for SceneApp {
 }
 
 impl SceneApp {
+    fn window_attributes(&self) -> WindowAttributes {
+        let attrs = WindowAttributes::default()
+            .with_title(&self.title)
+            .with_inner_size(LogicalSize::new(self.width, self.height));
+        match self.mode {
+            SceneWindowMode::Floating => attrs,
+            SceneWindowMode::EmbeddedRaw { .. } | SceneWindowMode::CompositorRaw { .. } => attrs,
+        }
+    }
+
+    fn apply_viewport(&mut self, viewport: SceneViewportRect) {
+        let viewport = viewport.sanitized();
+        self.width = viewport.width;
+        self.height = viewport.height;
+        if let Some(window) = self.window.as_ref() {
+            window.set_outer_position(LogicalPosition::new(viewport.x, viewport.y));
+            let _ = window.request_inner_size(LogicalSize::new(viewport.width, viewport.height));
+            window.set_visible(true);
+        }
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime
+                .renderer
+                .resize_surface(viewport.width, viewport.height);
+        }
+        self.dirty = true;
+    }
+
     fn install_runtime(&mut self, snapshot: SceneRuntimeSnapshot) -> Result<(), String> {
         self.runtime = None;
         let window = self
@@ -345,7 +542,7 @@ impl SceneApp {
             .ok_or_else(|| "scene window is not initialized".to_owned())?;
         let renderer = WgpuRenderDevice::new_with_performance(
             window,
-            engine_render::RenderPerformanceConfig::competitive_120hz(),
+            engine_render::RenderPerformanceConfig::editor_1080p75(),
         )
         .map_err(|error| format!("wgpu device: {error}"))?;
         let mut runtime = snapshot
@@ -393,7 +590,7 @@ impl SceneApp {
     fn render_frame(&mut self) {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_frame);
-        if dt < MIN_FRAME_DT {
+        if dt < EDITOR_TARGET_FRAME_DT {
             return;
         }
         self.last_frame = now;
@@ -435,5 +632,368 @@ impl SceneApp {
         }
         runtime.render_world = world;
         self.dirty = false;
+    }
+}
+
+struct RawSceneApp {
+    surface: SceneRawSurface,
+    width: u32,
+    height: u32,
+    viewport: Option<SceneViewportRect>,
+    runtime: Option<RuntimeServices<WgpuRenderDevice>>,
+    cmd_rx: mpsc::Receiver<SceneCommand>,
+    event_tx: mpsc::Sender<SceneEvent>,
+    last_frame: Instant,
+    pending_snapshot: Option<SceneRuntimeSnapshot>,
+    camera: SceneCameraState,
+    visible: bool,
+    dirty: bool,
+    shutdown: bool,
+}
+
+fn run_raw_scene_surface(
+    surface: SceneRawSurface,
+    surface_rect: SceneViewportRect,
+    viewport: Option<SceneViewportRect>,
+    snapshot: SceneRuntimeSnapshot,
+    camera: SceneCameraState,
+    cmd_rx: mpsc::Receiver<SceneCommand>,
+    event_tx: mpsc::Sender<SceneEvent>,
+) {
+    let surface_rect = surface_rect.sanitized();
+    let mut app = RawSceneApp {
+        surface,
+        width: surface_rect.width,
+        height: surface_rect.height,
+        viewport: viewport.map(SceneViewportRect::sanitized),
+        runtime: None,
+        cmd_rx,
+        event_tx,
+        last_frame: Instant::now(),
+        pending_snapshot: Some(snapshot),
+        camera,
+        visible: true,
+        dirty: true,
+        shutdown: false,
+    };
+    if let Some(snapshot) = app.pending_snapshot.take() {
+        if let Err(error) = app.install_runtime(snapshot) {
+            let _ = app.event_tx.send(SceneEvent::Error(error));
+            return;
+        }
+    }
+
+    loop {
+        app.process_pending_commands();
+        if app.shutdown {
+            break;
+        }
+        if !app.visible {
+            match app.cmd_rx.recv() {
+                Ok(SceneCommand::Shutdown) | Err(_) => break,
+                Ok(command) => {
+                    app.process_command(command);
+                    if app.shutdown {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if app.dirty {
+            app.render_frame();
+        }
+        match app.cmd_rx.recv_timeout(EDITOR_TARGET_FRAME_DT) {
+            Ok(SceneCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(command) => app.process_command(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if app.shutdown {
+            break;
+        }
+    }
+}
+
+impl RawSceneApp {
+    fn process_pending_commands(&mut self) {
+        let commands: Vec<_> = self.cmd_rx.try_iter().collect();
+        for command in commands {
+            self.process_command(command);
+        }
+    }
+
+    fn process_command(&mut self, command: SceneCommand) {
+        match command {
+            SceneCommand::Restart(snapshot, camera) => {
+                self.camera = camera;
+                if let Err(error) = self.install_runtime(snapshot) {
+                    let _ = self.event_tx.send(SceneEvent::Error(error));
+                }
+            }
+            SceneCommand::Show => {
+                self.visible = true;
+                self.dirty = true;
+            }
+            SceneCommand::Hide => {
+                self.visible = false;
+                let _ = self.event_tx.send(SceneEvent::Closed);
+            }
+            SceneCommand::SetCamera(camera) => {
+                self.camera = camera;
+                self.dirty = true;
+            }
+            SceneCommand::SetViewport(viewport) => self.apply_viewport(viewport),
+            SceneCommand::Shutdown => {
+                self.shutdown = true;
+            }
+        }
+    }
+
+    fn apply_viewport(&mut self, viewport: SceneViewportRect) {
+        let viewport = viewport.sanitized();
+        if let Some(runtime) = self.runtime.as_mut() {
+            if self.viewport.is_some() {
+                self.viewport = Some(viewport);
+                runtime.renderer.set_surface_viewport(Some(
+                    engine_render_wgpu::SurfaceViewportRect::new(
+                        viewport.x.max(0) as u32,
+                        viewport.y.max(0) as u32,
+                        viewport.width,
+                        viewport.height,
+                    ),
+                ));
+            } else {
+                self.width = viewport.width;
+                self.height = viewport.height;
+                runtime
+                    .renderer
+                    .resize_surface(viewport.width, viewport.height);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn install_runtime(&mut self, snapshot: SceneRuntimeSnapshot) -> Result<(), String> {
+        self.runtime = None;
+        let (raw_display, raw_window) = match self.surface {
+            SceneRawSurface::Xlib { display, window } => {
+                let display = NonNull::new(display as *mut std::ffi::c_void)
+                    .ok_or_else(|| "Xlib display handle is null".to_owned())?;
+                (
+                    Some(raw_window_handle::RawDisplayHandle::Xlib(
+                        raw_window_handle::XlibDisplayHandle::new(Some(display), 0),
+                    )),
+                    raw_window_handle::RawWindowHandle::Xlib(
+                        raw_window_handle::XlibWindowHandle::new(window),
+                    ),
+                )
+            }
+            SceneRawSurface::Wayland { display, surface } => {
+                let display = NonNull::new(display as *mut std::ffi::c_void)
+                    .ok_or_else(|| "Wayland display handle is null".to_owned())?;
+                let surface = NonNull::new(surface as *mut std::ffi::c_void)
+                    .ok_or_else(|| "Wayland surface handle is null".to_owned())?;
+                (
+                    Some(raw_window_handle::RawDisplayHandle::Wayland(
+                        raw_window_handle::WaylandDisplayHandle::new(display),
+                    )),
+                    raw_window_handle::RawWindowHandle::Wayland(
+                        raw_window_handle::WaylandWindowHandle::new(surface),
+                    ),
+                )
+            }
+            SceneRawSurface::Win32 { hwnd, hinstance } => {
+                let hwnd = std::num::NonZeroIsize::new(hwnd)
+                    .ok_or_else(|| "Win32 HWND handle is null".to_owned())?;
+                let mut handle = raw_window_handle::Win32WindowHandle::new(hwnd);
+                handle.hinstance = hinstance.and_then(std::num::NonZeroIsize::new);
+                (
+                    Some(raw_window_handle::RawDisplayHandle::Windows(
+                        raw_window_handle::WindowsDisplayHandle::new(),
+                    )),
+                    raw_window_handle::RawWindowHandle::Win32(handle),
+                )
+            }
+            SceneRawSurface::AppKit { ns_view } => {
+                let ns_view = NonNull::new(ns_view as *mut std::ffi::c_void)
+                    .ok_or_else(|| "AppKit NSView handle is null".to_owned())?;
+                (
+                    Some(raw_window_handle::RawDisplayHandle::AppKit(
+                        raw_window_handle::AppKitDisplayHandle::new(),
+                    )),
+                    raw_window_handle::RawWindowHandle::AppKit(
+                        raw_window_handle::AppKitWindowHandle::new(ns_view),
+                    ),
+                )
+            }
+            SceneRawSurface::UiKit {
+                ui_view,
+                ui_view_controller,
+            } => {
+                let ui_view = NonNull::new(ui_view as *mut std::ffi::c_void)
+                    .ok_or_else(|| "UIKit UIView handle is null".to_owned())?;
+                let mut handle = raw_window_handle::UiKitWindowHandle::new(ui_view);
+                handle.ui_view_controller =
+                    ui_view_controller.and_then(|ptr| NonNull::new(ptr as *mut std::ffi::c_void));
+                (
+                    Some(raw_window_handle::RawDisplayHandle::UiKit(
+                        raw_window_handle::UiKitDisplayHandle::new(),
+                    )),
+                    raw_window_handle::RawWindowHandle::UiKit(handle),
+                )
+            }
+            SceneRawSurface::AndroidNdk { a_native_window } => {
+                let a_native_window = NonNull::new(a_native_window as *mut std::ffi::c_void)
+                    .ok_or_else(|| "Android native window handle is null".to_owned())?;
+                (
+                    Some(raw_window_handle::RawDisplayHandle::Android(
+                        raw_window_handle::AndroidDisplayHandle::new(),
+                    )),
+                    raw_window_handle::RawWindowHandle::AndroidNdk(
+                        raw_window_handle::AndroidNdkWindowHandle::new(a_native_window),
+                    ),
+                )
+            }
+        };
+        let mut renderer = unsafe {
+            WgpuRenderDevice::new_raw_surface_with_performance(
+                raw_display,
+                raw_window,
+                self.width,
+                self.height,
+                engine_render::RenderPerformanceConfig::editor_1080p75(),
+            )
+        }
+        .map_err(|error| format!("wgpu device: {error}"))?;
+        if let Some(viewport) = self.viewport {
+            renderer.set_surface_viewport(Some(engine_render_wgpu::SurfaceViewportRect::new(
+                viewport.x.max(0) as u32,
+                viewport.y.max(0) as u32,
+                viewport.width,
+                viewport.height,
+            )));
+        }
+        let mut runtime = snapshot
+            .into_runtime(renderer)
+            .map_err(|error| format!("runtime: {error}"))?;
+        runtime.set_render_scaling(
+            runtime_min::runtime_scaling_settings_from_env(),
+            runtime_min::runtime_scaling_context(),
+        );
+        self.runtime = Some(runtime);
+        self.last_frame = Instant::now();
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn render_frame(&mut self) {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_frame);
+        if dt < EDITOR_TARGET_FRAME_DT {
+            return;
+        }
+        self.last_frame = now;
+
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        let mut world = runtime_min::extract_render_world(&runtime.scene);
+        let target = self.camera.target;
+        let translation = Vec3::new(
+            target.x + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.sin(),
+            target.y + self.camera.distance * self.camera.pitch.sin(),
+            target.z + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.cos(),
+        );
+        let object = world
+            .camera
+            .as_ref()
+            .map(|camera| camera.object)
+            .unwrap_or_else(|| EntityId::from_u128(0));
+        world.camera = Some(RenderCamera {
+            object,
+            transform: Transform {
+                translation,
+                ..Transform::IDENTITY
+            },
+            projection: RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.01,
+            far: 1000.0,
+            look_at_target: Some(target),
+        });
+        let frame_index = runtime.frame_index();
+        if let Err(error) = runtime
+            .renderer
+            .submit_render_world(&world, RenderFrame { frame_index })
+        {
+            let _ = self
+                .event_tx
+                .send(SceneEvent::Error(format!("render: {error}")));
+        }
+        runtime.render_world = world;
+        self.dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn has_linux_display() -> bool {
+        std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_SOCKET").is_some()
+            || std::env::var_os("DISPLAY").is_some()
+    }
+
+    #[test]
+    fn repeated_hide_show_reuses_the_scene_window_thread() {
+        #[cfg(target_os = "linux")]
+        if !has_linux_display() {
+            eprintln!("skipping scene window test: no Linux display is available");
+            return;
+        }
+
+        if !crate::claim_native_event_loop_test_slot(
+            "scene_window::tests::repeated_hide_show_reuses_the_scene_window_thread",
+        ) {
+            return;
+        }
+
+        let scene = engine_ecs::Scene::default();
+        let handle = spawn_scene_window(
+            "Scene View Test".to_owned(),
+            320,
+            180,
+            SceneRuntimeSnapshot::new(
+                EngineConfig::default(),
+                PathBuf::from("."),
+                PathBuf::from("assets"),
+                scene.to_json("test").unwrap(),
+            ),
+            SceneCameraState::default(),
+        );
+
+        for _ in 0..20 {
+            handle
+                .hide()
+                .expect("scene window thread should stay alive");
+            handle
+                .show()
+                .expect("scene window thread should stay alive");
+        }
+
+        std::thread::sleep(Duration::from_millis(250));
+        let errors = handle
+            .poll_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                SceneEvent::Error(message) => Some(message),
+                SceneEvent::Closed => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "scene window errors: {errors:?}");
+
+        handle.shutdown();
     }
 }

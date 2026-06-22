@@ -54,6 +54,31 @@ import {
 } from '../icons';
 import type { QuestEditorArtifact } from '../App';
 
+const editorViewportTargetFps = 75;
+const editorViewportFrameMs = 1000 / editorViewportTargetFps;
+const editorViewportMaxPixels = 1920 * 1080;
+const interactiveViewportMaxPixels = 1280 * 720;
+const playViewportMaxPixels = editorViewportMaxPixels;
+
+function viewportDevicePixelRatio() {
+  return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+}
+
+function fitViewportReadbackSize(width: number, height: number, maxPixels = editorViewportMaxPixels) {
+  const pixelRatio = viewportDevicePixelRatio();
+  const roundedWidth = Math.max(1, Math.round(width * pixelRatio));
+  const roundedHeight = Math.max(1, Math.round(height * pixelRatio));
+  if (!maxPixels || roundedWidth * roundedHeight <= maxPixels) {
+    return { width: roundedWidth, height: roundedHeight, scaled: false };
+  }
+  const scale = Math.sqrt(maxPixels / (roundedWidth * roundedHeight));
+  return {
+    width: Math.max(1, Math.round(roundedWidth * scale)),
+    height: Math.max(1, Math.round(roundedHeight * scale)),
+    scaled: true,
+  };
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface ShellState {
@@ -443,7 +468,7 @@ const workspaceSelectionClass = {
 };
 
 const viewportClass = {
-  container: 'relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#0B0F16]',
+  container: 'relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[radial-gradient(circle_at_50%_18%,rgba(96,165,250,0.10),transparent_32%),linear-gradient(180deg,#101721_0%,#081018_55%,#070A0F_100%)]',
   canvas: 'block h-full w-full object-fill',
   selectionOverlay: 'pointer-events-none absolute inset-0 z-20 h-full w-full',
 };
@@ -1098,6 +1123,8 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
   const versionRef = useRef(sceneVersion);
   const lastRenderedVersionRef = useRef<number | null>(null);
   const fastPreviewUntilRef = useRef(0);
+  const dirtyRef = useRef(true);
+  const lastDrawWasScaledRef = useRef(false);
   const onResizeRef = useRef(onResize);
   const internalCameraRef = useRef({
     yaw: -0.5, pitch: 0.3, distance: 6,
@@ -1109,21 +1136,47 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     x: 0, y: 0, yaw: 0, pitch: 0, targetX: 0, targetY: 0, targetZ: 0,
   });
 
-  versionRef.current = sceneVersion;
+  if (versionRef.current !== sceneVersion) {
+    versionRef.current = sceneVersion;
+    dirtyRef.current = true;
+  }
   onResizeRef.current = onResize;
+
+  const markViewportDirty = useCallback((resetVersion = true) => {
+    dirtyRef.current = true;
+    if (resetVersion) lastRenderedVersionRef.current = null;
+  }, []);
 
   // Poll for frames via binary IPC
   useEffect(() => {
     isActiveRef.current = true;
     lastRenderedVersionRef.current = null;
+    dirtyRef.current = true;
     const poll = async () => {
       if (!isActiveRef.current) return;
-      const { width, height } = sizeRef.current;
+      const previewIsActive = performance.now() < fastPreviewUntilRef.current;
+      if (!dirtyRef.current && !playMode && !previewIsActive) {
+        if (lastDrawWasScaledRef.current) {
+          markViewportDirty();
+        } else {
+          window.setTimeout(poll, 100);
+          return;
+        }
+      }
+      const { width, height } = fitViewportReadbackSize(
+        sizeRef.current.width,
+        sizeRef.current.height,
+        previewIsActive ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
+      );
       const cam = camRef.current;
+      const lastVersion = !playMode && !previewIsActive
+        ? lastRenderedVersionRef.current ?? undefined
+        : undefined;
+      dirtyRef.current = false;
       try {
         const buffer = await viewportReadback({
           width, height,
-          lastVersion: lastRenderedVersionRef.current ?? undefined,
+          lastVersion,
           yaw: cam.yaw, pitch: cam.pitch, distance: cam.distance,
           targetX: cam.targetX, targetY: cam.targetY, targetZ: cam.targetZ,
           viewMode,
@@ -1137,6 +1190,12 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
         const h = header[1];
         if (w > 0 && h > 0) {
           lastRenderedVersionRef.current = versionRef.current;
+          const expected = fitViewportReadbackSize(
+            sizeRef.current.width,
+            sizeRef.current.height,
+            previewIsActive ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
+          );
+          lastDrawWasScaledRef.current = w !== expected.width || h !== expected.height;
           const canvas = canvasRef.current;
           if (canvas.width !== w || canvas.height !== h) {
             canvas.width = w;
@@ -1161,12 +1220,11 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
       // GPU readback is synchronous on the backend and copies the full RGBA
       // frame through IPC. Refresh quickly only while the camera is actively
       // moving; keep idle scene previews on a low-cost dirty/version poll.
-      const previewIsActive = performance.now() < fastPreviewUntilRef.current;
-      window.setTimeout(poll, playMode || previewIsActive ? 16 : 100);
+      window.setTimeout(poll, playMode || previewIsActive ? editorViewportFrameMs : 100);
     };
     poll();
     return () => { isActiveRef.current = false; };
-  }, [viewMode, playMode, editorCamera]);
+  }, [editorCamera, markViewportDirty, playMode, viewMode]);
 
   // Resize observer
   useEffect(() => {
@@ -1185,11 +1243,12 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
           const nextSize = { width: Math.round(width), height: Math.round(height) };
           sizeRef.current = nextSize;
           onResizeRef.current?.(nextSize);
-          lastRenderedVersionRef.current = null;
+          markViewportDirty();
           const canvas = canvasRef.current;
           if (canvas) {
-            canvas.width = Math.round(width);
-            canvas.height = Math.round(height);
+            const nextReadback = fitViewportReadbackSize(width, height);
+            canvas.width = nextReadback.width;
+            canvas.height = nextReadback.height;
             contextRef.current = null;
           }
         }
@@ -1197,7 +1256,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [markViewportDirty]);
 
   // Mouse handlers for orbit/pan
   const onMouseDown = useCallback((e: React.MouseEvent) => {
@@ -1228,7 +1287,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
         camRef.current.targetY = dragStart.current.targetY + dy * d * 0.5;
         camRef.current.targetZ = dragStart.current.targetZ + (dx * Math.sin(yaw) - dy * Math.cos(yaw) * 0.5) * d;
       }
-      lastRenderedVersionRef.current = null;
+      markViewportDirty();
       fastPreviewUntilRef.current = performance.now() + 160;
       onCameraChange?.();
     };
@@ -1236,7 +1295,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     const handleWheel = (e: WheelEvent) => {
       if (containerRef.current && containerRef.current.contains(e.target as Node)) {
         camRef.current.distance = Math.max(0.5, Math.min(100, camRef.current.distance + e.deltaY * 0.01));
-        lastRenderedVersionRef.current = null;
+        markViewportDirty();
         fastPreviewUntilRef.current = performance.now() + 160;
         onCameraChange?.();
         e.preventDefault();
@@ -1250,7 +1309,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
       window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('wheel', handleWheel);
     };
-  }, []);
+  }, [markViewportDirty, onCameraChange, viewMode]);
 
   return (
     <div
@@ -1270,7 +1329,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
           case 'front':  camRef.current.pitch = 0;    camRef.current.yaw = 0;     break;
           case 'back':   camRef.current.pitch = 0;    camRef.current.yaw = 3.14;  break;
         }
-        lastRenderedVersionRef.current = null;
+        markViewportDirty();
         fastPreviewUntilRef.current = performance.now() + 160;
         onCameraChange?.();
       }} />}

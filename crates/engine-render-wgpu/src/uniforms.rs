@@ -34,6 +34,14 @@ pub(crate) struct CameraUniform {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct TemporalUniform {
+    pub(crate) previous_view_projection: [[f32; 4]; 4],
+    pub(crate) current_view_projection: [[f32; 4]; 4],
+    pub(crate) jitter_reset: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct ModelUniform {
     pub(crate) model: [[f32; 4]; 4],
 }
@@ -148,7 +156,9 @@ pub(crate) struct SsgiUniform {
     pub(crate) thickness: f32,
     pub(crate) sample_count: f32,
     pub(crate) frame_index: f32,
-    pub(crate) _pad: [f32; 3],
+    pub(crate) history_blend: f32,
+    pub(crate) reset_history: f32,
+    pub(crate) _pad: f32,
 }
 
 #[repr(C)]
@@ -177,7 +187,8 @@ pub(crate) struct PostProcessUniform {
     pub(crate) upscale_sharpness: f32,
     pub(crate) ssgi_enabled: f32,
     pub(crate) ssgi_intensity: f32,
-    pub(crate) _pad: [f32; 2],
+    pub(crate) ssr_enabled: f32,
+    pub(crate) ssr_intensity: f32,
 }
 
 #[repr(C)]

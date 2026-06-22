@@ -6,6 +6,12 @@ struct CameraUniform {
     camera_forward: vec4<f32>,
 };
 
+struct TemporalUniform {
+    previous_view_projection: mat4x4<f32>,
+    current_view_projection: mat4x4<f32>,
+    jitter_reset: vec4<f32>,
+};
+
 struct ForwardLight {
     position_type: vec4<f32>,
     direction_range: vec4<f32>,
@@ -16,7 +22,7 @@ struct ForwardLight {
 struct LightingUniform {
     ambient: vec4<f32>,
     params: vec4<u32>,
-    lights: array<ForwardLight, 8>,
+    lights: array<ForwardLight, 32>,
 };
 
 struct CsmUniform {
@@ -45,6 +51,7 @@ struct FogUniform {
 @group(0) @binding(11) var ibl_brdf_lut: texture_2d<f32>;
 @group(0) @binding(12) var ibl_sampler: sampler;
 @group(0) @binding(13) var<uniform> fog: FogUniform;
+@group(0) @binding(14) var<uniform> temporal: TemporalUniform;
 
 // Group 1: material textures
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
@@ -81,12 +88,15 @@ struct VsOut {
     @location(7) world_tangent: vec3<f32>,
     @location(8) world_bitangent: vec3<f32>,
     @location(9) receive_shadows: f32,
+    @location(10) previous_clip_position: vec4<f32>,
+    @location(11) current_clip_position: vec4<f32>,
 };
 
 struct FsOut {
     @location(0) color: vec4<f32>,
     @location(1) normal_roughness: vec4<f32>,
     @location(2) albedo_metallic: vec4<f32>,
+    @location(3) motion: vec4<f32>,
 };
 
 const PI: f32 = 3.14159265359;
@@ -152,10 +162,34 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>, dist
 fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32) -> f32 {
     let bias = csm.params.z + csm.params.w * (1.0 - ndotl);
     let texel = csm.params.y;
+    var blocker_count = 0.0;
+    let search_radius = texel * 4.0;
+    for (var bx = -2; bx <= 2; bx++) {
+        for (var by = -2; by <= 2; by++) {
+            let offset = vec2<f32>(f32(bx), f32(by)) * search_radius;
+            var visible = 1.0;
+            if (cascade_idx == 0u) {
+                visible = textureSampleCompare(csm_shadow_0, csm_sampler, uv + offset, depth - bias);
+            } else if (cascade_idx == 1u) {
+                visible = textureSampleCompare(csm_shadow_1, csm_sampler, uv + offset, depth - bias);
+            } else if (cascade_idx == 2u) {
+                visible = textureSampleCompare(csm_shadow_2, csm_sampler, uv + offset, depth - bias);
+            } else if (cascade_idx == 3u) {
+                visible = textureSampleCompare(csm_shadow_3, csm_sampler, uv + offset, depth - bias);
+            } else {
+                visible = textureSampleCompare(csm_shadow_4, csm_sampler, uv + offset, depth - bias);
+            }
+            if (visible < 0.5) {
+                blocker_count += 1.0;
+            }
+        }
+    }
+    let blocker_ratio = blocker_count / 25.0;
+    let penumbra = mix(1.0, 6.0, blocker_ratio);
     var shadow_factor = 0.0;
     for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
-            let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
+            let offset = vec2<f32>(f32(dx), f32(dy)) * texel * penumbra;
             if (cascade_idx == 0u) {
                 shadow_factor += textureSampleCompare(csm_shadow_0, csm_sampler, uv + offset, depth - bias);
             } else if (cascade_idx == 1u) {
@@ -267,6 +301,8 @@ fn vs_main(input: VsIn) -> VsOut {
     out.metallic = input.metallic;
     out.roughness = input.roughness;
     out.emissive = input.emissive;
+    out.previous_clip_position = temporal.previous_view_projection * vec4<f32>(world_pos, 1.0);
+    out.current_clip_position = temporal.current_view_projection * vec4<f32>(world_pos, 1.0);
     return out;
 }
 
@@ -376,6 +412,9 @@ fn fs_main(input: VsOut) -> FsOut {
     out.color = vec4<f32>(color, alpha);
     out.normal_roughness = vec4<f32>(n * 0.5 + 0.5, roughness);
     out.albedo_metallic = vec4<f32>(base_color, metallic);
+    let current_ndc = input.current_clip_position.xy / max(input.current_clip_position.w, EPSILON);
+    let previous_ndc = input.previous_clip_position.xy / max(input.previous_clip_position.w, EPSILON);
+    out.motion = vec4<f32>((current_ndc - previous_ndc) * 0.5, 0.0, 1.0);
     return out;
 }
 "#;
@@ -943,9 +982,9 @@ struct SsgiUniform {
     thickness: f32,
     sample_count: f32,
     frame_index: f32,
+    history_blend: f32,
+    reset_history: f32,
     pad0: f32,
-    pad1: f32,
-    pad2: f32,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -955,6 +994,8 @@ struct SsgiUniform {
 @group(0) @binding(4) var output_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(5) var<uniform> ssgi: SsgiUniform;
 @group(0) @binding(6) var lin_sampler: sampler;
+@group(0) @binding(7) var motion_tex: texture_2d<f32>;
+@group(0) @binding(8) var history_tex: texture_2d<f32>;
 
 fn hash12(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
@@ -1044,7 +1085,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let diffuse_gi = gi / max(weight_sum, 0.001);
-    let color = diffuse_gi * albedo * ssgi.intensity * roughness * roughness;
+    let raw_color = diffuse_gi * albedo * ssgi.intensity * roughness * roughness;
+    let motion = textureLoad(motion_tex, pixel, 0).xy;
+    let history_uv = clamp(uv - motion, vec2<f32>(0.0), vec2<f32>(1.0));
+    let history = textureSampleLevel(history_tex, lin_sampler, history_uv, 0.0).rgb;
+    let history_weight = select(clamp(ssgi.history_blend, 0.0, 0.95), 0.0, ssgi.reset_history > 0.5);
+    let color = mix(raw_color, history, history_weight);
     textureStore(output_tex, pixel, vec4<f32>(color, 1.0));
 }
 "#;
@@ -1065,8 +1111,8 @@ struct PostProcessUniform {
     upscale_sharpness: f32,
     ssgi_enabled: f32,
     ssgi_intensity: f32,
-    pad0: f32,
-    pad1: f32,
+    ssr_enabled: f32,
+    ssr_intensity: f32,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -1075,6 +1121,9 @@ struct PostProcessUniform {
 @group(0) @binding(3) var<uniform> post: PostProcessUniform;
 @group(0) @binding(4) var lin_sampler: sampler;
 @group(0) @binding(5) var ssgi_tex: texture_2d<f32>;
+@group(0) @binding(6) var depth_tex: texture_depth_2d;
+@group(0) @binding(7) var normal_tex: texture_2d<f32>;
+@group(0) @binding(8) var albedo_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -1150,6 +1199,53 @@ fn sharpen_hdr(center: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return clamp(center + detail * post.upscale_sharpness, neighborhood_min, neighborhood_max);
 }
 
+fn decode_post_normal(encoded: vec3<f32>) -> vec3<f32> {
+    return normalize(encoded * 2.0 - 1.0);
+}
+
+fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
+    if (post.ssr_enabled < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let pixel = vec2<i32>(
+        clamp(i32(uv.x * post.render_width), 0, i32(post.render_width) - 1),
+        clamp(i32(uv.y * post.render_height), 0, i32(post.render_height) - 1)
+    );
+    let depth = textureLoad(depth_tex, pixel, 0);
+    if (depth >= 0.9999) {
+        return vec3<f32>(0.0);
+    }
+    let normal_roughness = textureLoad(normal_tex, pixel, 0);
+    let n = decode_post_normal(normal_roughness.rgb);
+    let roughness = clamp(normal_roughness.a, 0.04, 1.0);
+    let metallic = textureLoad(albedo_tex, pixel, 0).a;
+    let view_dir = normalize(vec3<f32>(uv * 2.0 - vec2<f32>(1.0), 1.0));
+    let r = reflect(view_dir, n);
+    let screen_dir = normalize(r.xy + vec2<f32>(0.0001));
+    let max_distance = mix(48.0, 8.0, roughness);
+    for (var step = 1u; step <= 24u; step = step + 1u) {
+        let t = f32(step) / 24.0;
+        let sample_uv = uv + screen_dir * max_distance * t * vec2<f32>(post.inv_render_width, post.inv_render_height);
+        if (sample_uv.x <= 0.0 || sample_uv.x >= 1.0 || sample_uv.y <= 0.0 || sample_uv.y >= 1.0) {
+            break;
+        }
+        let sample_pixel = vec2<i32>(
+            clamp(i32(sample_uv.x * post.render_width), 0, i32(post.render_width) - 1),
+            clamp(i32(sample_uv.y * post.render_height), 0, i32(post.render_height) - 1)
+        );
+        let sample_depth = textureLoad(depth_tex, sample_pixel, 0);
+        let expected_depth = depth - r.z * 0.012 * t;
+        if (sample_depth < 0.9999 && abs(sample_depth - expected_depth) < 0.025 + t * 0.035) {
+            let edge_fade = smoothstep(0.0, 0.12, sample_uv.x) * smoothstep(1.0, 0.88, sample_uv.x)
+                * smoothstep(0.0, 0.12, sample_uv.y) * smoothstep(1.0, 0.88, sample_uv.y);
+            let material_weight = mix(0.18, 1.0, metallic) * (1.0 - roughness);
+            return textureSampleLevel(hdr_tex, lin_sampler, sample_uv, 0.0).rgb
+                * edge_fade * material_weight * post.ssr_intensity;
+        }
+    }
+    return vec3<f32>(0.0);
+}
+
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let scaling = post.render_width != post.output_width || post.render_height != post.output_height;
@@ -1162,6 +1258,7 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     if (post.ssgi_enabled > 0.5) {
         color = color + textureSampleLevel(ssgi_tex, lin_sampler, input.uv, 0.0).rgb * post.ssgi_intensity;
     }
+    color = color + screen_space_reflection(input.uv);
     color = color * post.exposure;
     if (post.ssao_enabled > 0.5) {
         let ao = textureSampleLevel(ssao_tex, lin_sampler, input.uv, 0.0).r;

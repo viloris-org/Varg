@@ -32,7 +32,12 @@ impl RenderDevice for WgpuRenderDevice {
         let aspect = self
             .surface_config
             .as_ref()
-            .map(|cfg| cfg.width as f32 / cfg.height.max(1) as f32)
+            .map(|cfg| {
+                self.surface_viewport
+                    .map(|rect| rect.clamp_to(cfg.width, cfg.height))
+                    .map(|rect| rect.width as f32 / rect.height.max(1) as f32)
+                    .unwrap_or_else(|| cfg.width as f32 / cfg.height.max(1) as f32)
+            })
             .unwrap_or(16.0 / 9.0);
         let batches = self.prepare_render_batches(world, aspect);
         self.prepare_gpu_particles(world);
@@ -40,15 +45,16 @@ impl RenderDevice for WgpuRenderDevice {
         let uniform = camera_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let lighting = lighting_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+        self.upload_lighting_uniform(world);
         let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
         let skybox = skybox_uniform_from_world(world);
         self.queue
             .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
+        let fog = fog_uniform_from_world(world);
+        self.queue
+            .write_buffer(&self.fog_uniform, 0, bytemuck::bytes_of(&fog));
 
         if self.surface.is_some() {
             if self.surface_suspended {
@@ -75,10 +81,16 @@ impl RenderDevice for WgpuRenderDevice {
             let output_view = surface_frame
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
-            let (sw, sh) = {
+            let (surface_width, surface_height) = {
                 let cfg = self.surface_config.as_ref().unwrap();
                 (cfg.width, cfg.height)
             };
+            let surface_viewport = self
+                .surface_viewport
+                .map(|rect| rect.clamp_to(surface_width, surface_height));
+            let (sw, sh) = surface_viewport
+                .map(|rect| (rect.width, rect.height))
+                .unwrap_or((surface_width, surface_height));
             let scale = self.dynamic_resolution.scale();
             let (rw, rh) = scaled_render_size(sw, sh, scale);
             if plan.temporal_inputs {
@@ -87,6 +99,7 @@ impl RenderDevice for WgpuRenderDevice {
                 self.latest_temporal_camera = temporal_camera;
                 self.reset_temporal_history = reset_history || frame.frame_index == 0;
             }
+            self.upload_temporal_uniform();
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let enable_ssao = self.ssao_compute_pipeline.is_some();
@@ -125,6 +138,7 @@ impl RenderDevice for WgpuRenderDevice {
                 &batches,
                 &frame_res,
                 &output_view,
+                surface_viewport,
                 enable_ssao,
                 enable_ssgi,
                 enable_bloom,
@@ -136,6 +150,8 @@ impl RenderDevice for WgpuRenderDevice {
             self.finish_validation_scope(validation, "aster surface")?;
             surface_frame.present();
             self.submitted_worlds = self.submitted_worlds.saturating_add(1);
+            let (hybrid_deferred, active_gi_probes, virtual_shadow_pages) =
+                self.lighting_mode_metrics(world, &plan);
             self.performance_metrics = RenderPerformanceMetrics {
                 render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
                 output_width: sw,
@@ -151,6 +167,12 @@ impl RenderDevice for WgpuRenderDevice {
                 visible_objects: self.latest_visible_objects,
                 culled_objects: self.latest_culled_objects,
                 pipeline_passes: plan.pass_count,
+                submitted_lights: self.latest_submitted_lights,
+                visible_lights: self.latest_visible_lights,
+                culled_lights: self.latest_culled_lights,
+                hybrid_deferred,
+                active_gi_probes,
+                virtual_shadow_pages,
                 gpu_frame_ms: previous_gpu_frame_ms,
                 ..RenderPerformanceMetrics::default()
             };
@@ -200,6 +222,7 @@ impl RenderDevice for WgpuRenderDevice {
             self.latest_temporal_camera = temporal_camera;
             self.reset_temporal_history = reset_history || frame.frame_index == 0;
         }
+        self.upload_temporal_uniform();
 
         let target = self
             .targets
@@ -221,6 +244,7 @@ impl RenderDevice for WgpuRenderDevice {
             &batches,
             &frame_res,
             output_view,
+            None,
             enable_ssao,
             enable_ssgi,
             enable_bloom,
@@ -231,6 +255,8 @@ impl RenderDevice for WgpuRenderDevice {
         self.schedule_gpu_timestamp_readback(gpu_timestamps);
         self.finish_validation_scope(validation, "aster offscreen")?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
+        let (hybrid_deferred, active_gi_probes, virtual_shadow_pages) =
+            self.lighting_mode_metrics(world, &plan);
         self.performance_metrics = RenderPerformanceMetrics {
             render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
             output_width: ow,
@@ -246,6 +272,12 @@ impl RenderDevice for WgpuRenderDevice {
             visible_objects: self.latest_visible_objects,
             culled_objects: self.latest_culled_objects,
             pipeline_passes: plan.pass_count,
+            submitted_lights: self.latest_submitted_lights,
+            visible_lights: self.latest_visible_lights,
+            culled_lights: self.latest_culled_lights,
+            hybrid_deferred,
+            active_gi_probes,
+            virtual_shadow_pages,
             gpu_frame_ms: previous_gpu_frame_ms,
             ..RenderPerformanceMetrics::default()
         };
@@ -344,6 +376,9 @@ impl RenderDevice for WgpuRenderDevice {
             let supported = matches!(
                 pass.name.as_str(),
                 "shadow"
+                    | "gbuffer"
+                    | "deferred-lighting"
+                    | "deferred_lighting"
                     | "forward"
                     | "temporal-inputs"
                     | "upscale"

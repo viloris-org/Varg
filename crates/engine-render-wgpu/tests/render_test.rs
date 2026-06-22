@@ -77,6 +77,9 @@ fn render_one_frame_with_debug_cube_succeeds() {
         particle_emitters: vec![],
         skybox: None,
         fog: None,
+        lighting_mode: Default::default(),
+        global_illumination: Default::default(),
+        shadow_virtualization: Default::default(),
     };
 
     device

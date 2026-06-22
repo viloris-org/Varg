@@ -388,6 +388,12 @@ mod tests {
             return;
         }
 
+        if !crate::claim_native_event_loop_test_slot(
+            "game_window::tests::repeated_show_reuses_the_game_window_thread",
+        ) {
+            return;
+        }
+
         let scene = engine_ecs::Scene::default();
         let handle = spawn_game_window(
             "Game View Test".to_owned(),

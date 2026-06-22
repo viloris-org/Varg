@@ -29,6 +29,13 @@ impl WgpuRenderDevice {
         (self.latest_temporal_camera, self.reset_temporal_history)
     }
 
+    /// Returns the current motion-vector target size when temporal inputs are allocated.
+    pub fn motion_vector_target_size(&self) -> Option<(u32, u32)> {
+        self.hdr_motion_texture
+            .as_ref()
+            .map(|texture| (texture.width(), texture.height()))
+    }
+
     /// Returns adapter and native output capability information.
     pub fn output_capabilities(&self) -> WgpuOutputCapabilities {
         let limits = self.device.limits();
@@ -204,5 +211,20 @@ impl WgpuRenderDevice {
         config.height = height;
         surface.configure(&self.device, config);
         self.surface_suspended = false;
+    }
+
+    /// Restricts surface presentation to a rectangle within the swapchain.
+    ///
+    /// This is the renderer-side primitive needed by the editor compositor:
+    /// one full-window WGPU surface can be owned by the editor while Scene View
+    /// output is drawn only into the WebView-reported viewport aperture.
+    pub fn set_surface_viewport(&mut self, viewport: Option<SurfaceViewportRect>) {
+        self.surface_viewport = viewport.map(|rect| {
+            if let Some(config) = self.surface_config.as_ref() {
+                rect.clamp_to(config.width, config.height)
+            } else {
+                rect
+            }
+        });
     }
 }

@@ -7,6 +7,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     color_view: &wgpu::TextureView,
     normal_view: &wgpu::TextureView,
     albedo_view: &wgpu::TextureView,
+    motion_view: &wgpu::TextureView,
     depth_view: Option<&wgpu::TextureView>,
     pipeline: &wgpu::RenderPipeline,
     camera_bind_group: &wgpu::BindGroup,
@@ -56,6 +57,20 @@ pub(crate) fn encode_batched_forward_pass<'a>(
             store: wgpu::StoreOp::Store,
         },
     });
+    let motion_attachment = Some(wgpu::RenderPassColorAttachment {
+        view: motion_view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            store: wgpu::StoreOp::Store,
+        },
+    });
     let depth_attachment = depth_view.map(|view| wgpu::RenderPassDepthStencilAttachment {
         view,
         depth_ops: Some(wgpu::Operations {
@@ -66,7 +81,12 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     });
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aster forward pass"),
-        color_attachments: &[color_attachment, normal_attachment, albedo_attachment],
+        color_attachments: &[
+            color_attachment,
+            normal_attachment,
+            albedo_attachment,
+            motion_attachment,
+        ],
         depth_stencil_attachment: depth_attachment,
         timestamp_writes: None,
         occlusion_query_set: None,

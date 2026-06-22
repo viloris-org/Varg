@@ -23,7 +23,7 @@ mod uniforms;
 pub use wgpu;
 
 pub use constructors::WgpuOffscreenConfig;
-pub use device::{WgpuOutputCapabilities, WgpuRenderDevice};
+pub use device::{SurfaceViewportRect, WgpuOutputCapabilities, WgpuRenderDevice};
 pub use meshes::{DebugMesh, MeshBuffers};
 pub use uniforms::Vertex;
 

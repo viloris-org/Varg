@@ -29,7 +29,20 @@ import {
   IconUndo,
   IconView,
 } from '../icons';
-import { openGameView, rpc, viewportReadback } from '../api';
+import {
+  closeNativeSceneView,
+  openExperimentalEmbeddedSceneView,
+  openZeroCopySceneView,
+  openGameView,
+  rpc,
+  syncEditorCompositorViewport,
+  syncExperimentalEmbeddedSceneView,
+  syncZeroCopySceneView,
+  viewportPresentationCapabilities,
+  type ViewportPresentationAdapter,
+  type ViewportPresentationMode,
+  viewportReadback,
+} from '../api';
 import type { QuestEditorArtifact } from '../App';
 import { OrientationGizmo, ViewportGrid } from './ViewportOverlays';
 import {
@@ -112,6 +125,10 @@ interface EditorConsoleEntry {
   file?: string | null;
   line?: number | null;
   message: string;
+}
+
+function isNativeHostPresentation(mode: ViewportPresentationMode) {
+  return mode === 'native-host-window' || mode === 'editor-compositor';
 }
 
 interface BuildTargetOption {
@@ -291,9 +308,33 @@ const buildTargets: BuildTargetOption[] = [
 const componentTypes = ['Camera', 'Light', 'MeshRenderer', 'RigidBody', 'Collider', 'Script', 'AudioSource'];
 const pickRadiusPx = 30;
 const viewportFovDeg = 60;
+const editorViewportTargetFps = 75;
+const editorViewportFrameMs = 1000 / editorViewportTargetFps;
+const editorViewportMaxPixels = 1920 * 1080;
+const interactiveViewportMaxPixels = 1280 * 720;
+const playViewportMaxPixels = editorViewportMaxPixels;
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
+}
+
+function viewportDevicePixelRatio() {
+  return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+}
+
+function fitViewportReadbackSize(width: number, height: number, maxPixels = editorViewportMaxPixels) {
+  const pixelRatio = viewportDevicePixelRatio();
+  const roundedWidth = Math.max(1, Math.round(width * pixelRatio));
+  const roundedHeight = Math.max(1, Math.round(height * pixelRatio));
+  if (!maxPixels || roundedWidth * roundedHeight <= maxPixels) {
+    return { width: roundedWidth, height: roundedHeight, scaled: false };
+  }
+  const scale = Math.sqrt(maxPixels / (roundedWidth * roundedHeight));
+  return {
+    width: Math.max(1, Math.round(roundedWidth * scale)),
+    height: Math.max(1, Math.round(roundedHeight * scale)),
+    scaled: true,
+  };
 }
 
 function iconForNav(section: NavSection) {
@@ -423,6 +464,7 @@ function ViewportCanvas({
   onCameraChange,
   onResize,
   onSelectEntity,
+  inputOnly = false,
 }: {
   sceneObjects: SceneObject[];
   sceneVersion: number;
@@ -440,6 +482,7 @@ function ViewportCanvas({
   onCameraChange: () => void;
   onResize: (size: { width: number; height: number }) => void;
   onSelectEntity: (id: string) => void;
+  inputOnly?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -449,6 +492,9 @@ function ViewportCanvas({
   const activeRef = useRef(true);
   const lastRenderedVersionRef = useRef<number | null>(null);
   const fastPreviewUntilRef = useRef(0);
+  const dirtyRef = useRef(true);
+  const lastDrawWasScaledRef = useRef(false);
+  const cameraRevisionFrameRef = useRef<number | null>(null);
   const dragging = useRef<'orbit' | 'pan' | null>(null);
   const dragStart = useRef({
     x: 0,
@@ -460,21 +506,56 @@ function ViewportCanvas({
     targetZ: 0,
   });
 
-  versionRef.current = sceneVersion;
+  if (versionRef.current !== sceneVersion) {
+    versionRef.current = sceneVersion;
+    dirtyRef.current = true;
+  }
+
+  const markViewportDirty = useCallback((resetVersion = true) => {
+    dirtyRef.current = true;
+    if (resetVersion) lastRenderedVersionRef.current = null;
+  }, []);
+
+  const scheduleCameraRevision = useCallback(() => {
+    if (cameraRevisionFrameRef.current !== null) return;
+    cameraRevisionFrameRef.current = window.requestAnimationFrame(() => {
+      cameraRevisionFrameRef.current = null;
+      onCameraChange();
+    });
+  }, [onCameraChange]);
 
   useEffect(() => {
+    if (inputOnly) return undefined;
     activeRef.current = true;
     lastRenderedVersionRef.current = null;
+    dirtyRef.current = true;
 
     const poll = async () => {
       if (!activeRef.current) return;
-      const { width, height } = sizeRef.current;
+      const fastPreview = performance.now() < fastPreviewUntilRef.current;
+      if (!dirtyRef.current && !playMode && !fastPreview) {
+        if (lastDrawWasScaledRef.current) {
+          markViewportDirty();
+        } else {
+          window.setTimeout(poll, 120);
+          return;
+        }
+      }
+      const { width, height } = fitViewportReadbackSize(
+        sizeRef.current.width,
+        sizeRef.current.height,
+        fastPreview ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
+      );
       const camera = cameraRef.current;
+      const lastVersion = !playMode && !fastPreview
+        ? lastRenderedVersionRef.current ?? undefined
+        : undefined;
+      dirtyRef.current = false;
       try {
         const buffer = await viewportReadback({
           width,
           height,
-          lastVersion: lastRenderedVersionRef.current ?? undefined,
+          lastVersion,
           yaw: camera.yaw,
           pitch: camera.pitch,
           distance: camera.distance,
@@ -493,6 +574,12 @@ function ViewportCanvas({
         const heightFromBackend = header[1];
         if (widthFromBackend > 0 && heightFromBackend > 0) {
           lastRenderedVersionRef.current = versionRef.current;
+          const expected = fitViewportReadbackSize(
+            sizeRef.current.width,
+            sizeRef.current.height,
+            fastPreview ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
+          );
+          lastDrawWasScaledRef.current = widthFromBackend !== expected.width || heightFromBackend !== expected.height;
           const canvas = canvasRef.current;
           if (canvas.width !== widthFromBackend || canvas.height !== heightFromBackend) {
             canvas.width = widthFromBackend;
@@ -514,15 +601,18 @@ function ViewportCanvas({
       } catch {
         // Browser preview intentionally falls through to the CSS fallback underneath.
       }
-      const fastPreview = performance.now() < fastPreviewUntilRef.current;
-      window.setTimeout(poll, playMode || fastPreview ? 16 : 120);
+      window.setTimeout(poll, playMode || fastPreview ? editorViewportFrameMs : 120);
     };
 
     poll();
     return () => {
       activeRef.current = false;
+      if (cameraRevisionFrameRef.current !== null) {
+        window.cancelAnimationFrame(cameraRevisionFrameRef.current);
+        cameraRevisionFrameRef.current = null;
+      }
     };
-  }, [cameraRef, playMode, selectedEntityId, viewMode]);
+  }, [cameraRef, inputOnly, markViewportDirty, playMode, selectedEntityId, viewMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -531,11 +621,12 @@ function ViewportCanvas({
       const next = { width: Math.round(width) || 640, height: Math.round(height) || 480 };
       sizeRef.current = next;
       onResize(next);
-      lastRenderedVersionRef.current = null;
+      markViewportDirty();
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.width = next.width;
-        canvas.height = next.height;
+        const nextReadback = fitViewportReadbackSize(next.width, next.height);
+        canvas.width = nextReadback.width;
+        canvas.height = nextReadback.height;
         contextRef.current = null;
       }
     };
@@ -648,8 +739,9 @@ function ViewportCanvas({
         camera.targetZ = dragStart.current.targetZ + (dx * Math.sin(yaw) - dy * Math.cos(yaw) * 0.5) * distanceScale;
       }
       lastRenderedVersionRef.current = null;
+      markViewportDirty();
       fastPreviewUntilRef.current = performance.now() + 180;
-      onCameraChange();
+      scheduleCameraRevision();
     };
     const handleMouseUp = () => {
       dragging.current = null;
@@ -657,9 +749,9 @@ function ViewportCanvas({
     const handleWheel = (event: WheelEvent) => {
       if (!containerRef.current?.contains(event.target as Node)) return;
       cameraRef.current.distance = Math.max(0.5, Math.min(100, cameraRef.current.distance + event.deltaY * 0.01));
-      lastRenderedVersionRef.current = null;
+      markViewportDirty();
       fastPreviewUntilRef.current = performance.now() + 180;
-      onCameraChange();
+      scheduleCameraRevision();
       event.preventDefault();
     };
     window.addEventListener('mousemove', handleMouseMove);
@@ -670,17 +762,22 @@ function ViewportCanvas({
       window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('wheel', handleWheel);
     };
-  }, [cameraRef, onCameraChange]);
+  }, [cameraRef, markViewportDirty, scheduleCameraRevision]);
 
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0 cursor-crosshair overflow-hidden bg-[#0f1013]"
+      className={cx(
+        'absolute inset-0 cursor-crosshair overflow-hidden',
+        inputOnly
+          ? 'z-[2] bg-transparent'
+          : 'bg-[radial-gradient(circle_at_50%_18%,rgba(96,165,250,0.10),transparent_32%),linear-gradient(180deg,#101721_0%,#081018_55%,#070A0F_100%)]',
+      )}
       onMouseDown={handleMouseDown}
       onContextMenu={(event) => event.preventDefault()}
     >
-      <ViewportGrid />
-      <canvas ref={canvasRef} className="relative z-[1] h-full w-full object-contain" />
+      {!inputOnly && <ViewportGrid />}
+      {!inputOnly && <canvas ref={canvasRef} className="relative z-[1] h-full w-full object-fill" />}
       {selectedScreenPosition && (
         <div
           className="pointer-events-none absolute z-[3] -translate-x-1/2 -translate-y-1/2"
@@ -713,9 +810,9 @@ function ViewportCanvas({
               camera.pitch = 0;
               camera.yaw = 3.14;
             }
-            lastRenderedVersionRef.current = null;
+            markViewportDirty();
             fastPreviewUntilRef.current = performance.now() + 180;
-            onCameraChange();
+            scheduleCameraRevision();
           }}
         />
       )}
@@ -814,6 +911,9 @@ export default function CalmEditorPrototype({
   const [viewMode, setViewMode] = useState<ViewMode>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
   const [cameraRevision, setCameraRevision] = useState(0);
+  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode>('canvas-readback');
+  const [viewportPresentationAdapters, setViewportPresentationAdapters] = useState<ViewportPresentationAdapter[]>([]);
+  const [nativeSceneError, setNativeSceneError] = useState<string | null>(null);
   const [selectedScript, setSelectedScript] = useState<string | null>(null);
   const [scriptContent, setScriptContent] = useState('');
   const [scriptSavedContent, setScriptSavedContent] = useState('');
@@ -837,6 +937,8 @@ export default function CalmEditorPrototype({
   const [projectAssets, setProjectAssets] = useState(mockAssets);
   const [consoleEntries, setConsoleEntries] = useState<EditorConsoleEntry[]>([]);
   const [selectedEntityDetails, setSelectedEntityDetails] = useState<EntityDetails | null>(null);
+  const sceneVersionRef = useRef(0);
+  const viewportFrameRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef({
     yaw: -0.5,
     pitch: 0.3,
@@ -847,6 +949,11 @@ export default function CalmEditorPrototype({
   });
 
   const selectedEntity = entities.find((entity) => entity.id === selectedEntityId) ?? entities[0];
+  const embeddedNativeAdapter = viewportPresentationAdapters.find((adapter) => adapter.mode === 'embedded-native-experimental');
+  const embeddedNativeAvailable = embeddedNativeAdapter?.available ?? false;
+  const nativeHostAdapter = viewportPresentationAdapters.find((adapter) => adapter.mode === 'native-host-window')
+    ?? viewportPresentationAdapters.find((adapter) => adapter.mode === 'editor-compositor');
+  const nativeHostAvailable = nativeHostAdapter?.available ?? false;
   const inspectorEntity = selectedEntityDetails
     ? {
       ...selectedEntity,
@@ -905,7 +1012,9 @@ export default function CalmEditorPrototype({
       ]);
       setBackendReady(true);
       setShellState(state);
-      setSceneVersion(state.scene_version ?? 0);
+      const nextSceneVersion = state.scene_version ?? 0;
+      sceneVersionRef.current = nextSceneVersion;
+      setSceneVersion(nextSceneVersion);
       const nextEntities = tree.objects.map(mapSceneObject);
       setEntities(nextEntities.length > 0 ? nextEntities : mockSceneEntities);
       setSelectedEntityId((current) => {
@@ -935,6 +1044,20 @@ export default function CalmEditorPrototype({
     }
   };
 
+  const refreshShellState = async () => {
+    try {
+      const state = await rpc<ShellState>('shell/get_state');
+      setBackendReady(true);
+      setShellState(state);
+      const nextSceneVersion = state.scene_version ?? 0;
+      if (nextSceneVersion !== sceneVersionRef.current) {
+        await refreshSceneTree();
+      }
+    } catch {
+      setBackendReady(false);
+    }
+  };
+
   const handleCameraChange = useCallback(() => {
     window.requestAnimationFrame(() => setCameraRevision((revision) => revision + 1));
   }, []);
@@ -944,6 +1067,45 @@ export default function CalmEditorPrototype({
       current.width === size.width && current.height === size.height ? current : size
     ));
   }, []);
+
+  const embeddedSceneViewport = useCallback(() => {
+    const rect = viewportFrameRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height)),
+    };
+  }, []);
+
+  const openNativeSceneViewport = useCallback(async () => {
+    const viewport = embeddedSceneViewport();
+    if (!viewport) throw new Error('Scene View frame is not ready yet.');
+    const camera = cameraRef.current;
+    const openSceneView = isNativeHostPresentation(viewportPresentation)
+      ? openZeroCopySceneView
+      : openExperimentalEmbeddedSceneView;
+    await openSceneView({
+      viewport,
+      yaw: camera.yaw,
+      pitch: camera.pitch,
+      distance: camera.distance,
+      targetX: camera.targetX,
+      targetY: camera.targetY,
+      targetZ: camera.targetZ,
+    });
+  }, [embeddedSceneViewport, viewportPresentation]);
+
+  const zeroCopySceneActive = backendReady
+    && (viewportPresentation === 'embedded-native-experimental' || isNativeHostPresentation(viewportPresentation))
+    && viewMode === '3d'
+    && !isPlaying
+    && !nativeSceneError;
+
+  const experimentalEmbeddedNativeActive = zeroCopySceneActive
+    && viewportPresentation === 'embedded-native-experimental';
+  const nativeHostSceneActive = zeroCopySceneActive && isNativeHostPresentation(viewportPresentation);
 
   const setSelectedTransform = async (axis: 'position' | 'rotation' | 'scale', index: number, value: number) => {
     setEntities((current) =>
@@ -1096,12 +1258,120 @@ export default function CalmEditorPrototype({
     refreshSceneTree();
     refreshAssets();
     refreshConsole();
+    viewportPresentationCapabilities()
+      .then((capabilities) => {
+        setViewportPresentationAdapters(capabilities.adapters);
+        setViewportPresentation((current) => {
+          const currentAdapter = capabilities.adapters.find((adapter) => adapter.mode === current);
+          return currentAdapter?.available ? current : capabilities.default_mode;
+        });
+      })
+      .catch(() => {});
     const interval = window.setInterval(() => {
-      refreshSceneTree();
+      refreshShellState();
       refreshConsole();
     }, 2000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (
+      !backendReady
+      || (viewportPresentation !== 'embedded-native-experimental' && !isNativeHostPresentation(viewportPresentation))
+      || viewMode !== '3d'
+      || isPlaying
+    ) return;
+    let cancelled = false;
+    openNativeSceneViewport()
+      .then(() => {
+        if (!cancelled) setNativeSceneError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setNativeSceneError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backendReady, isPlaying, openNativeSceneViewport, sceneVersion, viewportPresentation, viewMode]);
+
+  useEffect(() => {
+    if (!zeroCopySceneActive) return;
+    const frame = viewportFrameRef.current;
+    if (!frame) return;
+    let raf: number | null = null;
+    const syncViewport = () => {
+      if (raf !== null) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        raf = null;
+        const viewport = embeddedSceneViewport();
+        if (!viewport) return;
+        const camera = cameraRef.current;
+        const syncSceneView = isNativeHostPresentation(viewportPresentation)
+          ? syncZeroCopySceneView
+          : syncExperimentalEmbeddedSceneView;
+        syncSceneView({
+          viewport,
+          yaw: camera.yaw,
+          pitch: camera.pitch,
+          distance: camera.distance,
+          targetX: camera.targetX,
+          targetY: camera.targetY,
+          targetZ: camera.targetZ,
+        }).catch((error) => {
+          setNativeSceneError(error instanceof Error ? error.message : String(error));
+        });
+      });
+    };
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(frame);
+    window.addEventListener('resize', syncViewport);
+    window.addEventListener('scroll', syncViewport, true);
+    syncViewport();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', syncViewport);
+      window.removeEventListener('scroll', syncViewport, true);
+      if (raf !== null) window.cancelAnimationFrame(raf);
+    };
+  }, [cameraRevision, embeddedSceneViewport, viewportPresentation, zeroCopySceneActive]);
+
+  useEffect(() => {
+    if (!backendReady) return;
+    const frame = viewportFrameRef.current;
+    if (!frame) return;
+    let raf: number | null = null;
+    const syncViewport = () => {
+      if (raf !== null) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        raf = null;
+        const viewport = embeddedSceneViewport();
+        if (!viewport) return;
+        syncEditorCompositorViewport({ viewport }).catch(() => {});
+      });
+    };
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(frame);
+    window.addEventListener('resize', syncViewport);
+    window.addEventListener('scroll', syncViewport, true);
+    syncViewport();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', syncViewport);
+      window.removeEventListener('scroll', syncViewport, true);
+      if (raf !== null) window.cancelAnimationFrame(raf);
+    };
+  }, [backendReady, embeddedSceneViewport]);
+
+  useEffect(() => {
+    if (
+      (viewportPresentation === 'embedded-native-experimental' || isNativeHostPresentation(viewportPresentation))
+      && viewMode === '3d'
+      && !isPlaying
+      && !nativeSceneError
+    ) return;
+    closeNativeSceneView().catch(() => {});
+  }, [isPlaying, nativeSceneError, viewportPresentation, viewMode]);
 
   useEffect(() => {
     setSelectedScript((current) => {
@@ -1231,7 +1501,11 @@ export default function CalmEditorPrototype({
   }, []);
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-base)] text-[13px] text-[var(--text-primary)]">
+    <div
+      className={cx(
+        'flex h-full min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-base)] text-[13px] text-[var(--text-primary)]',
+      )}
+    >
       <header className="flex h-12 min-h-12 items-center gap-3 border-b border-[var(--border)] bg-[rgba(18,19,22,0.88)] px-3 backdrop-blur-xl">
         <div className="flex min-w-[232px] items-center gap-2">
           <div className="grid size-7 place-items-center rounded-[var(--radius-md)] border border-[rgba(34,197,94,0.22)] bg-[rgba(34,197,94,0.08)]">
@@ -1538,7 +1812,12 @@ export default function CalmEditorPrototype({
           </div>
         </aside>
 
-        <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#101114]">
+        <section
+          className={cx(
+            'relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#101114]',
+            nativeHostSceneActive && 'bg-transparent',
+          )}
+        >
           <div className="flex h-10 items-center justify-between border-b border-[var(--border)] bg-[rgba(15,16,18,0.82)] px-3">
             <div className="flex min-w-0 items-center gap-1">
               {(['select', 'move', 'rotate', 'scale'] as TransformTool[]).map((item) => (
@@ -1569,6 +1848,49 @@ export default function CalmEditorPrototype({
               <button type="button" className="h-7 rounded-[var(--radius-sm)] px-2 text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 Lit
               </button>
+              <button
+                type="button"
+                className={cx(
+                  'h-7 rounded-[var(--radius-sm)] px-2 text-[11px] transition-colors',
+                  isNativeHostPresentation(viewportPresentation)
+                    ? 'bg-[rgba(34,197,94,0.12)] text-[var(--brand)]'
+                    : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                )}
+                title={nativeHostAdapter?.reason ?? 'Native host window owns Scene View and embeds Web UI panels.'}
+                disabled={!nativeHostAvailable}
+                onClick={() => {
+                  setNativeSceneError(null);
+                  setViewportPresentation((value) => (
+                    isNativeHostPresentation(value)
+                      ? 'canvas-readback'
+                      : 'native-host-window'
+                  ));
+                }}
+              >
+                Zero-copy
+              </button>
+              {embeddedNativeAvailable && (
+                <button
+                  type="button"
+                  className={cx(
+                    'h-7 rounded-[var(--radius-sm)] px-2 text-[11px] transition-colors',
+                    viewportPresentation === 'embedded-native-experimental'
+                      ? 'bg-[rgba(245,158,11,0.12)] text-[#fbbf24]'
+                      : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                  )}
+                  title={embeddedNativeAdapter?.reason ?? 'Experimental zero-copy child surface.'}
+                  onClick={() => {
+                    setNativeSceneError(null);
+                    setViewportPresentation((value) => (
+                      value === 'embedded-native-experimental'
+                        ? 'canvas-readback'
+                        : 'embedded-native-experimental'
+                    ));
+                  }}
+                >
+                  Child surface
+                </button>
+              )}
               <div className="ml-1 flex rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5">
                 {(['3d', '2d'] as ViewMode[]).map((mode) => (
                   <button
@@ -1588,25 +1910,73 @@ export default function CalmEditorPrototype({
             <div className="flex items-center gap-2 font-mono text-[10px] text-[var(--text-muted)]">
               <span className={cx('size-1.5 rounded-full', isPlaying ? 'bg-[var(--brand)]' : 'bg-[var(--text-muted)]')} />
               <span>{isPlaying ? 'Play mode' : 'Editor mode'}</span>
+              <span>
+                {zeroCopySceneActive
+                  ? isNativeHostPresentation(viewportPresentation)
+                    ? 'native host · zero-copy'
+                    : 'experimental native · zero-copy'
+                  : 'canvas 1080p fallback'}
+              </span>
               <span>{viewportSize.width}x{viewportSize.height}</span>
             </div>
           </div>
 
-          <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0f1013]">
-            <ViewportCanvas
-              key={`${viewMode}-${cameraRevision > -1}`}
-              sceneObjects={sceneObjects}
-              sceneVersion={sceneVersion + cameraRevision}
-              selectedEntityId={inspectorEntity?.id ?? null}
-              viewMode={viewMode}
-              playMode={isPlaying}
-              cameraRef={cameraRef}
-              onCameraChange={handleCameraChange}
-              onResize={handleViewportResize}
-              onSelectEntity={selectEntity}
-            />
+          <div
+            ref={viewportFrameRef}
+            className={cx(
+              'relative min-h-0 flex-1 overflow-hidden border-t border-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]',
+              nativeHostSceneActive
+                ? 'bg-transparent'
+                : 'bg-[radial-gradient(circle_at_50%_18%,rgba(96,165,250,0.10),transparent_32%),linear-gradient(180deg,#101721_0%,#081018_55%,#070A0F_100%)]',
+            )}
+          >
+            {zeroCopySceneActive ? (
+              <div className="pointer-events-none absolute inset-0 z-[1] bg-[linear-gradient(180deg,rgba(7,10,15,0.10),transparent_18%,transparent_78%,rgba(7,10,15,0.18))]" aria-hidden="true">
+                <ViewportGrid />
+                <div className="absolute right-3 top-3 rounded-[var(--radius-sm)] border border-[rgba(245,158,11,0.30)] bg-[rgba(7,10,15,0.72)] px-2 py-1 font-mono text-[10px] text-[#fbbf24] backdrop-blur-xl">
+                  {isNativeHostPresentation(viewportPresentation)
+                    ? 'zero-copy · native host'
+                    : 'zero-copy · experimental child surface'}
+                </div>
+              </div>
+            ) : !zeroCopySceneActive ? (
+              <ViewportCanvas
+                key={`${viewMode}-${cameraRevision > -1}`}
+                sceneObjects={sceneObjects}
+                sceneVersion={sceneVersion + cameraRevision}
+                selectedEntityId={inspectorEntity?.id ?? null}
+                viewMode={viewMode}
+                playMode={isPlaying}
+                cameraRef={cameraRef}
+                onCameraChange={handleCameraChange}
+                onResize={handleViewportResize}
+                onSelectEntity={selectEntity}
+              />
+            ) : null}
 
-            <div className="absolute left-4 bottom-4 flex max-w-[min(520px,60%)] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[rgba(13,14,16,0.72)] px-3 py-2 backdrop-blur-xl">
+            {zeroCopySceneActive && (
+              <ViewportCanvas
+                key={`native-input-${viewMode}-${cameraRevision > -1}`}
+                sceneObjects={sceneObjects}
+                sceneVersion={sceneVersion + cameraRevision}
+                selectedEntityId={inspectorEntity?.id ?? null}
+                viewMode={viewMode}
+                playMode={isPlaying}
+                cameraRef={cameraRef}
+                onCameraChange={handleCameraChange}
+                onResize={handleViewportResize}
+                onSelectEntity={selectEntity}
+                inputOnly
+              />
+            )}
+
+            {nativeSceneError && (
+              <div className="absolute left-4 top-4 z-[4] max-w-[420px] rounded-[var(--radius-md)] border border-[rgba(245,158,11,0.36)] bg-[rgba(24,18,10,0.88)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)] backdrop-blur-xl">
+                Native Scene View failed, using canvas fallback: {nativeSceneError}
+              </div>
+            )}
+
+            <div className="absolute bottom-4 left-4 z-[4] flex max-w-[min(520px,60%)] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[rgba(13,14,16,0.72)] px-3 py-2 backdrop-blur-xl">
               <span className="font-mono text-[11px] text-[var(--text-muted)]">World &gt;</span>
               <span className="min-w-0 truncate text-[12px] font-semibold">{inspectorEntity.name}</span>
               <span className="font-mono text-[11px] text-[var(--text-muted)]">
@@ -1615,7 +1985,7 @@ export default function CalmEditorPrototype({
             </div>
 
             <form
-              className="absolute right-4 bottom-4 flex w-[min(360px,42%)] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[rgba(13,14,16,0.78)] p-2 backdrop-blur-xl"
+              className="absolute bottom-4 right-4 z-[4] flex w-[min(360px,42%)] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[rgba(13,14,16,0.78)] p-2 backdrop-blur-xl"
               onSubmit={(event) => {
                 event.preventDefault();
                 setAiPrompt('');

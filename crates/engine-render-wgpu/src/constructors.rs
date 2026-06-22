@@ -112,6 +112,34 @@ impl WgpuRenderDevice {
         pollster::block_on(Self::new_async_with_performance(window, performance))
     }
 
+    /// Creates a surface renderer from raw platform handles.
+    ///
+    /// This is used by native editor hosts that present into a toolkit-owned
+    /// child surface instead of a winit window.
+    ///
+    /// # Safety
+    ///
+    /// The raw display/window handles must remain valid for the lifetime of the
+    /// returned renderer, and the host toolkit must keep the surface alive until
+    /// the renderer is dropped.
+    pub unsafe fn new_raw_surface_with_performance(
+        raw_display_handle: Option<wgpu::rwh::RawDisplayHandle>,
+        raw_window_handle: wgpu::rwh::RawWindowHandle,
+        width: u32,
+        height: u32,
+        performance: RenderPerformanceConfig,
+    ) -> EngineResult<Self> {
+        pollster::block_on(unsafe {
+            Self::new_raw_surface_async_with_performance(
+                raw_display_handle,
+                raw_window_handle,
+                width,
+                height,
+                performance,
+            )
+        })
+    }
+
     /// Creates a wgpu device from a winit window asynchronously.
     pub async fn new_async(window: &winit::window::Window) -> EngineResult<Self> {
         Self::new_async_with_performance(window, RenderPerformanceConfig::default()).await
@@ -194,6 +222,33 @@ impl WgpuRenderDevice {
         Ok(renderer)
     }
 
+    /// Creates a surface renderer asynchronously from raw platform handles.
+    ///
+    /// # Safety
+    ///
+    /// The raw display/window handles must remain valid for the lifetime of the
+    /// returned renderer.
+    pub async unsafe fn new_raw_surface_async_with_performance(
+        raw_display_handle: Option<wgpu::rwh::RawDisplayHandle>,
+        raw_window_handle: wgpu::rwh::RawWindowHandle,
+        width: u32,
+        height: u32,
+        performance: RenderPerformanceConfig,
+    ) -> EngineResult<Self> {
+        let instance = wgpu::Instance::default();
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })
+        }
+        .map_err(|error| EngineError::other(format!("create wgpu surface failed: {error}")))?;
+        // SAFETY: instance is moved into the returned struct and outlives the surface.
+        let surface: wgpu::Surface<'static> = unsafe { std::mem::transmute(surface) };
+        Self::new_surface_async_with_performance(instance, surface, width, height, performance)
+            .await
+    }
+
     /// Creates a wgpu device configured to present into a surface asynchronously.
     pub async fn new_surface_async(
         surface: wgpu::Surface<'static>,
@@ -201,6 +256,23 @@ impl WgpuRenderDevice {
         height: u32,
     ) -> EngineResult<Self> {
         let instance = wgpu::Instance::default();
+        Self::new_surface_async_with_performance(
+            instance,
+            surface,
+            width,
+            height,
+            RenderPerformanceConfig::default(),
+        )
+        .await
+    }
+
+    async fn new_surface_async_with_performance(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        performance: RenderPerformanceConfig,
+    ) -> EngineResult<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -243,15 +315,15 @@ impl WgpuRenderDevice {
             format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: select_present_mode(&caps.present_modes, performance.present_strategy),
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: performance.maximum_frame_latency.max(1),
         };
         surface.configure(&device, &surface_config);
         let image_format = from_wgpu_format(format).unwrap_or(ImageFormat::Rgba8Srgb);
 
-        Self::from_device(
+        let mut renderer = Self::from_device(
             instance,
             adapter,
             Arc::new(device),
@@ -260,7 +332,9 @@ impl WgpuRenderDevice {
             height,
             image_format,
             Some((surface, surface_config)),
-        )
+        )?;
+        renderer.apply_performance_config(performance);
+        Ok(renderer)
     }
 
     /// Creates a wgpu render device from pre-created shared device and queue.
@@ -385,6 +459,15 @@ impl WgpuRenderDevice {
                 view_projection: IDENTITY_MAT4,
                 camera_position: [0.0, 0.0, 5.0, 1.0],
                 camera_forward: [0.0, 0.0, -1.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let temporal_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster temporal uniform"),
+            contents: bytemuck::bytes_of(&TemporalUniform {
+                previous_view_projection: IDENTITY_MAT4,
+                current_view_projection: IDENTITY_MAT4,
+                jitter_reset: [0.0, 0.0, 1.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -631,6 +714,16 @@ impl WgpuRenderDevice {
                     wgpu::BindGroupLayoutEntry {
                         binding: 13,
                         visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -886,6 +979,10 @@ impl WgpuRenderDevice {
                     binding: 13,
                     resource: fog_uniform.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: temporal_uniform.as_entire_binding(),
+                },
             ],
         });
 
@@ -1134,6 +1231,11 @@ impl WgpuRenderDevice {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
             }),
             multiview_mask: None,
@@ -1203,6 +1305,11 @@ impl WgpuRenderDevice {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -1717,6 +1824,36 @@ impl WgpuRenderDevice {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let post_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1736,7 +1873,8 @@ impl WgpuRenderDevice {
                 upscale_sharpness: 0.35,
                 ssgi_enabled: 1.0,
                 ssgi_intensity: SSGI_INTENSITY,
-                _pad: [0.0; 2],
+                ssr_enabled: 1.0,
+                ssr_intensity: 0.35,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -2030,6 +2168,26 @@ impl WgpuRenderDevice {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let ssgi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2163,7 +2321,9 @@ impl WgpuRenderDevice {
                 thickness: 0.08,
                 sample_count: 8.0,
                 frame_index: 0.0,
-                _pad: [0.0; 3],
+                history_blend: 0.0,
+                reset_history: 1.0,
+                _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -2243,6 +2403,21 @@ impl WgpuRenderDevice {
             view_formats: &[],
         });
         let dummy_tex_view = dummy_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aster post dummy depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_depth_view = dummy_depth.create_view(&wgpu::TextureViewDescriptor::default());
         let post_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("aster post bind group"),
             layout: &post_bind_group_layout,
@@ -2269,6 +2444,18 @@ impl WgpuRenderDevice {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&dummy_tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&dummy_depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&dummy_tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: wgpu::BindingResource::TextureView(&dummy_tex_view),
                 },
             ],
@@ -2402,6 +2589,7 @@ impl WgpuRenderDevice {
             transparent_pipeline,
             camera_bind_group,
             camera_uniform,
+            temporal_uniform,
             lighting_uniform,
             _default_texture: default_texture,
             default_texture_view,
@@ -2427,6 +2615,7 @@ impl WgpuRenderDevice {
             surface_depth: None,
             surface_depth_view: None,
             surface_suspended: false,
+            surface_viewport: None,
             next_gui_texture: 1,
             gui_textures: HashMap::new(),
             gui_pipeline,
@@ -2501,6 +2690,8 @@ impl WgpuRenderDevice {
             ssgi_cached_bg: None,
             ssgi_output_texture: None,
             ssgi_output_view: None,
+            ssgi_history_texture: None,
+            ssgi_history_view: None,
             ssgi_uniform,
             ssgi_compute_pipeline,
             ssgi_compute_bgl: Some(ssgi_compute_bgl),
@@ -2509,6 +2700,8 @@ impl WgpuRenderDevice {
             hdr_normal_view: None,
             hdr_albedo_texture: None,
             hdr_albedo_view: None,
+            hdr_motion_texture: None,
+            hdr_motion_view: None,
             post_target_width: 0,
             post_target_height: 0,
             ibl_irradiance_compute,
@@ -2541,6 +2734,9 @@ impl WgpuRenderDevice {
             latest_submitted_objects: 0,
             latest_visible_objects: 0,
             latest_culled_objects: 0,
+            latest_submitted_lights: 0,
+            latest_visible_lights: 0,
+            latest_culled_lights: 0,
             latest_draw_calls: 0,
             latest_triangles: 0,
             gpu_particles,

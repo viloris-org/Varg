@@ -2,8 +2,8 @@
 
 use engine_core::math::{Transform, Vec3};
 use engine_render::{
-    RenderCamera, RenderDevice, RenderFrame, RenderPlatformClass, RenderQualityMode,
-    RenderScalingContext, RenderScalingSettings, RenderWorld, UpscalerKind,
+    RenderCamera, RenderDevice, RenderFrame, RenderLight, RenderLightKind, RenderPlatformClass,
+    RenderQualityMode, RenderScalingContext, RenderScalingSettings, RenderWorld, UpscalerKind,
 };
 use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 
@@ -40,6 +40,7 @@ fn live_spatial_upscaling_renders_internal_resolution_to_output_resolution() {
     assert_eq!((metrics.internal_width, metrics.internal_height), (80, 45));
     assert_eq!((metrics.output_width, metrics.output_height), (160, 90));
     assert_eq!(metrics.upscaler, UpscalerKind::BuiltInSpatial);
+    assert_eq!(device.motion_vector_target_size(), Some((80, 45)));
 
     let (width, height, pixels) = device
         .readback_default_target()
@@ -66,6 +67,7 @@ fn live_spatial_upscaling_renders_internal_resolution_to_output_resolution() {
     let metrics = device.performance_metrics();
     assert_eq!((metrics.internal_width, metrics.internal_height), (160, 90));
     assert_eq!(metrics.upscaler, UpscalerKind::Native);
+    assert_eq!(device.motion_vector_target_size(), Some((160, 90)));
 }
 
 #[test]
@@ -121,6 +123,7 @@ fn offscreen_render_updates_temporal_camera_metadata() {
         .expect("resized temporal render should succeed");
     let (_, resize_reset) = device.latest_temporal_camera();
     assert!(resize_reset);
+    assert_eq!(device.motion_vector_target_size(), Some((80, 45)));
 }
 
 #[test]
@@ -147,4 +150,43 @@ fn mobile_vendor_upscaler_request_uses_portable_wgpu_fallback() {
 
     assert_eq!(selection.upscaler, UpscalerKind::BuiltInSpatial);
     assert!(selection.reason.contains("MetalFx unavailable"));
+}
+
+#[test]
+fn light_budget_pressure_is_reported_in_metrics() {
+    let Ok(mut device) = WgpuRenderDevice::new_offscreen(WgpuOffscreenConfig {
+        width: 160,
+        height: 90,
+        format: engine_render::ImageFormat::Rgba8Srgb,
+    }) else {
+        eprintln!("skipping wgpu light metrics test: no compatible adapter");
+        return;
+    };
+
+    let lights = (0..40)
+        .map(|index| RenderLight {
+            object: engine_core::EntityId::from_u128(index + 1),
+            transform: Transform {
+                translation: Vec3::new(index as f32 * 0.25, 0.0, -3.0),
+                ..Transform::default()
+            },
+            kind: RenderLightKind::Point,
+            color: Vec3::ONE,
+            intensity: 1.0,
+            range: 6.0,
+            spot_angle: 45.0,
+        })
+        .collect();
+    let world = RenderWorld {
+        lights,
+        ..RenderWorld::default()
+    };
+
+    device
+        .submit_render_world(&world, RenderFrame { frame_index: 0 })
+        .expect("light-budget render should succeed");
+    let metrics = device.performance_metrics();
+    assert_eq!(metrics.submitted_lights, 40);
+    assert_eq!(metrics.visible_lights, 32);
+    assert_eq!(metrics.culled_lights, 8);
 }

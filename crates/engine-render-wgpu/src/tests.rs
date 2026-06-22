@@ -46,10 +46,51 @@ fn frame_pipeline_plan_preserves_compiled_pass_order() {
 }
 
 #[test]
+fn frame_pipeline_plan_recognizes_hybrid_deferred_boundaries() {
+    let mut builder = engine_render::RenderGraphBuilder::new();
+    let shadow = builder.add_pass("shadow");
+    let gbuffer = builder.add_pass("gbuffer");
+    let deferred = builder.add_pass("deferred-lighting");
+    let post = builder.add_pass("post");
+    builder.order_before(shadow, gbuffer);
+    builder.order_before(gbuffer, deferred);
+    builder.order_before(deferred, post);
+    let plan = FramePipelinePlan::from_graph(&builder.build());
+    assert_eq!(
+        plan.steps,
+        vec![
+            FramePipelineStep::Shadow,
+            FramePipelineStep::GBuffer,
+            FramePipelineStep::DeferredLighting,
+            FramePipelineStep::Post,
+        ]
+    );
+    assert!(plan.gbuffer);
+    assert!(plan.deferred_lighting);
+    assert!(!plan.forward);
+}
+
+#[test]
 fn dynamic_resolution_preserves_4k_output_with_scaled_internal_target() {
     assert_eq!(scaled_render_size(3840, 2160, 1.0), (3840, 2160));
     assert_eq!(scaled_render_size(3840, 2160, 0.75), (2880, 1620));
     assert_eq!(scaled_render_size(3840, 2160, 0.5), (1920, 1080));
+}
+
+#[test]
+fn surface_viewport_rect_clamps_to_swapchain_bounds() {
+    assert_eq!(
+        SurfaceViewportRect::new(100, 50, 640, 360).clamped_to(1920, 1080),
+        SurfaceViewportRect::new(100, 50, 640, 360)
+    );
+    assert_eq!(
+        SurfaceViewportRect::new(1900, 1070, 640, 360).clamped_to(1920, 1080),
+        SurfaceViewportRect::new(1900, 1070, 20, 10)
+    );
+    assert_eq!(
+        SurfaceViewportRect::new(0, 0, 0, 0).clamped_to(0, 0),
+        SurfaceViewportRect::new(0, 0, 1, 1)
+    );
 }
 
 #[test]
@@ -70,6 +111,8 @@ fn forward_shader_binds_and_samples_all_csm_cascades() {
     }
     assert!(FORWARD_SHADER.contains("params: vec4<f32>"));
     assert!(FORWARD_SHADER.contains("let texel = csm.params.y"));
+    assert!(FORWARD_SHADER.contains("blocker_ratio"));
+    assert!(FORWARD_SHADER.contains("let penumbra = mix(1.0, 6.0, blocker_ratio)"));
     assert!(!FORWARD_SHADER.contains("let texel = 1.0 / 4096.0"));
     assert!(!FORWARD_SHADER.contains("- 4.0"));
 }
@@ -91,8 +134,24 @@ fn forward_shader_selects_cascades_with_linear_camera_depth() {
 #[test]
 fn gpu_uniform_structs_match_wgsl_alignment() {
     assert_eq!(std::mem::size_of::<CameraUniform>(), 96);
+    assert_eq!(
+        std::mem::size_of::<LightingUniform>(),
+        32 + MAX_FORWARD_LIGHTS * std::mem::size_of::<ForwardLightUniform>()
+    );
     assert_eq!(std::mem::size_of::<CsmUniform>(), 352);
     assert_eq!(std::mem::size_of::<FogUniform>(), 32);
+}
+
+#[test]
+fn forward_and_ssgi_shaders_expose_p1_p2_temporal_lighting_inputs() {
+    assert!(FORWARD_SHADER.contains("lights: array<ForwardLight, 32>"));
+    assert!(SSGI_SHADER.contains("var motion_tex: texture_2d<f32>"));
+    assert!(SSGI_SHADER.contains("var history_tex: texture_2d<f32>"));
+    assert!(SSGI_SHADER.contains("history_uv = clamp(uv - motion"));
+    assert!(SSGI_SHADER.contains("ssgi.reset_history > 0.5"));
+    assert!(POST_SHADER.contains("var depth_tex: texture_depth_2d"));
+    assert!(POST_SHADER.contains("fn screen_space_reflection"));
+    assert!(POST_SHADER.contains("post.ssr_intensity"));
 }
 
 #[test]
@@ -241,6 +300,9 @@ fn packs_scene_lights_into_forward_uniform() {
         particle_emitters: vec![],
         skybox: None,
         fog: None,
+        lighting_mode: Default::default(),
+        global_illumination: Default::default(),
+        shadow_virtualization: Default::default(),
     };
 
     let uniform = lighting_uniform_from_world(&world);
@@ -266,6 +328,9 @@ fn mesh_batches_group_objects_without_per_object_mesh_names() {
         particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
+        lighting_mode: Default::default(),
+        global_illumination: Default::default(),
+        shadow_virtualization: Default::default(),
     };
 
     let batches = test_mesh_batches(&world);
@@ -291,6 +356,9 @@ fn mesh_batches_merge_particles_with_plane_objects() {
         particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
+        lighting_mode: Default::default(),
+        global_illumination: Default::default(),
+        shadow_virtualization: Default::default(),
     };
 
     let batches = test_mesh_batches(&world);
@@ -504,7 +572,7 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
             4.0,
         ),
     ];
-    for index in 0..10 {
+    for index in 0..48 {
         lights.push(test_light(
             10 + index,
             RenderLightKind::Point,
@@ -522,6 +590,9 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
         particle_emitters: Vec::new(),
         skybox: None,
         fog: None,
+        lighting_mode: Default::default(),
+        global_illumination: Default::default(),
+        shadow_virtualization: Default::default(),
     };
 
     let selected = select_forward_lights(&world);

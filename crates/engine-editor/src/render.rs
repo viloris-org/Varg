@@ -92,16 +92,18 @@ impl<R: RenderDevice> EditorRenderer<R> {
     }
 }
 
-/// Builds the default editor render graph (shadow → forward → outline → post → gui).
+/// Builds the default editor render graph (shadow → gbuffer → deferred-lighting → outline → post → gui).
 pub fn build_editor_render_graph() -> RenderGraph {
     let mut builder = RenderGraphBuilder::new();
     let shadow = builder.add_pass("shadow");
-    let forward = builder.add_pass("forward");
+    let gbuffer = builder.add_pass("gbuffer");
+    let deferred = builder.add_pass("deferred-lighting");
     let outline = builder.add_pass("outline");
     let post = builder.add_pass("post");
     let gui = builder.add_pass("gui");
-    builder.order_before(shadow, forward);
-    builder.order_before(forward, outline);
+    builder.order_before(shadow, gbuffer);
+    builder.order_before(gbuffer, deferred);
+    builder.order_before(deferred, outline);
     builder.order_before(outline, post);
     builder.order_before(post, gui);
     builder.build()
@@ -182,11 +184,21 @@ mod tests {
     use engine_render::HeadlessRenderDevice;
 
     #[test]
-    fn editor_render_graph_has_five_passes_in_order() {
+    fn editor_render_graph_has_hybrid_deferred_passes_in_order() {
         let graph = build_editor_render_graph();
-        assert_eq!(graph.pass_count(), 5);
+        assert_eq!(graph.pass_count(), 6);
         let names: Vec<&str> = graph.passes.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["shadow", "forward", "outline", "post", "gui"]);
+        assert_eq!(
+            names,
+            [
+                "shadow",
+                "gbuffer",
+                "deferred-lighting",
+                "outline",
+                "post",
+                "gui"
+            ]
+        );
     }
 
     #[test]

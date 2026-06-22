@@ -120,6 +120,18 @@ impl WgpuRenderDevice {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&self.bloom_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_motion_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.ssgi_history_view.as_ref().unwrap(),
+                        ),
+                    },
                 ],
             }));
             self.ssgi_cached_bg = Some(Arc::clone(&bg));
@@ -150,6 +162,31 @@ impl WgpuRenderDevice {
         cpass.set_pipeline(pipeline);
         cpass.set_bind_group(0, &**ssgi_bg, &[]);
         cpass.dispatch_workgroups((w + 7) / 8, (h + 7) / 8, 1);
+        drop(cpass);
+        if let (Some(output), Some(history)) = (
+            self.ssgi_output_texture.as_ref(),
+            self.ssgi_history_texture.as_ref(),
+        ) {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: output,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: history,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
     pub(crate) fn ensure_bloom_bind_groups(
@@ -260,6 +297,13 @@ impl WgpuRenderDevice {
     pub(crate) fn ensure_post_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
         if self.post_cached_bg.is_none() {
             let hdr_cv = &self.hdr_target.as_ref().unwrap().color_view;
+            let depth_view = self
+                .hdr_target
+                .as_ref()
+                .unwrap()
+                .depth_view
+                .as_ref()
+                .unwrap();
             let ssao_view = self
                 .ssao_output_view
                 .as_ref()
@@ -299,6 +343,22 @@ impl WgpuRenderDevice {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(ssgi_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_normal_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_albedo_view.as_ref().unwrap(),
+                        ),
+                    },
                 ],
             }));
             self.post_cached_bg = Some(Arc::clone(&bg));
@@ -313,8 +373,18 @@ impl WgpuRenderDevice {
         encoder: &mut wgpu::CommandEncoder,
         res: &FrameResources,
         output_view: &wgpu::TextureView,
+        viewport: Option<SurfaceViewportRect>,
     ) {
         let post_bg = res.post_bg.as_ref().unwrap();
+        let load = viewport.map_or(
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            |_| wgpu::LoadOp::Load,
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("aster post composite pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -322,12 +392,7 @@ impl WgpuRenderDevice {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -338,6 +403,17 @@ impl WgpuRenderDevice {
         });
         pass.set_pipeline(&self.post_pipeline);
         pass.set_bind_group(0, &**post_bg, &[]);
+        if let Some(viewport) = viewport {
+            pass.set_viewport(
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+        }
         pass.draw(0..3, 0..1);
     }
 
@@ -426,6 +502,8 @@ impl WgpuRenderDevice {
         if need_create {
             self.ssgi_output_view = None;
             self.ssgi_output_texture = None;
+            self.ssgi_history_view = None;
+            self.ssgi_history_texture = None;
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("aster ssgi output"),
                 size: wgpu::Extent3d {
@@ -437,12 +515,31 @@ impl WgpuRenderDevice {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.ssgi_output_texture = Some(tex);
             self.ssgi_output_view = Some(view);
+            let history = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("aster ssgi history"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.ssgi_history_view =
+                Some(history.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.ssgi_history_texture = Some(history);
             self.ssgi_cached_bg = None;
             self.post_cached_bg = None;
         }

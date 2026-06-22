@@ -4,6 +4,62 @@ use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
 
 impl WgpuRenderDevice {
+    pub(crate) fn upload_lighting_uniform(&mut self, world: &RenderWorld) {
+        let lighting = lighting_uniform_from_world(world);
+        self.latest_submitted_lights = world.lights.len() as u32;
+        self.latest_visible_lights = lighting.params[0];
+        self.latest_culled_lights = self
+            .latest_submitted_lights
+            .saturating_sub(self.latest_visible_lights);
+        self.queue
+            .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+    }
+
+    pub(crate) fn lighting_mode_metrics(
+        &self,
+        world: &RenderWorld,
+        plan: &FramePipelinePlan,
+    ) -> (bool, u32, u32) {
+        let hybrid_deferred = plan.gbuffer
+            || world.lighting_mode == engine_render::RenderLightingMode::HybridDeferred;
+        let active_gi_probes = match &world.global_illumination {
+            engine_render::RenderGlobalIllumination::ProbeVolume(volume) => {
+                volume.counts.iter().product()
+            }
+            engine_render::RenderGlobalIllumination::ScreenSpace => 0,
+        };
+        let virtual_shadow_pages = match world.shadow_virtualization {
+            engine_render::RenderShadowVirtualization::VirtualPages { max_pages, .. } => max_pages,
+            engine_render::RenderShadowVirtualization::Cascaded => 0,
+        };
+        (hybrid_deferred, active_gi_probes, virtual_shadow_pages)
+    }
+
+    pub(crate) fn upload_temporal_uniform(&self) {
+        self.queue.write_buffer(
+            &self.temporal_uniform,
+            0,
+            bytemuck::bytes_of(&TemporalUniform {
+                previous_view_projection: mat4_from_flat(
+                    self.latest_temporal_camera.previous_view_projection,
+                ),
+                current_view_projection: mat4_from_flat(
+                    self.latest_temporal_camera.view_projection,
+                ),
+                jitter_reset: [
+                    self.latest_temporal_camera.jitter[0],
+                    self.latest_temporal_camera.jitter[1],
+                    if self.reset_temporal_history {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                ],
+            }),
+        );
+    }
+
     pub(crate) fn collect_gpu_frame_time(&mut self) {
         let Some(receiver) = self.gpu_timestamp_receiver.as_ref() else {
             return;
@@ -88,6 +144,7 @@ impl WgpuRenderDevice {
         batches: &[(String, u32, String, bool)],
         resources: &FrameResources,
         output_view: &wgpu::TextureView,
+        output_viewport: Option<SurfaceViewportRect>,
         ssao_enabled: bool,
         ssgi_enabled: bool,
         bloom_enabled: bool,
@@ -98,7 +155,15 @@ impl WgpuRenderDevice {
                 FramePipelineStep::Shadow => {
                     self.encode_csm_shadow_passes(encoder, csm, batches);
                 }
+                FramePipelineStep::GBuffer => {
+                    self.encode_gpu_particle_compute(encoder);
+                    self.encode_hdr_forward_passes(encoder, batches);
+                }
+                FramePipelineStep::DeferredLighting => {}
                 FramePipelineStep::Forward => {
+                    if plan.gbuffer {
+                        continue;
+                    }
                     self.encode_gpu_particle_compute(encoder);
                     self.encode_hdr_forward_passes(encoder, batches);
                 }
@@ -119,7 +184,7 @@ impl WgpuRenderDevice {
                     if bloom_enabled {
                         let _ = self.encode_bloom_pass(encoder, resources);
                     }
-                    self.encode_post_pass(encoder, resources, output_view);
+                    self.encode_post_pass(encoder, resources, output_view, output_viewport);
                     composite_encoded = true;
                 }
                 FramePipelineStep::Upscale | FramePipelineStep::Post => {}
@@ -135,7 +200,7 @@ impl WgpuRenderDevice {
             if bloom_enabled {
                 let _ = self.encode_bloom_pass(encoder, resources);
             }
-            self.encode_post_pass(encoder, resources, output_view);
+            self.encode_post_pass(encoder, resources, output_view, output_viewport);
         }
     }
 
@@ -180,16 +245,17 @@ impl WgpuRenderDevice {
             0
         };
 
-        self.latest_draw_calls = u32::from(plan.forward) * (forward_draws + 2)
+        let geometry_passes = u32::from(plan.forward) + u32::from(plan.gbuffer);
+        self.latest_draw_calls = geometry_passes * (forward_draws + 2)
             + u32::from(plan.shadow) * shadow_draws
             + u32::from(ssao_enabled)
             + u32::from(ssgi_enabled)
             + bloom_draws
             + u32::from(plan.post || plan.upscale);
-        self.latest_triangles = u64::from(plan.forward) * (forward_triangles + 1)
+        self.latest_triangles = u64::from(geometry_passes) * (forward_triangles + 1)
             + u64::from(plan.shadow) * shadow_triangles
             + u64::from(plan.post || plan.upscale);
-        if plan.forward && self.gpu_particles.instance_count() > 0 {
+        if geometry_passes > 0 && self.gpu_particles.instance_count() > 0 {
             self.latest_draw_calls = self.latest_draw_calls.saturating_add(1);
             self.latest_triangles = self
                 .latest_triangles
@@ -432,9 +498,7 @@ impl WgpuRenderDevice {
         let uniform = camera_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let lighting = lighting_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+        self.upload_lighting_uniform(world);
         let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
@@ -468,6 +532,7 @@ impl WgpuRenderDevice {
             self.latest_temporal_camera = temporal_camera;
             self.reset_temporal_history = reset_history;
         }
+        self.upload_temporal_uniform();
         let enable_ssao = self.ssao_compute_pipeline.is_some();
         let enable_ssgi = self.ssgi_compute_pipeline.is_some();
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
@@ -513,6 +578,7 @@ impl WgpuRenderDevice {
             &batches,
             &frame_res,
             output_view,
+            None,
             enable_ssao,
             enable_ssgi,
             enable_bloom,
@@ -523,6 +589,8 @@ impl WgpuRenderDevice {
         self.schedule_gpu_timestamp_readback(gpu_timestamps);
         self.finish_validation_scope(validation, encoder_label)?;
         self.submitted_worlds = self.submitted_worlds.saturating_add(1);
+        let (hybrid_deferred, active_gi_probes, virtual_shadow_pages) =
+            self.lighting_mode_metrics(world, &plan);
         self.performance_metrics = engine_render::RenderPerformanceMetrics {
             render_cpu_ms: render_started.elapsed().as_secs_f32() * 1000.0,
             output_width: ow,
@@ -538,6 +606,12 @@ impl WgpuRenderDevice {
             visible_objects: self.latest_visible_objects,
             culled_objects: self.latest_culled_objects,
             pipeline_passes: plan.pass_count,
+            submitted_lights: self.latest_submitted_lights,
+            visible_lights: self.latest_visible_lights,
+            culled_lights: self.latest_culled_lights,
+            hybrid_deferred,
+            active_gi_probes,
+            virtual_shadow_pages,
             gpu_frame_ms: previous_gpu_frame_ms,
             ..Default::default()
         };
@@ -582,7 +656,8 @@ impl WgpuRenderDevice {
                 },
                 ssgi_enabled: if ssgi_enabled { 1.0 } else { 0.0 },
                 ssgi_intensity: SSGI_INTENSITY,
-                _pad: [0.0; 2],
+                ssr_enabled: 1.0,
+                ssr_intensity: 0.35,
             }),
         );
         self.queue.write_buffer(
@@ -612,7 +687,13 @@ impl WgpuRenderDevice {
                 thickness: 0.08,
                 sample_count: 8.0,
                 frame_index: self.submitted_worlds as f32,
-                _pad: [0.0; 3],
+                history_blend: 0.82,
+                reset_history: if self.reset_temporal_history {
+                    1.0
+                } else {
+                    0.0
+                },
+                _pad: 0.0,
             }),
         );
 
@@ -710,6 +791,7 @@ impl WgpuRenderDevice {
             &hdr.color_view,
             self.hdr_normal_view.as_ref().unwrap(),
             self.hdr_albedo_view.as_ref().unwrap(),
+            self.hdr_motion_view.as_ref().unwrap(),
             hdr.depth_view.as_ref(),
             &self.pipeline,
             &self.camera_bind_group,
@@ -727,6 +809,7 @@ impl WgpuRenderDevice {
             &hdr.color_view,
             self.hdr_normal_view.as_ref().unwrap(),
             self.hdr_albedo_view.as_ref().unwrap(),
+            self.hdr_motion_view.as_ref().unwrap(),
             hdr.depth_view.as_ref(),
             &self.transparent_pipeline,
             &self.camera_bind_group,
@@ -874,6 +957,24 @@ impl WgpuRenderDevice {
             self.hdr_albedo_view =
                 Some(albedo.create_view(&wgpu::TextureViewDescriptor::default()));
             self.hdr_albedo_texture = Some(albedo);
+            let motion = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("aster hdr motion vectors"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.hdr_motion_view =
+                Some(motion.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.hdr_motion_texture = Some(motion);
             self.post_target_width = w;
             self.post_target_height = h;
             // Invalidate cached bind groups that reference the old HDR target.
@@ -882,6 +983,15 @@ impl WgpuRenderDevice {
             self.ssgi_cached_bg = None;
         }
     }
+}
+
+fn mat4_from_flat(matrix: [f32; 16]) -> [[f32; 4]; 4] {
+    [
+        [matrix[0], matrix[1], matrix[2], matrix[3]],
+        [matrix[4], matrix[5], matrix[6], matrix[7]],
+        [matrix[8], matrix[9], matrix[10], matrix[11]],
+        [matrix[12], matrix[13], matrix[14], matrix[15]],
+    ]
 }
 
 pub(crate) fn select_present_mode(

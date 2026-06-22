@@ -33,15 +33,27 @@ use runtime_min::{RuntimeServices, headless_services_from_scene};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
-    Emitter, Manager, State,
-    image::Image,
-    utils::config::Color,
-    webview::{PageLoadEvent, WebviewWindowBuilder},
+    Emitter, Manager, State, image::Image, utils::config::Color, webview::WebviewBuilder,
+    window::WindowBuilder,
 };
 
+mod editor_compositor;
 mod game_window;
+mod native_host_window;
 mod quest;
 mod scene_window;
+
+#[cfg(test)]
+fn claim_native_event_loop_test_slot(test_name: &str) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+    if CLAIMED.swap(true, Ordering::SeqCst) {
+        eprintln!("skipping {test_name}: native event loop test slot is already in use");
+        return false;
+    }
+    true
+}
 
 use quest::{
     ChangedFile, QuestExplorationAttempt, QuestMode, QuestModelConfig, QuestProject, QuestReview,
@@ -52,7 +64,17 @@ use quest::{
 const APP_WINDOW_ICON: Image<'static> = tauri::include_image!("./icons/128x128.png");
 
 const WINDOW_BACKGROUND: &str = "#181818";
+const TRANSPARENT_WINDOW_BACKGROUND: &str = "transparent";
 const SOLO_REPAIR_LIMIT: usize = 1;
+
+fn editor_compositor_requested() -> bool {
+    std::env::var("ASTER_EDITOR_COMPOSITOR").is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QuestApplyDecision {
@@ -421,8 +443,9 @@ impl DesktopIntegration {
         serde_json::json!({
             "desktop_environment": self.desktop.id(),
             "prefers_native_chrome": self.prefers_native_chrome(),
-            "window_background": WINDOW_BACKGROUND,
+            "window_background": if editor_compositor_requested() { TRANSPARENT_WINDOW_BACKGROUND } else { WINDOW_BACKGROUND },
             "window_backend": std::env::var("GDK_BACKEND").unwrap_or_else(|_| "default".to_owned()),
+            "editor_compositor_requested": editor_compositor_requested(),
         })
     }
 }
@@ -1005,6 +1028,8 @@ pub struct EditorHost {
     game_window: Option<game_window::GameWindowHandle>,
     /// Native editor scene view handle (direct GPU surface rendering).
     scene_window: Option<scene_window::SceneWindowHandle>,
+    /// Full-window editor compositor seam for the future zero-copy viewport.
+    editor_compositor: editor_compositor::EditorCompositor,
     /// Cross-project Quest registry and append-only history store.
     quest_store: QuestStore,
 }
@@ -1063,6 +1088,7 @@ impl EditorHost {
             copilot_conversation: Vec::new(),
             game_window: None,
             scene_window: None,
+            editor_compositor: editor_compositor::EditorCompositor::default(),
             quest_store: QuestStore::new(quest_root),
         };
 
@@ -5734,10 +5760,10 @@ fn on_update(entity, dt) {
             match event {
                 scene_window::SceneEvent::Closed => {
                     tracing::debug!(target: "editor", "scene window closed");
-                    closed = true;
                 }
                 scene_window::SceneEvent::Error(msg) => {
                     tracing::error!(target: "editor", "scene window error: {msg}");
+                    closed = true;
                 }
             }
         }
@@ -7580,6 +7606,155 @@ fn viewport_readback_raw(
     })
 }
 
+#[tauri::command]
+fn viewport_presentation_capabilities() -> editor_compositor::ViewportPresentationCapabilities {
+    editor_compositor::presentation_capabilities(editor_compositor_requested())
+}
+
+#[tauri::command]
+fn sync_editor_compositor_viewport(
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+) -> Result<(), String> {
+    state.with_host(|host| {
+        let viewport =
+            editor_compositor::EditorCompositorViewport::from_scene_rect(viewport.into_rect());
+        host.editor_compositor.set_viewport(viewport);
+        let _surface_viewport = host.editor_compositor.surface_viewport();
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn sync_zero_copy_scene_view(
+    _app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    distance: Option<f32>,
+    target_x: Option<f32>,
+    target_y: Option<f32>,
+    target_z: Option<f32>,
+) -> Result<(), String> {
+    let viewport = viewport.into_rect();
+    state.with_host(|host| {
+        let compositor_viewport =
+            editor_compositor::EditorCompositorViewport::from_scene_rect(viewport);
+        host.editor_compositor.set_viewport(compositor_viewport);
+        host.poll_scene_window();
+        let scene_window = host
+            .scene_window
+            .as_ref()
+            .ok_or_else(|| "zero-copy scene view is not running".to_owned())?;
+        scene_window.set_viewport(viewport)?;
+        if let (
+            Some(yaw),
+            Some(pitch),
+            Some(distance),
+            Some(target_x),
+            Some(target_y),
+            Some(target_z),
+        ) = (yaw, pitch, distance, target_x, target_y, target_z)
+        {
+            scene_window.set_camera(scene_window::SceneCameraState {
+                yaw,
+                pitch,
+                distance,
+                target: engine_core::math::Vec3::new(target_x, target_y, target_z),
+            })?;
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn open_zero_copy_scene_view(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+) -> Result<(), String> {
+    let support = editor_compositor::platform_support();
+    if !editor_compositor_requested() || !support.available {
+        return Err(format!(
+            "zero-copy scene view is unavailable on backend {}: {}",
+            support.backend.id(),
+            support.reason
+        ));
+    }
+    let viewport = viewport.into_rect();
+    let target = native_host_window::main_window_scene_target(&app)?;
+    tracing::info!(
+        target: "editor",
+        layout_mode = ?target.layout_mode,
+        "opening zero-copy Scene View through native host window adapter"
+    );
+    state.with_host(|host| {
+        host.poll_scene_window();
+        let snapshot = host
+            .create_scene_runtime_snapshot()
+            .map_err(|error| error.to_string())?;
+        let camera = scene_window::SceneCameraState {
+            yaw,
+            pitch,
+            distance,
+            target: engine_core::math::Vec3::new(target_x, target_y, target_z),
+        };
+
+        if host.scene_window.as_ref().is_some_and(|scene_window| {
+            scene_window.kind() != scene_window::SceneWindowKind::Embedded
+        }) {
+            host.scene_window = None;
+        }
+
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.set_viewport(viewport)?;
+            scene_window.restart(snapshot, camera)?;
+            return scene_window.show();
+        }
+
+        let mode = scene_window::SceneWindowMode::CompositorRaw {
+            surface: target.surface,
+            surface_width: target.surface_width,
+            surface_height: target.surface_height,
+            viewport,
+        };
+        let handle = scene_window::spawn_scene_window_with_mode(
+            "Native Host Scene View".to_owned(),
+            target.surface_width,
+            target.surface_height,
+            snapshot,
+            camera,
+            mode,
+        );
+        host.scene_window = Some(handle);
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn open_editor_compositor_scene_view(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+) -> Result<(), String> {
+    open_zero_copy_scene_view(
+        app, state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
+    )
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Minimal base64 encoding (no external crate needed for this).
@@ -7715,6 +7890,7 @@ fn set_game_render_scaling(
 
 #[tauri::command]
 fn open_native_scene_view(
+    app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     yaw: f32,
     pitch: f32,
@@ -7723,6 +7899,8 @@ fn open_native_scene_view(
     target_y: f32,
     target_z: f32,
 ) -> Result<(), String> {
+    tracing::info!(target: "editor", "opening floating Scene View via winit window");
+    native_host_window::hide_experimental_child_scene_surface(app);
     state.with_host(|host| {
         host.poll_scene_window();
         let snapshot = host
@@ -7735,6 +7913,12 @@ fn open_native_scene_view(
             target: engine_core::math::Vec3::new(target_x, target_y, target_z),
         };
 
+        if host.scene_window.as_ref().is_some_and(|scene_window| {
+            scene_window.kind() != scene_window::SceneWindowKind::Floating
+        }) {
+            host.scene_window = None;
+        }
+
         if let Some(scene_window) = host.scene_window.as_ref() {
             scene_window.restart(snapshot, camera)?;
             return scene_window.show();
@@ -7743,6 +7927,150 @@ fn open_native_scene_view(
         let handle =
             scene_window::spawn_scene_window("Scene View".to_owned(), 1280, 720, snapshot, camera);
         host.scene_window = Some(handle);
+        Ok(())
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddedSceneViewport {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl EmbeddedSceneViewport {
+    fn into_rect(self) -> scene_window::SceneViewportRect {
+        scene_window::SceneViewportRect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+        .sanitized()
+    }
+}
+
+#[tauri::command]
+fn open_embedded_scene_view(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+) -> Result<(), String> {
+    let viewport = viewport.into_rect();
+    if !editor_compositor::experimental_child_surface_available() {
+        return Err(
+            "experimental child-surface Scene View is disabled; use native-host-window zero-copy presentation"
+                .to_owned(),
+        );
+    }
+    let target = native_host_window::experimental_child_scene_target(&app, viewport)?;
+    state.with_host(|host| {
+        host.poll_scene_window();
+        let snapshot = host
+            .create_scene_runtime_snapshot()
+            .map_err(|error| error.to_string())?;
+        let camera = scene_window::SceneCameraState {
+            yaw,
+            pitch,
+            distance,
+            target: engine_core::math::Vec3::new(target_x, target_y, target_z),
+        };
+
+        if host.scene_window.as_ref().is_some_and(|scene_window| {
+            scene_window.kind() != scene_window::SceneWindowKind::Embedded
+        }) {
+            host.scene_window = None;
+        }
+
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.set_viewport(viewport)?;
+            scene_window.restart(snapshot, camera)?;
+            return scene_window.show();
+        }
+
+        let mode = match target {
+            native_host_window::ExperimentalChildSceneTarget::Raw(surface) => {
+                scene_window::SceneWindowMode::EmbeddedRaw { surface, viewport }
+            }
+        };
+        let handle = scene_window::spawn_scene_window_with_mode(
+            "Scene View".to_owned(),
+            viewport.width,
+            viewport.height,
+            snapshot,
+            camera,
+            mode,
+        );
+        host.scene_window = Some(handle);
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn sync_embedded_scene_view(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    viewport: EmbeddedSceneViewport,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    distance: Option<f32>,
+    target_x: Option<f32>,
+    target_y: Option<f32>,
+    target_z: Option<f32>,
+) -> Result<(), String> {
+    let viewport = viewport.into_rect();
+    if !editor_compositor::experimental_child_surface_available() {
+        return Err(
+            "experimental child-surface Scene View is disabled; use native-host-window zero-copy presentation"
+                .to_owned(),
+        );
+    }
+    native_host_window::sync_experimental_child_scene_surface(app, viewport);
+    state.with_host(|host| {
+        host.poll_scene_window();
+        let scene_window = host
+            .scene_window
+            .as_ref()
+            .ok_or_else(|| "embedded scene window is not running".to_owned())?;
+        scene_window.set_viewport(viewport)?;
+        if let (
+            Some(yaw),
+            Some(pitch),
+            Some(distance),
+            Some(target_x),
+            Some(target_y),
+            Some(target_z),
+        ) = (yaw, pitch, distance, target_x, target_y, target_z)
+        {
+            scene_window.set_camera(scene_window::SceneCameraState {
+                yaw,
+                pitch,
+                distance,
+                target: engine_core::math::Vec3::new(target_x, target_y, target_z),
+            })?;
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn close_native_scene_view(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+) -> Result<(), String> {
+    native_host_window::hide_experimental_child_scene_surface(app);
+    state.with_host(|host| {
+        host.poll_scene_window();
+        if let Some(scene_window) = host.scene_window.as_ref() {
+            scene_window.hide()?;
+        }
         Ok(())
     })
 }
@@ -7792,9 +8120,14 @@ async fn import_asset_dialog() -> Result<Option<String>, String> {
 
 fn apply_desktop_window_adaptations(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let desktop = DesktopIntegration::detect();
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         window.set_icon(APP_WINDOW_ICON.clone())?;
-        window.set_background_color(Some(Color(24, 24, 24, 255)))?;
+        let background = if editor_compositor_requested() {
+            Color(0, 0, 0, 0)
+        } else {
+            Color(24, 24, 24, 255)
+        };
+        window.set_background_color(Some(background))?;
         window.set_decorations(desktop.prefers_native_chrome())?;
     }
     Ok(())
@@ -7805,22 +8138,36 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         return Ok(());
     };
 
-    let window = WebviewWindowBuilder::from_config(app, window_config)?
-        .on_page_load(|window, payload| {
-            tracing::info!(
-                target: "editor",
-                "webview page load {:?}: {}",
-                payload.event(),
-                payload.url()
-            );
-            if payload.event() == PageLoadEvent::Finished {
-                #[cfg(debug_assertions)]
-                window.open_devtools();
-            }
-        })
+    let compositor_requested = editor_compositor_requested();
+    let background = if compositor_requested {
+        Color(0, 0, 0, 0)
+    } else {
+        Color(24, 24, 24, 255)
+    };
+    let window = WindowBuilder::from_config(app, window_config)?
+        .transparent(compositor_requested)
+        .background_color(background)
+        .icon(APP_WINDOW_ICON.clone())?
         .build()?;
+    let window_size = window.inner_size()?;
+    let webview = window.add_child(
+        WebviewBuilder::from_config(window_config)
+            .transparent(compositor_requested)
+            .background_color(background)
+            .on_page_load(|_webview, payload| {
+                tracing::info!(
+                    target: "editor",
+                    "webview page load {:?}: {}",
+                    payload.event(),
+                    payload.url()
+                );
+            }),
+        tauri::LogicalPosition::new(0.0, 0.0),
+        window_size,
+    )?;
+    webview.set_auto_resize(true)?;
 
-    tracing::info!(target: "editor", "main webview window created");
+    tracing::info!(target: "editor", "native host root window with child web UI created");
     window.set_focus()?;
     Ok(())
 }
@@ -7913,6 +8260,14 @@ pub fn run() {
             open_game_view,
             set_game_render_scaling,
             open_native_scene_view,
+            open_embedded_scene_view,
+            sync_embedded_scene_view,
+            close_native_scene_view,
+            viewport_presentation_capabilities,
+            sync_editor_compositor_viewport,
+            open_zero_copy_scene_view,
+            sync_zero_copy_scene_view,
+            open_editor_compositor_scene_view,
             select_project_location,
             viewport_readback_raw,
             open_scene_dialog,
@@ -7922,6 +8277,15 @@ pub fn run() {
         .setup(|app| {
             create_main_window(app)?;
             apply_desktop_window_adaptations(app)?;
+            if editor_compositor_requested() {
+                let layout_mode =
+                    native_host_window::install_bridge_host_on_main_thread(app.handle())?;
+                tracing::info!(
+                    target: "editor",
+                    ?layout_mode,
+                    "native host window bridge installed"
+                );
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

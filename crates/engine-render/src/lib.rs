@@ -195,6 +195,70 @@ impl RenderLightKind {
     }
 }
 
+/// Lighting path requested by a render world or compiled frame graph.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RenderLightingMode {
+    /// Forward shading path.
+    #[default]
+    Forward,
+    /// Hybrid path that writes G-buffer targets and resolves lighting as a separate step.
+    HybridDeferred,
+}
+
+/// Global illumination strategy requested by a render world.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RenderGlobalIllumination {
+    /// Screen-space GI only.
+    ScreenSpace,
+    /// Probe volume assisted GI.
+    ProbeVolume(RenderProbeVolume),
+}
+
+impl Default for RenderGlobalIllumination {
+    fn default() -> Self {
+        Self::ScreenSpace
+    }
+}
+
+/// Probe volume settings for diffuse global illumination.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderProbeVolume {
+    /// World-space center.
+    pub center: engine_core::math::Vec3,
+    /// World-space extents.
+    pub extent: engine_core::math::Vec3,
+    /// Probe counts on x/y/z axes.
+    pub counts: [u32; 3],
+    /// Indirect lighting multiplier.
+    pub intensity: f32,
+}
+
+impl Default for RenderProbeVolume {
+    fn default() -> Self {
+        Self {
+            center: engine_core::math::Vec3::ZERO,
+            extent: engine_core::math::Vec3::new(20.0, 8.0, 20.0),
+            counts: [6, 3, 6],
+            intensity: 1.0,
+        }
+    }
+}
+
+/// Shadow map allocation strategy requested by a render world.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RenderShadowVirtualization {
+    /// Fixed cascaded shadow maps.
+    #[default]
+    Cascaded,
+    /// Virtual-shadow-map style page allocation boundary.
+    VirtualPages {
+        /// Page size in texels.
+        page_size: u32,
+        /// Maximum resident pages.
+        max_pages: u32,
+    },
+}
+
 /// Particle draw data extracted from a scene for rendering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderParticle {
@@ -296,6 +360,12 @@ pub struct RenderWorld {
     pub skybox: Option<RenderSkybox>,
     /// Optional fog configuration.
     pub fog: Option<RenderFog>,
+    /// Requested lighting path.
+    pub lighting_mode: RenderLightingMode,
+    /// Requested global illumination strategy.
+    pub global_illumination: RenderGlobalIllumination,
+    /// Requested shadow allocation strategy.
+    pub shadow_virtualization: RenderShadowVirtualization,
 }
 
 impl RenderWorld {

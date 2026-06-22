@@ -81,6 +81,27 @@ impl RenderPerformanceConfig {
             },
         }
     }
+
+    /// Quality-first editor viewport policy targeting a 75 Hz 1080p-class view.
+    ///
+    /// The editor Scene View should favor stable, crisp inspection over dynamic
+    /// internal downscaling. Game/runtime windows can still opt into latency or
+    /// battery policies separately.
+    pub fn editor_1080p75() -> Self {
+        Self {
+            present_strategy: PresentStrategy::VSync,
+            maximum_frame_latency: 2,
+            render_scale: 1.0,
+            dynamic_resolution: DynamicResolutionConfig {
+                enabled: false,
+                target_fps: 75,
+                min_scale: 1.0,
+                max_scale: 1.0,
+                step: 0.0,
+                sample_window: 75,
+            },
+        }
+    }
 }
 
 /// Latest performance measurements reported by a render backend.
@@ -124,6 +145,18 @@ pub struct RenderPerformanceMetrics {
     pub culled_objects: u32,
     /// Number of Frame Pipeline passes enabled for the latest frame.
     pub pipeline_passes: u32,
+    /// Scene lights submitted before backend budgeting.
+    pub submitted_lights: u32,
+    /// Scene lights packed into the active lighting path.
+    pub visible_lights: u32,
+    /// Scene lights omitted by the active lighting budget.
+    pub culled_lights: u32,
+    /// Whether the frame used the hybrid deferred lighting path.
+    pub hybrid_deferred: bool,
+    /// Number of active GI probes considered by the backend.
+    pub active_gi_probes: u32,
+    /// Number of virtual shadow pages requested or budgeted by the backend.
+    pub virtual_shadow_pages: u32,
 }
 
 /// Stateful controller for dynamic internal resolution.
@@ -195,6 +228,18 @@ mod tests {
         assert_eq!(config.maximum_frame_latency, 1);
         assert_eq!(config.dynamic_resolution.target_fps, 120);
         assert!(config.dynamic_resolution.enabled);
+    }
+
+    #[test]
+    fn editor_policy_targets_crisp_1080p_75hz_viewports() {
+        let config = RenderPerformanceConfig::editor_1080p75();
+        assert_eq!(config.present_strategy, PresentStrategy::VSync);
+        assert_eq!(config.maximum_frame_latency, 2);
+        assert_eq!(config.render_scale, 1.0);
+        assert_eq!(config.dynamic_resolution.target_fps, 75);
+        assert_eq!(config.dynamic_resolution.min_scale, 1.0);
+        assert_eq!(config.dynamic_resolution.max_scale, 1.0);
+        assert!(!config.dynamic_resolution.enabled);
     }
 
     #[test]

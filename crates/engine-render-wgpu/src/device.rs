@@ -24,15 +24,13 @@ pub struct WgpuOutputCapabilities {
 pub(crate) const DEFAULT_WIDTH: u32 = 960;
 pub(crate) const DEFAULT_HEIGHT: u32 = 540;
 pub(crate) const CUBE_INDEX_COUNT: u32 = 36;
-pub(crate) const MAX_FORWARD_LIGHTS: usize = 8;
+pub(crate) const MAX_FORWARD_LIGHTS: usize = 32;
 pub(crate) const MAX_DIRECTIONAL_LIGHTS: usize = 2;
 pub(crate) const DEFAULT_AMBIENT_LIGHT: [f32; 4] = [0.16, 0.16, 0.16, 1.0];
 pub(crate) const CSM_CASCADE_COUNT: usize = 5;
 pub(crate) const CSM_SHADOW_RESOLUTION: u32 = 4096;
 pub(crate) const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [8.0, 20.0, 55.0, 120.0, 200.0];
 pub(crate) const CSM_CASCADE_FADE_RANGE: f32 = 4.0;
-pub(crate) const CSM_PCSS_SAMPLES: u32 = 16;
-pub(crate) const CSM_PCSS_SEARCH_RADIUS: f32 = 0.004;
 pub(crate) const MAX_BLOOM_MIPS: u32 = 5;
 pub(crate) const IBL_IRRADIANCE_RES: u32 = 32;
 pub(crate) const IBL_PREFILTER_RES: u32 = 512;
@@ -45,6 +43,53 @@ pub(crate) const SSGI_RADIUS: f32 = 2.5;
 pub(crate) const SSGI_INTENSITY: f32 = 0.65;
 pub(crate) const INTERMEDIATE_WIDTH: u32 = 1920;
 pub(crate) const INTERMEDIATE_HEIGHT: u32 = 1080;
+
+/// Rectangle on a configured native surface where a render result is presented.
+///
+/// Hosts can keep a full-window swapchain while asking the Frame Pipeline to
+/// composite only into the editor Scene View aperture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceViewportRect {
+    /// Left edge in surface pixels.
+    pub x: u32,
+    /// Top edge in surface pixels.
+    pub y: u32,
+    /// Width in surface pixels.
+    pub width: u32,
+    /// Height in surface pixels.
+    pub height: u32,
+}
+
+impl SurfaceViewportRect {
+    /// Creates a surface viewport rectangle, clamping zero dimensions to one.
+    pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    /// Returns this rectangle clamped to a surface of the given size.
+    pub fn clamped_to(self, surface_width: u32, surface_height: u32) -> Self {
+        self.clamp_to(surface_width, surface_height)
+    }
+
+    pub(crate) fn clamp_to(self, surface_width: u32, surface_height: u32) -> Self {
+        let surface_width = surface_width.max(1);
+        let surface_height = surface_height.max(1);
+        let x = self.x.min(surface_width.saturating_sub(1));
+        let y = self.y.min(surface_height.saturating_sub(1));
+        Self {
+            x,
+            y,
+            width: self.width.min(surface_width - x).max(1),
+            height: self.height.min(surface_height - y).max(1),
+        }
+    }
+}
+
 pub(crate) struct GpuImage {
     pub(crate) _texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
@@ -66,6 +111,8 @@ pub(crate) struct GpuTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FramePipelineStep {
     Shadow,
+    GBuffer,
+    DeferredLighting,
     Forward,
     TemporalInputs,
     Upscale,
@@ -77,6 +124,8 @@ pub(crate) enum FramePipelineStep {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FramePipelinePlan {
     pub(crate) shadow: bool,
+    pub(crate) gbuffer: bool,
+    pub(crate) deferred_lighting: bool,
     pub(crate) forward: bool,
     pub(crate) temporal_inputs: bool,
     pub(crate) upscale: bool,
@@ -90,6 +139,8 @@ impl Default for FramePipelinePlan {
     fn default() -> Self {
         Self {
             shadow: true,
+            gbuffer: false,
+            deferred_lighting: false,
             forward: true,
             temporal_inputs: true,
             upscale: true,
@@ -115,6 +166,10 @@ impl FramePipelinePlan {
             .iter()
             .filter_map(|pass| match pass.name.as_str() {
                 "shadow" => Some(FramePipelineStep::Shadow),
+                "gbuffer" => Some(FramePipelineStep::GBuffer),
+                "deferred-lighting" | "deferred_lighting" => {
+                    Some(FramePipelineStep::DeferredLighting)
+                }
                 "forward" => Some(FramePipelineStep::Forward),
                 "temporal-inputs" => Some(FramePipelineStep::TemporalInputs),
                 "upscale" => Some(FramePipelineStep::Upscale),
@@ -132,6 +187,9 @@ impl FramePipelinePlan {
             .collect();
         Self {
             shadow: graph.contains_pass("shadow"),
+            gbuffer: graph.contains_pass("gbuffer"),
+            deferred_lighting: graph.contains_pass("deferred-lighting")
+                || graph.contains_pass("deferred_lighting"),
             forward: graph.contains_pass("forward"),
             temporal_inputs: graph.contains_stage(RenderStage::TemporalInputs),
             upscale: graph.contains_stage(RenderStage::Upscale),
@@ -165,6 +223,7 @@ pub struct WgpuRenderDevice {
     pub(crate) transparent_pipeline: wgpu::RenderPipeline,
     pub(crate) camera_bind_group: wgpu::BindGroup,
     pub(crate) camera_uniform: wgpu::Buffer,
+    pub(crate) temporal_uniform: wgpu::Buffer,
     pub(crate) lighting_uniform: wgpu::Buffer,
     pub(crate) _default_texture: wgpu::Texture,
     pub(crate) default_texture_view: wgpu::TextureView,
@@ -190,6 +249,7 @@ pub struct WgpuRenderDevice {
     pub(crate) surface_depth: Option<wgpu::Texture>,
     pub(crate) surface_depth_view: Option<wgpu::TextureView>,
     pub(crate) surface_suspended: bool,
+    pub(crate) surface_viewport: Option<SurfaceViewportRect>,
     pub(crate) next_gui_texture: u64,
     pub(crate) gui_textures: HashMap<u64, Handle>,
     pub(crate) gui_pipeline: wgpu::RenderPipeline,
@@ -274,6 +334,8 @@ pub struct WgpuRenderDevice {
     pub(crate) ssgi_cached_bg: Option<Arc<wgpu::BindGroup>>,
     pub(crate) ssgi_output_texture: Option<wgpu::Texture>,
     pub(crate) ssgi_output_view: Option<wgpu::TextureView>,
+    pub(crate) ssgi_history_texture: Option<wgpu::Texture>,
+    pub(crate) ssgi_history_view: Option<wgpu::TextureView>,
     pub(crate) ssgi_uniform: wgpu::Buffer,
     pub(crate) ssgi_compute_pipeline: Option<wgpu::ComputePipeline>,
     pub(crate) ssgi_compute_bgl: Option<wgpu::BindGroupLayout>,
@@ -283,6 +345,8 @@ pub struct WgpuRenderDevice {
     pub(crate) hdr_normal_view: Option<wgpu::TextureView>,
     pub(crate) hdr_albedo_texture: Option<wgpu::Texture>,
     pub(crate) hdr_albedo_view: Option<wgpu::TextureView>,
+    pub(crate) hdr_motion_texture: Option<wgpu::Texture>,
+    pub(crate) hdr_motion_view: Option<wgpu::TextureView>,
     pub(crate) post_target_width: u32,
     pub(crate) post_target_height: u32,
     pub(crate) ibl_irradiance_compute: Option<wgpu::ComputePipeline>,
@@ -310,6 +374,9 @@ pub struct WgpuRenderDevice {
     pub(crate) latest_submitted_objects: u32,
     pub(crate) latest_visible_objects: u32,
     pub(crate) latest_culled_objects: u32,
+    pub(crate) latest_submitted_lights: u32,
+    pub(crate) latest_visible_lights: u32,
+    pub(crate) latest_culled_lights: u32,
     pub(crate) latest_draw_calls: u32,
     pub(crate) latest_triangles: u64,
     pub(crate) gpu_particles: crate::particles::GpuParticlePipeline,

@@ -1,8 +1,9 @@
 use engine_core::math::{Transform, Vec3};
 use engine_render::{
     GuiDrawCmd, GuiDrawList, GuiVertex, ImageDesc, ImageFormat, RenderBounds, RenderCamera,
-    RenderDevice, RenderFrame, RenderGraphBuilder, RenderObject, RenderParticleEmitter,
-    RenderProjection, RenderWorld,
+    RenderDevice, RenderFrame, RenderGlobalIllumination, RenderGraphBuilder, RenderLightingMode,
+    RenderObject, RenderParticleEmitter, RenderProbeVolume, RenderProjection,
+    RenderShadowVirtualization, RenderWorld,
 };
 use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 
@@ -72,6 +73,60 @@ fn compiled_frame_pipeline_controls_wgpu_passes_and_visibility_metrics() {
     assert_eq!(metrics.culled_objects, 1);
     assert!(metrics.draw_calls >= 3);
     assert!(metrics.triangles > 0);
+}
+
+#[test]
+fn hybrid_deferred_graph_reports_pipeline_metrics() {
+    let Some(mut device) = renderer() else {
+        eprintln!("skipping P3 hybrid deferred graph test: no compatible adapter");
+        return;
+    };
+    let world = RenderWorld {
+        camera: Some(camera()),
+        objects: vec![object(2, Vec3::new(0.0, 0.0, -4.0))],
+        lighting_mode: RenderLightingMode::HybridDeferred,
+        ..RenderWorld::default()
+    };
+    let mut builder = RenderGraphBuilder::new();
+    let gbuffer = builder.add_pass("gbuffer");
+    let deferred = builder.add_pass("deferred-lighting");
+    let post = builder.add_pass("post");
+    builder.order_before(gbuffer, deferred);
+    builder.order_before(deferred, post);
+    let graph = builder.build();
+    device
+        .submit_render_world_with_graph(&world, &graph, RenderFrame { frame_index: 0 })
+        .unwrap();
+    let metrics = device.performance_metrics();
+    assert_eq!(metrics.pipeline_passes, 3);
+    assert!(metrics.hybrid_deferred);
+    assert!(metrics.draw_calls >= 3);
+}
+
+#[test]
+fn probe_volume_and_virtual_shadow_config_report_budget_metrics() {
+    let Some(mut device) = renderer() else {
+        eprintln!("skipping P4 lighting budget telemetry test: no compatible adapter");
+        return;
+    };
+    let world = RenderWorld {
+        camera: Some(camera()),
+        global_illumination: RenderGlobalIllumination::ProbeVolume(RenderProbeVolume {
+            counts: [2, 3, 4],
+            ..RenderProbeVolume::default()
+        }),
+        shadow_virtualization: RenderShadowVirtualization::VirtualPages {
+            page_size: 128,
+            max_pages: 256,
+        },
+        ..RenderWorld::default()
+    };
+    device
+        .submit_render_world(&world, RenderFrame { frame_index: 0 })
+        .unwrap();
+    let metrics = device.performance_metrics();
+    assert_eq!(metrics.active_gi_probes, 24);
+    assert_eq!(metrics.virtual_shadow_pages, 256);
 }
 
 #[test]

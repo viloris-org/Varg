@@ -217,6 +217,10 @@
     position: relative;
   }
 
+  body[data-editor-compositor="true"] #root {
+    background: transparent;
+  }
+
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;

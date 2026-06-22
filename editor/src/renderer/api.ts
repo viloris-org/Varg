@@ -113,6 +113,99 @@ export function viewportReadback(params: {
   });
 }
 
+export type ViewportPresentationMode =
+  | 'canvas-readback'
+  | 'embedded-native-experimental'
+  | 'native-host-window'
+  | 'editor-compositor';
+
+export interface ViewportPresentationAdapter {
+  mode: ViewportPresentationMode;
+  available: boolean;
+  default: boolean;
+  zero_copy: boolean;
+  experimental: boolean;
+  backend: string;
+  reason: string;
+}
+
+export interface ViewportPresentationCapabilities {
+  default_mode: ViewportPresentationMode;
+  adapters: ViewportPresentationAdapter[];
+}
+
+export function viewportPresentationCapabilities(): Promise<ViewportPresentationCapabilities> {
+  return invoke<ViewportPresentationCapabilities>('viewport_presentation_capabilities');
+}
+
+export async function syncEditorCompositorViewport(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+}): Promise<void> {
+  await invoke('sync_editor_compositor_viewport', {
+    viewport: params.viewport,
+  });
+}
+
+export async function openEditorCompositorSceneView(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+  yaw: number;
+  pitch: number;
+  distance: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+}): Promise<void> {
+  await invoke('open_editor_compositor_scene_view', {
+    viewport: params.viewport,
+    yaw: params.yaw,
+    pitch: params.pitch,
+    distance: params.distance,
+    targetX: params.targetX,
+    targetY: params.targetY,
+    targetZ: params.targetZ,
+  });
+}
+
+export async function openZeroCopySceneView(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+  yaw: number;
+  pitch: number;
+  distance: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+}): Promise<void> {
+  await invoke('open_zero_copy_scene_view', {
+    viewport: params.viewport,
+    yaw: params.yaw,
+    pitch: params.pitch,
+    distance: params.distance,
+    targetX: params.targetX,
+    targetY: params.targetY,
+    targetZ: params.targetZ,
+  });
+}
+
+export async function syncZeroCopySceneView(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+  yaw?: number;
+  pitch?: number;
+  distance?: number;
+  targetX?: number;
+  targetY?: number;
+  targetZ?: number;
+}): Promise<void> {
+  await invoke('sync_zero_copy_scene_view', {
+    viewport: params.viewport,
+    yaw: params.yaw ?? null,
+    pitch: params.pitch ?? null,
+    distance: params.distance ?? null,
+    targetX: params.targetX ?? null,
+    targetY: params.targetY ?? null,
+    targetZ: params.targetZ ?? null,
+  });
+}
+
 /**
  * Listen for push events from the Rust host.
  * Returns an unsubscribe function.
@@ -147,6 +240,65 @@ export async function openNativeSceneView(params: {
     targetY: params.targetY,
     targetZ: params.targetZ,
   });
+}
+
+export async function openEmbeddedSceneView(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+  yaw: number;
+  pitch: number;
+  distance: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+}): Promise<void> {
+  await invoke('open_embedded_scene_view', {
+    viewport: params.viewport,
+    yaw: params.yaw,
+    pitch: params.pitch,
+    distance: params.distance,
+    targetX: params.targetX,
+    targetY: params.targetY,
+    targetZ: params.targetZ,
+  });
+}
+
+/**
+ * Experimental native child-surface Scene View.
+ *
+ * This preserves zero-copy presentation but is not deterministic enough to be
+ * the default editor viewport: the WebView and GTK/GDK child surface are owned
+ * by different compositors, so DOM layout and native surface movement can race.
+ *
+ * Long term, use the native host-window presentation seam instead: native code
+ * owns Scene View presentation and embeds Web UI panels/overlays around it.
+ */
+export const openExperimentalEmbeddedSceneView = openEmbeddedSceneView;
+
+export async function syncEmbeddedSceneView(params: {
+  viewport: { x: number; y: number; width: number; height: number };
+  yaw?: number;
+  pitch?: number;
+  distance?: number;
+  targetX?: number;
+  targetY?: number;
+  targetZ?: number;
+}): Promise<void> {
+  await invoke('sync_embedded_scene_view', {
+    viewport: params.viewport,
+    yaw: params.yaw ?? null,
+    pitch: params.pitch ?? null,
+    distance: params.distance ?? null,
+    targetX: params.targetX ?? null,
+    targetY: params.targetY ?? null,
+    targetZ: params.targetZ ?? null,
+  });
+}
+
+/** See `openExperimentalEmbeddedSceneView`. */
+export const syncExperimentalEmbeddedSceneView = syncEmbeddedSceneView;
+
+export async function closeNativeSceneView(): Promise<void> {
+  await invoke('close_native_scene_view');
 }
 
 export function selectProjectLocation(): Promise<string | null> {

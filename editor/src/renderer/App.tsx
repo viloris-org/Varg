@@ -11,6 +11,7 @@ interface DesktopIntegration {
   prefers_native_chrome: boolean;
   window_background: string;
   window_backend?: string;
+  editor_compositor_requested?: boolean;
 }
 
 interface HubState {
@@ -96,6 +97,7 @@ export default function App() {
   const applyDesktopIntegration = useCallback((integration: DesktopIntegration) => {
     document.body.dataset.desktopEnvironment = integration.desktop_environment;
     document.body.dataset.nativeChrome = String(integration.prefers_native_chrome);
+    document.body.dataset.editorCompositor = String(Boolean(integration.editor_compositor_requested));
     document.documentElement.style.background = integration.window_background;
     document.body.style.background = integration.window_background;
   }, []);
