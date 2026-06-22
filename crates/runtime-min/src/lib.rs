@@ -27,9 +27,9 @@ use engine_audio::{
     AudioSourceDesc, AudioSourceShape, ClipHandle, HrtfQuality, MemoryAudioBackend, OutputMode,
     SourceHandle, SpatialMode, VirtualizationPolicy, VoiceCategory, solve_direct_propagation,
 };
-use engine_core::{
-    EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging, math::Vec3,
-};
+#[cfg(feature = "physics")]
+use engine_core::math::Vec3;
+use engine_core::{EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging};
 #[cfg(feature = "audio")]
 use engine_ecs::AudioSourceComponentData;
 #[cfg(feature = "script-python")]

@@ -324,31 +324,31 @@ const assetsClass = {
 };
 
 const buildClass = {
-  layout: 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px] max-[1100px]:grid-cols-1',
-  main: 'min-w-0 overflow-auto p-4',
-  presets: 'mb-3.5 grid grid-cols-4 gap-2 max-[1100px]:grid-cols-2',
-  presetButton: 'grid min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)] gap-[7px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-[11px] text-left text-[var(--text-secondary)] shadow-[var(--shadow-sm)] transition-[border-color,background-color,transform] duration-150 hover:-translate-y-px hover:border-[var(--border-light)] [&_svg]:row-span-2 [&_svg]:mt-px [&_svg]:text-[var(--accent)]',
+  layout: 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_292px] max-[1100px]:grid-cols-1',
+  main: 'min-w-0 overflow-auto',
+  presets: 'flex min-h-[44px] items-center gap-1.5 overflow-x-auto border-b border-[var(--border)] bg-[var(--bg-surface)] px-3',
+  presetButton: 'grid min-h-[28px] min-w-[132px] cursor-pointer grid-cols-[16px_minmax(0,1fr)] items-center gap-[6px] rounded-[var(--radius-md)] border border-transparent bg-transparent px-2 text-left text-[var(--text-secondary)] transition-[border-color,background-color] duration-150 hover:border-[var(--border)] hover:bg-[var(--bg-hover)] [&_svg]:row-span-2 [&_svg]:text-[var(--accent)]',
   selectedButton: 'border-[var(--accent)] bg-[var(--accent-dim)]',
-  card: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-sm)]',
-  sectionTitle: 'flex min-h-[42px] items-center justify-between gap-3 border-b border-[var(--border)] px-3',
+  section: 'border-b border-[var(--border)] px-3.5 py-3',
+  sectionTitle: 'mb-2.5 flex min-h-[24px] items-center justify-between gap-3',
   sectionValue: 'text-[11px] text-[var(--text-secondary)]',
-  targetGrid: 'grid grid-cols-3 gap-2 p-2.5 max-[1100px]:grid-cols-2',
-  targetButton: 'grid min-w-0 cursor-pointer gap-[5px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-[11px] text-left text-[var(--text-secondary)] transition-[border-color,background-color] duration-150 hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)]',
+  targetGrid: 'grid overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]',
+  targetButton: 'grid min-h-[46px] min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_minmax(110px,0.45fr)_74px] items-center gap-3 border-b border-[var(--border)] bg-transparent px-2.5 text-left text-[var(--text-secondary)] transition-[border-color,background-color] duration-150 last:border-b-0 hover:bg-[var(--bg-hover)] max-[760px]:grid-cols-[minmax(0,1fr)_74px] max-[760px]:[&_small]:hidden',
   itemTitle: 'overflow-hidden text-ellipsis whitespace-nowrap text-[11px] font-bold text-[var(--text-primary)]',
   itemMeta: 'overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--text-muted)]',
   status: 'justify-self-start rounded-full px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase',
-  formGrid: 'grid grid-cols-2 gap-2.5 p-3',
+  formGrid: 'grid grid-cols-2 gap-2.5 max-[760px]:grid-cols-1',
   formLabel: 'grid min-w-0 gap-1.5',
   formLabelText: 'text-[10px] text-[var(--text-muted)]',
   select: 'min-h-8 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] text-[11px] text-[var(--text-primary)]',
   checkbox: 'grid grid-cols-[16px_minmax(0,1fr)] items-center gap-1.5',
   checkboxInput: 'size-3.5',
-  output: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-[var(--shadow-sm)]',
+  output: 'px-3.5 py-3',
   outputPath: 'mt-[5px] block [overflow-wrap:anywhere] font-mono text-[11px] text-[var(--text-primary)]',
   outputNote: 'mt-2.5 mb-0 text-[11px] leading-[1.55] text-[var(--text-secondary)]',
   outputPre: 'mt-3 overflow-auto whitespace-pre-wrap rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2.5 font-mono text-[10px] leading-normal text-[var(--text-secondary)]',
   sidebar: 'min-h-0 overflow-auto border-l border-[var(--border)] bg-[var(--bg-surface)] px-3.5 py-4 max-[1100px]:border-t max-[1100px]:border-l-0',
-  sidebarSection: 'mb-3.5 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-[var(--shadow-sm)]',
+  sidebarSection: 'mb-3.5 border-b border-[var(--border)] pb-3.5 last:border-b-0',
   sidebarList: 'mt-3 grid list-none gap-2.5 p-0',
   sidebarItem: 'flex items-center gap-2 text-[11px] text-[var(--text-muted)]',
   sidebarDl: 'mt-3 grid gap-2',
@@ -2722,7 +2722,7 @@ export default function EditorPage({
                     ))}
                   </div>
 
-                  <div className={buildClass.card}>
+                  <section className={buildClass.section}>
                     <div className={buildClass.sectionTitle}>
                       <span className={surfaceClass.buildKicker}>Target</span>
                       <strong className={buildStatusClass(selectedBuildTarget.status)}>{selectedBuildTarget.status}</strong>
@@ -2743,9 +2743,9 @@ export default function EditorPage({
                         </button>
                       ))}
                     </div>
-                  </div>
+                  </section>
 
-                  <div className={buildClass.card}>
+                  <section className={buildClass.section}>
                     <div className={buildClass.sectionTitle}>
                       <span className={surfaceClass.buildKicker}>Package</span>
                       <strong className={buildClass.sectionValue}>{selectedBuildTarget.label}</strong>
@@ -2785,7 +2785,7 @@ export default function EditorPage({
                         <span className={buildClass.formLabelText}>Debug symbols</span>
                       </label>
                     </div>
-                  </div>
+                  </section>
 
                   <div className={buildClass.output}>
                     <div>

@@ -109,6 +109,34 @@ cargo build -p runtime-min --no-default-features --features editor
 cargo build -p runtime-min --no-default-features --features runtime-min
 ```
 
+## Packaging a Game Project
+
+```sh
+# Native runnable folder for the example project
+cargo xtask package --project examples/project --target native --format folder --debug
+
+# Release folder
+cargo xtask package --project examples/project --target native --format folder --release
+```
+
+The package is written to `exports/<project>/<target>/<channel>/` and contains
+the runtime binary, launcher script, project manifest, default scene, copied
+assets, `asset-manifest.json`, and `package-manifest.json`.
+
+Current support:
+
+| Target | Host support | Formats |
+|---|---|---|
+| `linux-x64` | Linux | `folder` |
+| `windows-x64` | Windows | `folder` |
+| `macos-universal` | macOS | `folder` |
+| `android-arm64` | Linux, Windows | `apk`, `aab` planned; validates Android SDK/NDK and Rust target |
+| `ios-universal` | macOS | `ipa` planned; validates Xcode and Rust iOS targets |
+
+Android and iOS targets are wired into the shared packaging pipeline and
+toolchain validation, but signed mobile artifacts require the mobile runtime
+adapter and platform project templates before package generation is enabled.
+
 ## Building the Editor
 
 ```sh

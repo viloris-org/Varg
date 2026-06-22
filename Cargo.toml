@@ -20,6 +20,7 @@ members = [
     "crates/engine-agent-cluster",
     "crates/engine-ai",
     "crates/engine-policy",
+    "crates/engine-packager",
     "editor/src-tauri",
     "crates/runtime-min",
     "xtask",
@@ -75,6 +76,7 @@ engine-skeleton = { path = "crates/engine-skeleton", version = "0.1.0" }
 engine-agent-cluster = { path = "crates/engine-agent-cluster", version = "0.1.0" }
 engine-ai = { path = "crates/engine-ai", version = "0.1.0" }
 engine-policy = { path = "crates/engine-policy", version = "0.1.0" }
+engine-packager = { path = "crates/engine-packager", version = "0.1.0" }
 runtime-min = { path = "crates/runtime-min", version = "0.1.0" }
 
 [workspace.metadata.aster.profiles]

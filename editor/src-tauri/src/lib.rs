@@ -24,6 +24,9 @@ use engine_editor::{
 };
 use engine_editor::{EditorShell, HubState, ProjectDeletionDecision, ProjectDeletionMode};
 use engine_i18n::{Locale, Translations};
+use engine_packager::{
+    PackageChannel, PackageFormat, PackageRequest, PackageTarget, package_project,
+};
 use engine_render::ImageFormat;
 use engine_render_wgpu::{WgpuOffscreenConfig, WgpuRenderDevice};
 use runtime_min::{RuntimeServices, headless_services_from_scene};
@@ -3591,7 +3594,7 @@ fn on_update(entity, dt) {
         let target = params
             .get("target")
             .and_then(Value::as_str)
-            .unwrap_or(current_desktop_package_target());
+            .unwrap_or("native");
         let format = params
             .get("format")
             .and_then(Value::as_str)
@@ -3609,20 +3612,6 @@ fn on_update(entity, dt) {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        if target != current_desktop_package_target() {
-            return Err(EngineError::UnsupportedCapability {
-                capability: "cross-platform game packaging",
-            });
-        }
-        if format != "folder" {
-            return Err(EngineError::UnsupportedCapability {
-                capability: "installer package generation",
-            });
-        }
-        if channel != "debug" && channel != "release" {
-            return Err(EngineError::config("channel must be 'debug' or 'release'"));
-        }
-
         let project_root = {
             let Some(project) = self.shell.project() else {
                 return Err(EngineError::config("no project open"));
@@ -3638,56 +3627,16 @@ fn on_update(entity, dt) {
             self.shell_save_scene(&serde_json::json!({}))?;
         }
 
-        let project = runtime_min::load_runtime_project(&project_root)?;
-        let repo_root = aster_repo_root();
-        let release = channel == "release";
-        let profile_dir = if release { "release" } else { "debug" };
-        let package_root = project_root
-            .join("exports")
-            .join(sanitize_package_path_segment(&project.manifest.name))
-            .join(target)
-            .join(channel);
-        let project_package_root = package_root.join("project");
-        let bin_dir = package_root.join("bin");
-
-        remove_dir_if_exists(&package_root)?;
-        std::fs::create_dir_all(&project_package_root).map_err(|source| {
-            EngineError::Filesystem {
-                path: project_package_root.clone(),
-                source,
-            }
-        })?;
-        std::fs::create_dir_all(&bin_dir).map_err(|source| EngineError::Filesystem {
-            path: bin_dir.clone(),
-            source,
-        })?;
-
-        build_runtime_binary(&repo_root, release)?;
-
-        let runtime_source = repo_root
-            .join("target")
-            .join(profile_dir)
-            .join(runtime_binary_file_name());
-        let runtime_name = packaged_runtime_file_name();
-        let runtime_dest = bin_dir.join(runtime_name);
-        std::fs::copy(&runtime_source, &runtime_dest).map_err(|source| {
-            EngineError::Filesystem {
-                path: runtime_source.clone(),
-                source,
-            }
-        })?;
-
-        copy_project_for_package(&project_root, &project_package_root)?;
-        write_launcher(&package_root, &runtime_name)?;
-        write_package_manifest(
-            &package_root,
-            &project.manifest.name,
-            target,
-            format,
-            channel,
+        let output = package_project(&PackageRequest {
+            project: project_root,
+            repo_root: aster_repo_root(),
+            target: PackageTarget::parse(target)?,
+            format: PackageFormat::parse(format)?,
+            channel: PackageChannel::parse(channel)?,
             optimize_assets,
             include_debug_symbols,
-        )?;
+            output_dir: None,
+        })?;
 
         self.console.push(ConsoleEntry {
             timestamp: timestamp_now(),
@@ -3698,20 +3647,24 @@ fn on_update(entity, dt) {
                 line: None,
             },
             message: format!(
-                "Packaged {} for {target}/{channel} at {}",
-                project.manifest.name,
-                package_root.display()
+                "Packaged {} for {}/{} at {}",
+                output.project,
+                output.target,
+                output.channel,
+                output.path.display()
             ),
         });
 
         Ok(serde_json::json!({
-            "project": project.manifest.name,
-            "target": target,
-            "format": format,
-            "channel": channel,
-            "path": package_root.to_string_lossy(),
-            "binary": runtime_dest.to_string_lossy(),
-            "launcher": package_root.join(launcher_file_name()).to_string_lossy(),
+            "project": output.project,
+            "target": output.target,
+            "format": output.format,
+            "channel": output.channel,
+            "path": output.path.to_string_lossy(),
+            "binary": output.binary.map(|path| path.to_string_lossy().to_string()),
+            "launcher": output.launcher.map(|path| path.to_string_lossy().to_string()),
+            "assets_manifest": output.assets_manifest.to_string_lossy(),
+            "asset_count": output.asset_count,
         }))
     }
 
@@ -5988,232 +5941,12 @@ fn push_created_asset_console(console: &mut ConsoleService, kind: &str, full_pat
     });
 }
 
-fn current_desktop_package_target() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        "linux-x64"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "windows-x64"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "macos-universal"
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    {
-        "desktop"
-    }
-}
-
-fn runtime_binary_file_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "runtime-min.exe"
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "runtime-min"
-    }
-}
-
-fn packaged_runtime_file_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "aster-runtime.exe"
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "aster-runtime"
-    }
-}
-
-fn launcher_file_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "run.bat"
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "run.sh"
-    }
-}
-
 fn aster_repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn sanitize_package_path_segment(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-            out.push(ch);
-        } else if ch.is_whitespace() {
-            out.push('-');
-        }
-    }
-    if out.is_empty() {
-        "project".to_owned()
-    } else {
-        out
-    }
-}
-
-fn remove_dir_if_exists(path: &Path) -> EngineResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    std::fs::remove_dir_all(path).map_err(|source| EngineError::Filesystem {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn build_runtime_binary(repo_root: &Path, release: bool) -> EngineResult<()> {
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(repo_root)
-        .arg("build")
-        .arg("-p")
-        .arg("runtime-min")
-        .arg("--no-default-features")
-        .arg("--features")
-        .arg("runtime-game,wgpu,physics,script-rhai");
-    if release {
-        command.arg("--release");
-    }
-
-    let output = command.output().map_err(|source| EngineError::Filesystem {
-        path: repo_root.join("cargo"),
-        source,
-    })?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Err(EngineError::other(format!(
-        "runtime build failed with status {}\n{}\n{}",
-        output.status, stdout, stderr
-    )))
-}
-
-fn copy_project_for_package(source: &Path, destination: &Path) -> EngineResult<()> {
-    copy_project_dir(source, destination, source)
-}
-
-fn copy_project_dir(source: &Path, destination: &Path, project_root: &Path) -> EngineResult<()> {
-    std::fs::create_dir_all(destination).map_err(|source_error| EngineError::Filesystem {
-        path: destination.to_path_buf(),
-        source: source_error,
-    })?;
-
-    for entry in std::fs::read_dir(source).map_err(|source_error| EngineError::Filesystem {
-        path: source.to_path_buf(),
-        source: source_error,
-    })? {
-        let entry = entry.map_err(|source_error| EngineError::Filesystem {
-            path: source.to_path_buf(),
-            source: source_error,
-        })?;
-        let source_path = entry.path();
-        let file_name = entry.file_name();
-        if source_path == project_root.join("exports") || file_name == "target" {
-            continue;
-        }
-
-        let destination_path = destination.join(file_name);
-        let file_type = entry
-            .file_type()
-            .map_err(|source_error| EngineError::Filesystem {
-                path: source_path.clone(),
-                source: source_error,
-            })?;
-        if file_type.is_dir() {
-            copy_project_dir(&source_path, &destination_path, project_root)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&source_path, &destination_path).map_err(|source_error| {
-                EngineError::Filesystem {
-                    path: source_path,
-                    source: source_error,
-                }
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn write_launcher(package_root: &Path, runtime_name: &str) -> EngineResult<()> {
-    let launcher_path = package_root.join(launcher_file_name());
-    #[cfg(target_os = "windows")]
-    let launcher = format!("@echo off\r\n\"%~dp0bin\\{runtime_name}\" \"%~dp0project\"\r\n");
-    #[cfg(not(target_os = "windows"))]
-    let launcher = format!(
-        "#!/usr/bin/env sh\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$DIR/bin/{runtime_name}\" \"$DIR/project\"\n"
-    );
-
-    std::fs::write(&launcher_path, launcher).map_err(|source| EngineError::Filesystem {
-        path: launcher_path.clone(),
-        source,
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&launcher_path)
-            .map_err(|source| EngineError::Filesystem {
-                path: launcher_path.clone(),
-                source,
-            })?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&launcher_path, permissions).map_err(|source| {
-            EngineError::Filesystem {
-                path: launcher_path,
-                source,
-            }
-        })?;
-    }
-
-    Ok(())
-}
-
-fn write_package_manifest(
-    package_root: &Path,
-    project_name: &str,
-    target: &str,
-    format: &str,
-    channel: &str,
-    optimize_assets: bool,
-    include_debug_symbols: bool,
-) -> EngineResult<()> {
-    let manifest_path = package_root.join("package-manifest.json");
-    let manifest = serde_json::json!({
-        "schema": "aster.package.v1",
-        "project": project_name,
-        "target": target,
-        "format": format,
-        "channel": channel,
-        "runtime": format!("bin/{}", packaged_runtime_file_name()),
-        "project_root": "project",
-        "launcher": launcher_file_name(),
-        "optimize_assets": optimize_assets,
-        "include_debug_symbols": include_debug_symbols,
-        "created_at": timestamp_now(),
-    });
-    let content = serde_json::to_string_pretty(&manifest).map_err(|error| {
-        EngineError::other(format!("package manifest serialization failed: {error}"))
-    })?;
-    std::fs::write(&manifest_path, content).map_err(|source| EngineError::Filesystem {
-        path: manifest_path,
-        source,
-    })
 }
 
 fn try_create_git_worktree(project_root: &Path, workspace_root: &Path) -> EngineResult<bool> {

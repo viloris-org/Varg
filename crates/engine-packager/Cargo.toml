@@ -1,6 +1,6 @@
 [package]
-name = "xtask"
-description = "Aster development task runner"
+name = "engine-packager"
+description = "Aster project build and package pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+engine-assets.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
-engine-packager.workspace = true
+runtime-min.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
