@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn embedded_scene_surfaces_use_low_latency_policy() {
         let config = scene_surface_performance_config(&SceneWindowMode::WaylandEmbedded {
-            socket_name: "aster-editor-test".to_owned(),
+            socket_name: "varg-editor-test".to_owned(),
             viewport: SceneViewportRect {
                 x: 0,
                 y: 0,

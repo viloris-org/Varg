@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for Aster Editor","local":true,"windows":["main","game-view"],"permissions":["core:default","core:window:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for Varg Editor","local":true,"windows":["main","game-view"],"permissions":["core:default","core:window:default"]}}

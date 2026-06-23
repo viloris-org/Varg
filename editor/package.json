@@ -1,7 +1,7 @@
 {
-  "name": "aster-editor",
+  "name": "varg-editor",
   "version": "0.1.0",
-  "description": "Aster game engine editor (Tauri)",
+  "description": "Varg game engine editor (Tauri)",
   "type": "module",
   "scripts": {
     "dev": "vite",

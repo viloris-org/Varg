@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    aster_editor_tauri_lib::run()
+    varg_editor_tauri_lib::run()
 }

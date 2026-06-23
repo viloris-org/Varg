@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AsterLogo,
+  VargLogo,
   IconAlertCircle,
   IconAlertTriangle,
   IconBot,
@@ -1574,10 +1574,10 @@ export default function CalmEditorPrototype({
       <header className="flex h-12 min-h-12 items-center gap-3 border-b border-[var(--border)] bg-[rgba(18,19,22,0.88)] px-3 backdrop-blur-xl">
         <div className="flex min-w-[232px] items-center gap-2">
           <div className="grid size-7 place-items-center rounded-[var(--radius-md)] border border-[rgba(34,197,94,0.22)] bg-[rgba(34,197,94,0.08)]">
-            <AsterLogo size={17} />
+            <VargLogo size={17} />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-[12px] font-semibold text-[var(--text-primary)]">Aster / {shellState?.project_name || 'Meadow Run'}</div>
+            <div className="truncate text-[12px] font-semibold text-[var(--text-primary)]">Varg / {shellState?.project_name || 'Meadow Run'}</div>
             <div className="truncate font-mono text-[10px] text-[var(--text-muted)]">Scenes / Meadow.scene</div>
           </div>
         </div>
@@ -1830,7 +1830,7 @@ export default function CalmEditorPrototype({
               <div className="p-3">
                 <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3">
                   <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
-                    <IconBot size={14} /> Aster Assistant
+                    <IconBot size={14} /> Varg Assistant
                   </div>
                   <p className="text-[12px] leading-5 text-[var(--text-secondary)]">
                     Ask about the selected entity, scene diagnostics, build output, or scripts.

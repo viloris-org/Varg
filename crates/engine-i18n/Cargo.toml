@@ -1,6 +1,6 @@
 [package]
 name = "engine-i18n"
-description = "Lightweight i18n for the Aster editor"
+description = "Lightweight i18n for the Varg editor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

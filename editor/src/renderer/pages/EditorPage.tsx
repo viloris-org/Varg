@@ -3023,7 +3023,7 @@ export default function EditorPage({
                         </div>
                       ))}
                     </div>}
-                    <pre className={scriptSurfaceClass.gutter}><code>{(scriptContent || '// Aster-generated scripts will appear here.').split('\n').map((line, index) => { const lineNumber = index + 1; const selected = scriptLineRange && lineNumber >= scriptLineRange[0] && lineNumber <= scriptLineRange[1]; return <button key={lineNumber} className={cx(scriptSurfaceClass.gutterButton, selected && scriptSurfaceClass.gutterButtonSelected)} onClick={event => selectScriptLine(lineNumber, event.shiftKey, event)}><span className={scriptSurfaceClass.gutterLineNumber}>{lineNumber}</span><i className={scriptSurfaceClass.gutterLineText}>{line || ' '}</i></button>; })}</code></pre>
+                    <pre className={scriptSurfaceClass.gutter}><code>{(scriptContent || '// Varg-generated scripts will appear here.').split('\n').map((line, index) => { const lineNumber = index + 1; const selected = scriptLineRange && lineNumber >= scriptLineRange[0] && lineNumber <= scriptLineRange[1]; return <button key={lineNumber} className={cx(scriptSurfaceClass.gutterButton, selected && scriptSurfaceClass.gutterButtonSelected)} onClick={event => selectScriptLine(lineNumber, event.shiftKey, event)}><span className={scriptSurfaceClass.gutterLineNumber}>{lineNumber}</span><i className={scriptSurfaceClass.gutterLineText}>{line || ' '}</i></button>; })}</code></pre>
                   </aside>
                 </div>
                 {scriptDiagnostics.length > 0 && <div className={scriptSurfaceClass.diagnostics}>

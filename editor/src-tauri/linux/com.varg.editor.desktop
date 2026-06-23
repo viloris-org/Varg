@@ -1,0 +1,8 @@
+[Desktop Entry]
+Categories=Development;
+Exec=varg-editor-tauri
+StartupWMClass=com.varg.editor
+Icon=com.varg.editor
+Name=Varg Editor
+Terminal=false
+Type=Application

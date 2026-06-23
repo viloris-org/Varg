@@ -99,7 +99,7 @@ def inotify_usage(proc_root: Path, uid: int) -> tuple[int, list[tuple[int, int, 
 def format_open_file_limit_failure(open_fds: int | None, soft_limit: int) -> str:
     usage = f"{open_fds}/{soft_limit}" if open_fds is not None else str(soft_limit)
     return (
-        "Aster editor dev startup stopped before Tauri could abort.\n"
+        "Varg editor dev startup stopped before Tauri could abort.\n"
         "The shell open-file limit is too low for Tauri/Cargo dev startup "
         f"({usage}).\n"
         "This is a per-process file descriptor limit; it is not a general app or thread limit.\n"
@@ -122,7 +122,7 @@ def format_inotify_failure(
     usage = f"{used}/{limit}" if limit is not None else str(used)
 
     lines = [
-        "Aster editor dev startup stopped before Tauri could abort.",
+        "Varg editor dev startup stopped before Tauri could abort.",
         f"Linux file-watch instance limit reached: need {required_instances} spare inotify instances; observed {usage}.",
         "This is only the Linux file-watcher quota, not a general app/process/thread limit.",
     ]
@@ -220,7 +220,7 @@ def main() -> int:
     try:
         has_capacity = has_inotify_capacity(MIN_DEV_INOTIFY_INSTANCES)
     except OSError as error:
-        print(f"Aster editor inotify preflight failed: {error}", file=sys.stderr)
+        print(f"Varg editor inotify preflight failed: {error}", file=sys.stderr)
         return 1
 
     if has_capacity:

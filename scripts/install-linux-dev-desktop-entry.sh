@@ -7,7 +7,7 @@ case "$(uname -s)" in
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-desktop_source="$repo_root/editor/src-tauri/linux/com.aster.editor.desktop"
+desktop_source="$repo_root/editor/src-tauri/linux/com.varg.editor.desktop"
 icon_source="$repo_root/editor/src-tauri/icons/icon.png"
 
 desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -15,8 +15,8 @@ icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
 
 mkdir -p "$desktop_dir" "$icon_dir"
 
-desktop_target="$desktop_dir/com.aster.editor.desktop"
-icon_target="$icon_dir/com.aster.editor.png"
+desktop_target="$desktop_dir/com.varg.editor.desktop"
+icon_target="$icon_dir/com.varg.editor.png"
 
 cp "$icon_source" "$icon_target"
 

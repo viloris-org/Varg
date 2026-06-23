@@ -1,23 +1,23 @@
-# Aster
+# Varg
 
-[![CI](https://github.com/viloris-org/Aster/actions/workflows/core.yml/badge.svg)](https://github.com/viloris-org/Aster/actions/workflows/core.yml)
-[![Nightly](https://github.com/viloris-org/Aster/actions/workflows/nightly.yml/badge.svg)](https://github.com/viloris-org/Aster/actions/workflows/nightly.yml)
+[![CI](https://github.com/viloris-org/Varg/actions/workflows/core.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/core.yml)
+[![Nightly](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.78+-orange.svg)
 
 [English](README.md) | [简体中文](README.zh-CN.md) | 日本語
 
-Aster は AI ネイティブなゲームエンジンです。自然言語で作りたいゲームを説明すれば、自律エージェント群がシーン、ロジック、UI まですべて構築します。本格的なビジュアルエディタも搭載しており、細部の調整や仕上げも思いのままです。
+Varg は AI ネイティブなゲームエンジンです。自然言語で作りたいゲームを説明すれば、自律エージェント群がシーン、ロジック、UI まですべて構築します。本格的なビジュアルエディタも搭載しており、細部の調整や仕上げも思いのままです。
 
-![Aster Editor](docs/screenshots/editor.png)
+![Varg Editor](docs/screenshots/editor.png)
 
 > **スクリーンショットプレースホルダー** — UI が安定したら実際のエディタ画像に差し替えてください。
 
 ## クイックスタート
 
 ```sh
-git clone https://github.com/viloris-org/Aster
-cd Aster
+git clone https://github.com/viloris-org/Varg
+cd Varg
 
 # エディタを起動
 cd editor
@@ -44,7 +44,7 @@ bun run dev:tauri
 ## プロジェクト構造
 
 ```
-Aster/
+Varg/
 ├── editor/                  # Tauri デスクトップアプリ（React + Rust）
 ├── crates/
 │   ├── engine-editor/       # エディタワークフロー、サービス、Agent ツール

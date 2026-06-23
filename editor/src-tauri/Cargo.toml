@@ -1,13 +1,13 @@
 [package]
-name = "aster-editor-tauri"
+name = "varg-editor-tauri"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-default-run = "aster-editor-tauri"
+default-run = "varg-editor-tauri"
 
 [lib]
-name = "aster_editor_tauri_lib"
+name = "varg_editor_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]

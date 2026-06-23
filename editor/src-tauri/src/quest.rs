@@ -131,7 +131,7 @@ impl Default for QuestNextAction {
     fn default() -> Self {
         Self {
             label: "Review Quest state".to_owned(),
-            reason: "Aster has not selected the next workflow action yet.".to_owned(),
+            reason: "Varg has not selected the next workflow action yet.".to_owned(),
         }
     }
 }
@@ -2181,7 +2181,7 @@ mod tests {
 
     fn project(root: &Path) -> QuestProject {
         QuestProject {
-            name: "Aster".to_owned(),
+            name: "Varg".to_owned(),
             path: root.to_path_buf(),
         }
     }

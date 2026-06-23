@@ -2504,7 +2504,7 @@ export default function QuestPage({
     <div className={questClasses.shell}>
       <header className={questClasses.globalHeader}>
         <div className={questClasses.brand}>
-          <span title={selected?.title ?? 'Aster'}>{selected?.title ?? 'Aster'}</span>
+          <span title={selected?.title ?? 'Varg'}>{selected?.title ?? 'Varg'}</span>
           <strong>{selected?.project.name ?? t('quest_title')}</strong>
           {selected && <IconMonitor size={13} />}
         </div>
@@ -2555,7 +2555,7 @@ export default function QuestPage({
             <h1 className="m-0 mb-3 text-[clamp(28px,3vw,40px)] font-[650] leading-[1.1] text-[var(--text-primary)]">{t('quest_home_title')}</h1>
             <div className={questClasses.startLine}>
               <span>{t('quest_start_in')}</span>
-              <b>{effectiveProjectPath ? 'Aster' : t('quest_no_project')}</b>
+              <b>{effectiveProjectPath ? 'Varg' : t('quest_no_project')}</b>
               <span>{t('quest_local')}</span>
               <span>main</span>
             </div>
@@ -2732,7 +2732,7 @@ export default function QuestPage({
                     <div>
                       <button type="button" disabled>
                         <strong>{selected?.next_action.label ?? 'Generating Quest spec'}</strong>
-                        <small>{selected?.next_action.reason ?? 'Aster is preparing the editable task artifact.'}</small>
+                        <small>{selected?.next_action.reason ?? 'Varg is preparing the editable task artifact.'}</small>
                       </button>
                     </div>
                   </article>

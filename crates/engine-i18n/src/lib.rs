@@ -132,12 +132,12 @@ mod tests {
         let es = Translations::load(Locale::Es);
         let zh_hant = Translations::load(Locale::ZhHant);
 
-        assert_eq!(en.tr("app_name"), "Aster");
-        assert_eq!(zh.tr("app_name"), "Aster");
-        assert_eq!(ja.tr("app_name"), "Aster");
-        assert_eq!(ko.tr("app_name"), "Aster");
-        assert_eq!(es.tr("app_name"), "Aster");
-        assert_eq!(zh_hant.tr("app_name"), "Aster");
+        assert_eq!(en.tr("app_name"), "Varg");
+        assert_eq!(zh.tr("app_name"), "Varg");
+        assert_eq!(ja.tr("app_name"), "Varg");
+        assert_eq!(ko.tr("app_name"), "Varg");
+        assert_eq!(es.tr("app_name"), "Varg");
+        assert_eq!(zh_hant.tr("app_name"), "Varg");
         assert_eq!(en.tr("sidebar_projects"), "Projects");
         assert_eq!(zh.tr("sidebar_projects"), "项目");
         assert_eq!(ja.tr("sidebar_projects"), "プロジェクト");

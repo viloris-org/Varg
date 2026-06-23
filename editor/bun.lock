@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "aster-editor",
+      "name": "varg-editor",
       "dependencies": {
         "@tauri-apps/api": "^2.0.0",
         "@types/react-syntax-highlighter": "^15.5.13",

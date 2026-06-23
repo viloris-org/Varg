@@ -1,4 +1,4 @@
-//! Tauri backend for the Aster Editor.
+//! Tauri backend for the Varg Editor.
 //!
 //! Single `rpc` command that dispatches to EditorHost methods,
 //! mirroring the original stdin/stdout JSON-RPC protocol.
@@ -147,7 +147,7 @@ impl SoloQuestRunner {
     fn initial_prompt(spec: &str, knowledge_context: &str) -> String {
         format!(
             "Execute this Quest inside the isolated workspace only. \
-             Produce concrete Aster editor operations. Do not request shell commands. \
+             Produce concrete Varg editor operations. Do not request shell commands. \
              When done, emit a complete operation with a concise summary.\n\n{}{}",
             spec, knowledge_context
         )
@@ -281,7 +281,7 @@ fn format_script_diagnostics(
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Aster Script validation failed with {} diagnostic(s):\n{details}",
+        "Rhai script validation failed with {} diagnostic(s):\n{details}",
         diagnostics.len()
     )
 }
@@ -1324,7 +1324,7 @@ impl EditorHost {
             }
         };
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
+            "You are Varg Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
@@ -1605,7 +1605,7 @@ impl EditorHost {
             },
         )?;
         let mut request = engine_ai::AiRequest::single_turn(
-            "You are Aster Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
+            "You are Varg Quest Mode. Create only the initial editable Markdown spec for an AI-led game-editor Quest. Prefer calling `create_or_update_spec` once. If the user's goal is underspecified and the missing choice materially changes the plan, call `ask_questions` to create an interactive question card instead of writing questions in prose. If tool calling is unavailable or awkward, return the editable Markdown spec directly as normal text. Do not create execution tasks yet; tasks are planned later after the user reviews and updates the spec. Do not force a generic workflow; choose the spec shape that best fits the user's goal.".to_owned(),
             serde_json::json!({}),
             format!("Quest goal:\n{goal}"),
         );
@@ -8124,23 +8124,23 @@ fn dirs_config_dir() -> Option<PathBuf> {
                     .ok()
                     .map(|h| PathBuf::from(h).join(".config"))
             })
-            .map(|p| p.join("aster"))
+            .map(|p| p.join("varg"))
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var("HOME")
             .ok()
-            .map(|h| PathBuf::from(h).join("Library/Application Support/aster"))
+            .map(|h| PathBuf::from(h).join("Library/Application Support/varg"))
     }
     #[cfg(target_os = "windows")]
     {
         std::env::var("APPDATA")
             .ok()
-            .map(|h| PathBuf::from(h).join("aster"))
+            .map(|h| PathBuf::from(h).join("varg"))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        Some(PathBuf::from(".aster-config"))
+        Some(PathBuf::from(".varg-config"))
     }
 }
 
@@ -8155,24 +8155,24 @@ fn dirs_data_dir() -> Option<PathBuf> {
                     .ok()
                     .map(|h| PathBuf::from(h).join(".local/share"))
             })
-            .map(|p| p.join("aster"))
+            .map(|p| p.join("varg"))
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var("HOME")
             .ok()
-            .map(|h| PathBuf::from(h).join("Library/aster"))
+            .map(|h| PathBuf::from(h).join("Library/varg"))
     }
     #[cfg(target_os = "windows")]
     {
         std::env::var("LOCALAPPDATA")
             .ok()
             .or_else(|| std::env::var("APPDATA").ok())
-            .map(|h| PathBuf::from(h).join("aster"))
+            .map(|h| PathBuf::from(h).join("varg"))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        Some(PathBuf::from(".aster-data"))
+        Some(PathBuf::from(".varg-data"))
     }
 }
 
@@ -8398,15 +8398,15 @@ fn apply_pre_gtk_desktop_environment() {}
 
 pub fn run() {
     // Initialize layered logging: engine / game / editor targets
-    // Logs go to: ~/.local/share/aster-editor/logs/ (Linux)
-    //             ~/Library/Logs/aster-editor/        (macOS)
-    //             %APPDATA%/aster-editor/logs/        (Windows)
+    // Logs go to: ~/.local/share/varg-editor/logs/ (Linux)
+    //             ~/Library/Logs/varg-editor/        (macOS)
+    //             %APPDATA%/varg-editor/logs/        (Windows)
     // RUST_LOG=engine=debug,game=info,editor=warn (default: info for all)
     let log_dir = dirs_data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("aster-editor")
+        .join("varg-editor")
         .join("logs");
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "aster.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "varg.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     // Keep _guard alive for the entire process lifetime so logs are flushed.
     // We intentionally leak it since run() never returns.
@@ -8434,7 +8434,7 @@ pub fn run() {
     apply_pre_gtk_desktop_environment();
 
     let config_dir = dirs_config_dir().unwrap_or_else(|| PathBuf::from("."));
-    let store_path = config_dir.join("aster-editor-state.toml");
+    let store_path = config_dir.join("varg-editor-state.toml");
     let store = FileEditorStore::new(&store_path);
 
     let quest_root = dirs_data_dir()
@@ -8712,7 +8712,7 @@ mod tests {
                     "title": "Questions",
                     "questions": [{
                         "id": "scope",
-                        "prompt": "Which scope should Aster optimize first?",
+                        "prompt": "Which scope should Varg optimize first?",
                         "allow_multiple": false,
                         "allow_custom": true,
                         "options": [
@@ -8723,7 +8723,7 @@ mod tests {
                 }),
             }],
             "",
-            "Optimize Aster",
+            "Optimize Varg",
         )
         .unwrap();
 
@@ -8831,7 +8831,7 @@ mod tests {
     #[test]
     fn fixed_provider_clears_custom_endpoint_when_settings_are_updated() {
         let temp = tempfile::tempdir().unwrap();
-        let store = FileEditorStore::new(temp.path().join("aster-editor-state.toml"));
+        let store = FileEditorStore::new(temp.path().join("varg-editor-state.toml"));
         let mut host = EditorHost::new(store).unwrap();
 
         host.update_copilot_settings(&serde_json::json!({
@@ -8848,7 +8848,7 @@ mod tests {
     #[test]
     fn ollama_preserves_custom_endpoint_when_settings_are_updated() {
         let temp = tempfile::tempdir().unwrap();
-        let store = FileEditorStore::new(temp.path().join("aster-editor-state.toml"));
+        let store = FileEditorStore::new(temp.path().join("varg-editor-state.toml"));
         let mut host = EditorHost::new(store).unwrap();
 
         host.update_copilot_settings(&serde_json::json!({
@@ -8868,14 +8868,14 @@ mod tests {
     #[test]
     fn copilot_settings_survive_host_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let state_path = temp.path().join("aster-editor-state.toml");
+        let state_path = temp.path().join("varg-editor-state.toml");
 
         {
             let store = FileEditorStore::new(&state_path);
             let mut host = EditorHost::new(store).unwrap();
             host.update_copilot_settings(&serde_json::json!({
                 "provider": "custom",
-                "model": "aster-test-model",
+                "model": "varg-test-model",
                 "api_endpoint": "https://provider.example/v1",
                 "api_key": "secret-test-key",
                 "max_tokens": 8192
@@ -8884,13 +8884,13 @@ mod tests {
         }
 
         let state_text = fs::read_to_string(&state_path).unwrap();
-        assert!(state_text.contains("aster-test-model"));
+        assert!(state_text.contains("varg-test-model"));
         assert!(!state_text.contains("secret-test-key"));
 
         let store = FileEditorStore::new(&state_path);
         let host = EditorHost::new(store).unwrap();
         assert_eq!(host.copilot_settings.provider, CopilotProvider::Custom);
-        assert_eq!(host.copilot_settings.model, "aster-test-model");
+        assert_eq!(host.copilot_settings.model, "varg-test-model");
         assert_eq!(
             host.copilot_settings.api_endpoint.as_deref(),
             Some("https://provider.example/v1")
@@ -8905,7 +8905,7 @@ mod tests {
     #[test]
     fn permanently_allowed_command_survives_host_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let state_path = temp.path().join("aster-editor-state.toml");
+        let state_path = temp.path().join("varg-editor-state.toml");
 
         {
             let store = FileEditorStore::new(&state_path);
@@ -9015,7 +9015,7 @@ mod tests {
     }
 
     fn host_with_quest_root(root: &Path) -> EditorHost {
-        let store = FileEditorStore::new(root.join("aster-editor-state.toml"));
+        let store = FileEditorStore::new(root.join("varg-editor-state.toml"));
         EditorHost::new_with_quest_root(store, root.join("quests")).unwrap()
     }
 

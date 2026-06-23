@@ -1,7 +1,7 @@
 //! Integration tests for the Tauri editor RPC backend.
 //!
 //! Tests the `EditorHost` RPC dispatch directly (headless, no Tauri window).
-use aster_editor_tauri_lib::EditorHost;
+use varg_editor_tauri_lib::EditorHost;
 use engine_editor::FileEditorStore;
 
 fn temp_store() -> (tempfile::TempDir, FileEditorStore) {

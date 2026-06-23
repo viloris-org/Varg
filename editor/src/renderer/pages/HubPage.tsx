@@ -53,7 +53,7 @@ import {
 import {
   IconProjects, IconInstalls, IconSettings, IconFolder, IconPlus, IconTrash, IconPlay,
   IconSun, IconMoon, IconMonitor, IconPackage, IconAlertTriangle, IconX, IconEmpty, IconSparkles,
-  AsterLogo,
+  VargLogo,
 } from '../icons';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ function hubActionBarClass(visible: boolean): string {
 }
 
 const sidebarClass = 'flex w-[232px] min-w-[232px] select-none flex-col border-r border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.035),transparent_42%),var(--bg-surface)] shadow-[var(--shadow-sm)]';
-const logoClass = 'flex items-center gap-2.5 px-5 pt-7 pb-5 [&_svg]:shrink-0 [&_svg]:drop-shadow-[0_6px_14px_rgba(0,0,0,0.24)]';
+const logoClass = 'flex items-center gap-2.5 px-5 pt-7 pb-5 [&_img]:shrink-0 [&_img]:drop-shadow-[0_6px_14px_rgba(0,0,0,0.24)]';
 const logoTitleClass = 'text-lg font-bold text-[var(--text-primary)]';
 const logoTaglineClass = 'text-[11px] font-normal text-[var(--text-muted)]';
 const navClass = 'flex flex-1 flex-col gap-0.5 px-2 py-2';
@@ -237,9 +237,9 @@ function Sidebar({
     <aside className={sidebarClass}>
       {/* Logo */}
       <div className={logoClass}>
-        <AsterLogo />
+        <VargLogo />
         <div>
-          <h1 className={logoTitleClass}>Aster</h1>
+          <h1 className={logoTitleClass}>Varg</h1>
           <span className={logoTaglineClass}>{t('app_tagline')}</span>
         </div>
       </div>

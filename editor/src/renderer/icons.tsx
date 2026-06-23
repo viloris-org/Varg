@@ -314,12 +314,20 @@ export const IconEmpty = ({ size = 48, className }: IconProps) => (
   </svg>
 );
 
-// ─── Aster Logo ────────────────────────────────────────────────────────────
+// ─── Varg Logo ─────────────────────────────────────────────────────────────
 
-export const AsterLogo = ({ size = 24, className }: IconProps) => (
-  <svg width={size} height={size} viewBox="0 0 16 16" className={className}>
-    <polygon points="8,1 15,5 15,11 8,15 1,11 1,5" fill="#22C55E" opacity="0.9" />
-  </svg>
+const vargLogoUrl = new URL('./assets/varg-logo.png', import.meta.url).href;
+
+export const VargLogo = ({ size = 24, className }: IconProps) => (
+  <img
+    src={vargLogoUrl}
+    width={size}
+    height={size}
+    alt=""
+    aria-hidden="true"
+    className={className}
+    draggable={false}
+  />
 );
 
 // ─── Helper: map asset kind to icon ───────────────────────────────────────

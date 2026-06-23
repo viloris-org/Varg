@@ -666,7 +666,7 @@ mod backend {
         }
 
         fn identifier(&self) -> Option<String> {
-            Some("Aster/GTK/Wayland".to_owned())
+            Some("Varg/GTK/Wayland".to_owned())
         }
     }
 
@@ -1460,7 +1460,7 @@ mod backend {
                 return;
             }
         };
-        let socket = match ListeningSocket::bind_auto("aster-editor", 0..128) {
+        let socket = match ListeningSocket::bind_auto("varg-editor", 0..128) {
             Ok(socket) => socket,
             Err(error) => {
                 let _ = ready_tx.send(Err(format!("bind Wayland socket: {error}")));
@@ -1498,7 +1498,7 @@ mod backend {
         let dmabuf_global = dmabuf_state
             .create_global::<EmbeddedCompositorState>(&display_handle, dmabuf_importer.formats());
         let mut seat_state = SeatState::new();
-        let _ = seat_state.new_wl_seat(&display_handle, "aster-editor");
+        let _ = seat_state.new_wl_seat(&display_handle, "varg-editor");
         let xdg_shell_state = XdgShellState::new::<EmbeddedCompositorState>(&display_handle);
         let output = create_embedded_output(viewport);
         let _output_global = output.create_global::<EmbeddedCompositorState>(&display_handle);
@@ -1611,11 +1611,11 @@ mod backend {
             .map(|viewport| (viewport.width.max(1) as i32, viewport.height.max(1) as i32))
             .unwrap_or((640, 480));
         let output = Output::new(
-            "aster-editor-embedded".to_owned(),
+            "varg-editor-embedded".to_owned(),
             PhysicalProperties {
                 size: (size.0.max(1), size.1.max(1)).into(),
                 subpixel: Subpixel::Unknown,
-                make: "Aster".to_owned(),
+                make: "Varg".to_owned(),
                 model: "Embedded Scene View".to_owned(),
             },
         );

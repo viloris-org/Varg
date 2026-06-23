@@ -1,17 +1,17 @@
-# Aster
+# Varg
 
-[![CI](https://github.com/viloris-org/Aster/actions/workflows/core.yml/badge.svg)](https://github.com/viloris-org/Aster/actions/workflows/core.yml)
-[![Nightly](https://github.com/viloris-org/Aster/actions/workflows/nightly.yml/badge.svg)](https://github.com/viloris-org/Aster/actions/workflows/nightly.yml)
+[![CI](https://github.com/viloris-org/Varg/actions/workflows/core.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/core.yml)
+[![Nightly](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.78+-orange.svg)
 
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-Aster is an AI-native game engine. Describe your game in natural language, and a cluster
+Varg is an AI-native game engine. Describe your game in natural language, and a cluster
 of autonomous agents builds it — scene, logic, UI, and all. A full visual editor is
 there for you to tweak, polish, and take control whenever you want.
 
-![Aster Editor](docs/screenshots/editor.png)
+![Varg Editor](docs/screenshots/editor.png)
 
 > **Screenshot placeholder** — replace `docs/screenshots/editor.png` with an actual
 > editor screenshot once the UI stabilises.
@@ -19,8 +19,8 @@ there for you to tweak, polish, and take control whenever you want.
 ## Getting Started
 
 ```sh
-git clone https://github.com/viloris-org/Aster
-cd Aster
+git clone https://github.com/viloris-org/Varg
+cd Varg
 
 # Launch the editor
 cd editor
@@ -59,7 +59,7 @@ bun run dev:tauri
 ## Project Structure
 
 ```
-Aster/
+Varg/
 ├── editor/                  # Tauri desktop app (React + Rust)
 ├── crates/
 │   ├── engine-editor/       # Editor workflow, services, agent tooling

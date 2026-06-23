@@ -182,46 +182,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aster-editor-tauri"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "engine-ai",
- "engine-assets",
- "engine-core",
- "engine-ecs",
- "engine-editor",
- "engine-i18n",
- "engine-packager",
- "engine-render",
- "engine-render-wgpu",
- "engine-script-rhai",
- "engine-script-varg",
- "gdk",
- "gdkwayland-sys",
- "gdkx11-sys",
- "gtk",
- "image",
- "raw-window-handle",
- "rfd",
- "runtime-min",
- "serde",
- "serde_json",
- "smithay",
- "tauri",
- "tauri-build",
- "tempfile",
- "toml 0.8.23",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ureq",
- "wayland-egl",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6435,6 +6395,46 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "varg-editor-tauri"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "engine-ai",
+ "engine-assets",
+ "engine-core",
+ "engine-ecs",
+ "engine-editor",
+ "engine-i18n",
+ "engine-packager",
+ "engine-render",
+ "engine-render-wgpu",
+ "engine-script-rhai",
+ "engine-script-varg",
+ "gdk",
+ "gdkwayland-sys",
+ "gdkx11-sys",
+ "gtk",
+ "image",
+ "raw-window-handle",
+ "rfd",
+ "runtime-min",
+ "serde",
+ "serde_json",
+ "smithay",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ureq",
+ "wayland-egl",
+ "wgpu",
+ "winit",
+]
 
 [[package]]
 name = "vec_map"
