@@ -69,12 +69,18 @@ const TRANSPARENT_WINDOW_BACKGROUND: &str = "transparent";
 const SOLO_REPAIR_LIMIT: usize = 1;
 
 fn editor_compositor_requested() -> bool {
-    std::env::var("ASTER_EDITOR_COMPOSITOR").is_ok_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    match std::env::var("ASTER_EDITOR_COMPOSITOR") {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => false,
+        },
+        Err(_) => default_editor_compositor_requested(),
+    }
+}
+
+fn default_editor_compositor_requested() -> bool {
+    editor_compositor::platform_support().available
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7652,8 +7658,15 @@ fn sync_wayland_embedded_compositor_viewport(
 }
 
 #[tauri::command]
+fn wayland_embedded_compositor_status(
+    state: State<'_, EditorHostState>,
+) -> Result<wayland_embedded_compositor::WaylandEmbeddedCompositorRuntimeStatus, String> {
+    state.with_host(|host| Ok(host.wayland_embedded_compositor.status()))
+}
+
+#[tauri::command]
 fn sync_no_cpu_readback_scene_view(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     viewport: EmbeddedSceneViewport,
     yaw: Option<f32>,
@@ -7664,6 +7677,10 @@ fn sync_no_cpu_readback_scene_view(
     target_z: Option<f32>,
 ) -> Result<(), String> {
     let viewport = viewport.into_rect();
+    native_host_window::resize_main_window_scene_surface(
+        app,
+        native_host_window::NativeHostSceneRect::from(viewport),
+    )?;
     state.with_host(|host| {
         let compositor_viewport =
             editor_compositor::EditorCompositorViewport::from_scene_rect(viewport);
@@ -7723,14 +7740,6 @@ fn open_no_cpu_readback_scene_view(
     target_y: f32,
     target_z: f32,
 ) -> Result<(), String> {
-    let wayland_support = wayland_embedded_compositor::support();
-    if wayland_support.available {
-        return open_wayland_embedded_compositor_scene_view(
-            state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
-        )
-        .map(|_| ());
-    }
-
     let support = editor_compositor::platform_support();
     if !editor_compositor_requested() || !support.available {
         return Err(format!(
@@ -7740,6 +7749,10 @@ fn open_no_cpu_readback_scene_view(
         ));
     }
     let viewport = viewport.into_rect();
+    native_host_window::resize_main_window_scene_surface(
+        app.clone(),
+        native_host_window::NativeHostSceneRect::from(viewport),
+    )?;
     let target = native_host_window::main_window_scene_target(&app)?;
     tracing::info!(
         target: "editor",
@@ -7772,14 +7785,14 @@ fn open_no_cpu_readback_scene_view(
 
         let mode = scene_window::SceneWindowMode::CompositorRaw {
             surface: target.surface,
-            surface_width: target.surface_width,
-            surface_height: target.surface_height,
+            surface_width: viewport.width,
+            surface_height: viewport.height,
             viewport,
         };
         let handle = scene_window::spawn_scene_window_with_mode(
             "Native Host Scene View".to_owned(),
-            target.surface_width,
-            target.surface_height,
+            viewport.width,
+            viewport.height,
             snapshot,
             camera,
             mode,
@@ -7825,6 +7838,7 @@ fn open_editor_compositor_scene_view(
 
 #[tauri::command]
 fn open_wayland_embedded_compositor_scene_view(
+    app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     viewport: EmbeddedSceneViewport,
     _yaw: f32,
@@ -7835,19 +7849,30 @@ fn open_wayland_embedded_compositor_scene_view(
     _target_z: f32,
 ) -> Result<wayland_embedded_compositor::WaylandEmbeddedCompositorRuntimeStatus, String> {
     if !editor_compositor_requested() {
-        return Err("wayland-embedded-compositor requires ASTER_EDITOR_COMPOSITOR=1".to_owned());
+        return Err("wayland-embedded-compositor is not enabled for this session".to_owned());
     }
 
     let viewport =
         wayland_embedded_compositor::WaylandEmbeddedViewport::from_scene_rect(viewport.into_rect());
+    let scene_viewport = viewport.into_scene_rect();
+    native_host_window::resize_main_window_scene_surface(
+        app.clone(),
+        native_host_window::NativeHostSceneRect::from(scene_viewport),
+    )?;
+    let host_target = native_host_window::main_window_scene_target(&app)?;
+    let host_output_target = wayland_embedded_compositor::WaylandEmbeddedHostOutputTarget::new(
+        host_target.surface,
+        viewport,
+    );
     state.with_host(|host| {
         host.wayland_embedded_compositor.set_viewport(viewport);
+        host.wayland_embedded_compositor
+            .set_host_output_target(host_output_target);
         let status = host.wayland_embedded_compositor.open_scene_view()?;
         let socket_name = status
             .socket_name
             .clone()
             .ok_or_else(|| "Wayland embedded compositor socket is unavailable".to_owned())?;
-        let scene_viewport = viewport.into_scene_rect();
         host.poll_scene_window();
         let snapshot = host
             .create_scene_runtime_snapshot()
@@ -8283,6 +8308,7 @@ pub fn run() {
             viewport_presentation_status,
             sync_editor_compositor_viewport,
             sync_wayland_embedded_compositor_viewport,
+            wayland_embedded_compositor_status,
             open_no_cpu_readback_scene_view,
             sync_no_cpu_readback_scene_view,
             open_zero_copy_scene_view,
@@ -8303,7 +8329,7 @@ pub fn run() {
                     tracing::info!(
                         target: "editor",
                         backend = wayland_embedded_compositor::BACKEND_ID,
-                        "skipping GTK native host bridge on Wayland; embedded compositor adapter owns no-CPU-readback presentation"
+                        "skipping GTK native host bridge on Wayland; embedded compositor owns no-CPU-readback presentation"
                     );
                 } else {
                     let layout_mode =

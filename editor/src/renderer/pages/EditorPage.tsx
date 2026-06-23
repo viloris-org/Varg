@@ -1,9 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  closeNativeSceneView,
   fetchSceneGuides,
   openGameView,
   openNativeSceneView,
+  openNoCpuReadbackSceneView,
+  openWaylandEmbeddedCompositorSceneView,
   rpc,
+  syncEditorCompositorViewport,
+  syncNoCpuReadbackSceneView,
+  syncWaylandEmbeddedCompositorViewport,
+  waylandEmbeddedCompositorStatus,
+  type ViewportPresentationAdapter,
+  viewportPresentationCapabilities,
+  viewportPresentationStatus,
+  type ViewportPresentationMode,
+  type ViewportPresentationStatus,
+  type WaylandEmbeddedCompositorRuntimeStatus,
   viewportReadback,
 } from '../api';
 import { useTranslation } from '../i18n';
@@ -77,6 +90,27 @@ function fitViewportReadbackSize(width: number, height: number, maxPixels = edit
     height: Math.max(1, Math.round(roundedHeight * scale)),
     scaled: true,
   };
+}
+
+function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode) {
+  return mode === 'wayland-embedded-compositor';
+}
+
+function isNoCpuReadbackAdapter(adapter?: ViewportPresentationAdapter) {
+  return Boolean(adapter?.available && !adapter.cpu_readback && adapter.gpu_native_surface);
+}
+
+function waylandRuntimeLabel(status: WaylandEmbeddedCompositorRuntimeStatus | null) {
+  if (!status) return null;
+  const composition = status.output_composition;
+  const latest = status.latest_frame;
+  return [
+    `imports ${status.imported_frames}`,
+    `commits ${status.committed_frames}`,
+    `composed ${composition.composed_frames}`,
+    latest ? `${latest.width}x${latest.height}` : null,
+    composition.attached ? null : composition.reason,
+  ].filter(Boolean).join(' · ');
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -407,6 +441,7 @@ const gameClass = {
   mainPanel: 'flex min-h-0 min-w-0 flex-col',
   previewBar: 'flex min-h-[42px] items-center justify-between border-b border-[var(--border)] bg-[var(--bg-overlay)] px-3 text-[10px] text-[var(--text-secondary)] backdrop-blur-xl',
   previewBarGroup: 'flex items-center gap-[7px]',
+  presentationStatus: 'min-w-0 max-w-[42vw] overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-[var(--accent)]',
   liveDot: 'size-1.5 rounded-full bg-[var(--success)] shadow-[0_0_7px_var(--success)]',
   modeSwitch: 'inline-flex gap-0.5 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-0.5',
   modeButton: 'flex h-[27px] cursor-pointer items-center gap-[5px] rounded-[4px] bg-transparent px-[9px] text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50',
@@ -414,6 +449,7 @@ const gameClass = {
   createPresets: 'flex min-h-[38px] items-center gap-1.5 overflow-x-auto border-b border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-[5px]',
   createButton: 'inline-flex min-h-[26px] flex-none cursor-pointer items-center gap-[5px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] px-2 text-[10px] font-semibold text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
   previewCanvas: 'relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#070A0F]',
+  nativeError: 'absolute top-2 left-2 z-20 max-w-[min(520px,calc(100%-16px))] rounded-md border border-[var(--warning)] bg-[rgba(24,24,24,0.92)] px-2.5 py-1.5 font-mono text-[10px] leading-normal text-[var(--warning)] shadow-[var(--shadow-sm)]',
   empty: 'p-3.5 text-[11px] text-[var(--text-muted)]',
 };
 
@@ -1103,7 +1139,7 @@ function useDragHandle(
 
 // ─── Viewport ────────────────────────────────────────────────────────────────
 
-function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize, viewMode, playMode, editorCamera }: {
+function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize, viewMode, playMode, editorCamera, suspendReadback }: {
   sceneVersion?: number;
   cameraRef?: React.MutableRefObject<{
     yaw: number; pitch: number; distance: number;
@@ -1114,6 +1150,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
   viewMode: '2d' | '3d';
   playMode?: boolean;
   editorCamera?: boolean;
+  suspendReadback?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -1154,6 +1191,10 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     dirtyRef.current = true;
     const poll = async () => {
       if (!isActiveRef.current) return;
+      if (suspendReadback) {
+        window.setTimeout(poll, 250);
+        return;
+      }
       const previewIsActive = performance.now() < fastPreviewUntilRef.current;
       if (!dirtyRef.current && !playMode && !previewIsActive) {
         if (lastDrawWasScaledRef.current) {
@@ -1224,7 +1265,7 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     };
     poll();
     return () => { isActiveRef.current = false; };
-  }, [editorCamera, markViewportDirty, playMode, viewMode]);
+  }, [editorCamera, markViewportDirty, playMode, suspendReadback, viewMode]);
 
   // Resize observer
   useEffect(() => {
@@ -1520,8 +1561,14 @@ export default function EditorPage({
   const [guides, setGuides] = useState<GuideEntity[]>([]);
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
-  const [, setCameraRevision] = useState(0);
+  const [cameraRevision, setCameraRevision] = useState(0);
+  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode>('canvas-readback');
+  const [viewportPresentationAdapters, setViewportPresentationAdapters] = useState<ViewportPresentationAdapter[]>([]);
+  const [viewportPresentationDiagnostics, setViewportPresentationDiagnostics] = useState<ViewportPresentationStatus | null>(null);
+  const [waylandRuntimeDiagnostics, setWaylandRuntimeDiagnostics] = useState<WaylandEmbeddedCompositorRuntimeStatus | null>(null);
+  const [nativeSceneError, setNativeSceneError] = useState<string | null>(null);
   const cameraRevisionFrameRef = useRef<number | null>(null);
+  const viewportFrameRef = useRef<HTMLDivElement>(null);
   const prevSceneVersionRef = useRef(0);
   const cameraRef = useRef({
     yaw: -0.5, pitch: 0.3, distance: 6,
@@ -1583,6 +1630,18 @@ export default function EditorPage({
 
   // Gizmo state
   const [activeTool] = useState<'view' | 'move' | 'rotate' | 'scale'>('move');
+
+  const effectivePresentationAdapters = viewportPresentationDiagnostics?.adapters ?? viewportPresentationAdapters;
+  const viewportPresentationAdapter = effectivePresentationAdapters.find((adapter) => adapter.mode === viewportPresentation);
+  const noCpuReadbackPresentation = isNoCpuReadbackAdapter(viewportPresentationAdapter);
+  const waylandRuntimeStatusLabel = waylandRuntimeLabel(waylandRuntimeDiagnostics);
+  const nativeSceneActive = Boolean(
+    shellState?.has_project
+    && workspaceView === 'game'
+    && noCpuReadbackPresentation
+    && viewMode === '3d'
+    && !nativeSceneError,
+  );
   const [transformSpace] = useState<'global' | 'local'>('global');
   const [selectedPosition, setSelectedPosition] = useState<Vec3 | null>(null);
   const handleViewportResize = useCallback((size: { width: number; height: number }) => {
@@ -1647,6 +1706,161 @@ export default function EditorPage({
     const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  const embeddedSceneViewport = useCallback(() => {
+    const rect = viewportFrameRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height)),
+    };
+  }, []);
+
+  const openDefaultScenePresentation = useCallback(async () => {
+    const viewport = embeddedSceneViewport();
+    if (!viewport) throw new Error('Scene View frame is not ready yet.');
+    const camera = cameraRef.current;
+    const openSceneView = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+      ? openWaylandEmbeddedCompositorSceneView
+      : openNoCpuReadbackSceneView;
+    await openSceneView({
+      viewport,
+      yaw: camera.yaw,
+      pitch: camera.pitch,
+      distance: camera.distance,
+      targetX: camera.targetX,
+      targetY: camera.targetY,
+      targetZ: camera.targetZ,
+    });
+  }, [embeddedSceneViewport, viewportPresentation]);
+
+  useEffect(() => {
+    viewportPresentationCapabilities()
+      .then((capabilities) => {
+        setViewportPresentationAdapters(capabilities.adapters);
+        setViewportPresentation(capabilities.default_mode);
+      })
+      .catch(() => {});
+    viewportPresentationStatus()
+      .then((status) => {
+        setViewportPresentationDiagnostics(status);
+        if (status.adapters) setViewportPresentationAdapters(status.adapters);
+        if (status.default_mode) setViewportPresentation(status.default_mode);
+      })
+      .catch(() => {
+        setViewportPresentationDiagnostics(null);
+      });
+  }, []);
+
+  useEffect(() => {
+    setNativeSceneError(null);
+  }, [viewportPresentation, viewMode, workspaceView]);
+
+  useEffect(() => {
+    if (!shellState?.has_project || workspaceView !== 'game' || !noCpuReadbackPresentation || viewMode !== '3d') {
+      return;
+    }
+    let cancelled = false;
+    openDefaultScenePresentation()
+      .then(() => {
+        if (!cancelled) setNativeSceneError(null);
+      })
+      .catch((error) => {
+        if (!cancelled) setNativeSceneError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    noCpuReadbackPresentation,
+    openDefaultScenePresentation,
+    shellState?.has_project,
+    viewMode,
+    viewportPresentation,
+    workspaceView,
+  ]);
+
+  useEffect(() => {
+    if (!nativeSceneActive) return;
+    const frame = viewportFrameRef.current;
+    if (!frame) return;
+    let raf: number | null = null;
+    const syncViewport = () => {
+      if (raf !== null) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        raf = null;
+        const viewport = embeddedSceneViewport();
+        if (!viewport) return;
+        const camera = cameraRef.current;
+        const syncPromise = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+          ? syncWaylandEmbeddedCompositorViewport({ viewport })
+          : syncNoCpuReadbackSceneView({
+            viewport,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+            distance: camera.distance,
+            targetX: camera.targetX,
+            targetY: camera.targetY,
+            targetZ: camera.targetZ,
+          });
+        syncPromise.catch((error) => {
+          setNativeSceneError(error instanceof Error ? error.message : String(error));
+        });
+      });
+    };
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(frame);
+    window.addEventListener('resize', syncViewport);
+    window.addEventListener('scroll', syncViewport, true);
+    syncViewport();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', syncViewport);
+      window.removeEventListener('scroll', syncViewport, true);
+      if (raf !== null) window.cancelAnimationFrame(raf);
+    };
+  }, [cameraRevision, embeddedSceneViewport, nativeSceneActive, viewportPresentation]);
+
+  useEffect(() => {
+    if (shellState?.has_project) {
+      const viewport = embeddedSceneViewport();
+      if (!viewport) return;
+      const syncCompositorViewport = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
+        ? syncWaylandEmbeddedCompositorViewport
+        : syncEditorCompositorViewport;
+      syncCompositorViewport({ viewport }).catch(() => {});
+    }
+  }, [embeddedSceneViewport, shellState?.has_project, viewportPresentation, viewportSize]);
+
+  useEffect(() => {
+    if (nativeSceneActive) return;
+    closeNativeSceneView().catch(() => {});
+  }, [nativeSceneActive]);
+
+  useEffect(() => {
+    if (!isWaylandEmbeddedCompositorPresentation(viewportPresentation)) {
+      setWaylandRuntimeDiagnostics(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = () => {
+      waylandEmbeddedCompositorStatus()
+        .then((status) => {
+          if (!cancelled) setWaylandRuntimeDiagnostics(status);
+        })
+        .catch(() => {
+          if (!cancelled) setWaylandRuntimeDiagnostics(null);
+        });
+    };
+    poll();
+    const interval = window.setInterval(poll, nativeSceneActive ? 500 : 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [nativeSceneActive, viewportPresentation]);
 
   const refreshProjectAssets = useCallback(async () => {
     setAssetsBusy(true);
@@ -2483,6 +2697,11 @@ export default function EditorPage({
               <section className={gameClass.mainPanel}>
                 <div className={gameClass.previewBar}>
                   <div className={gameClass.previewBarGroup}><span className={gameClass.liveDot} />Scene/Game View</div>
+                  {waylandRuntimeStatusLabel && (
+                    <div className={gameClass.presentationStatus} title={waylandRuntimeStatusLabel}>
+                      {waylandRuntimeStatusLabel}
+                    </div>
+                  )}
                   <div className={gameClass.modeSwitch}>
                     {!hierarchyOpen && (
                       <button className={gameClass.modeButton} onClick={() => setHierarchyOpen(true)}>Hierarchy</button>
@@ -2517,7 +2736,12 @@ export default function EditorPage({
                   <button className={gameClass.createButton} onClick={() => createPresetObject('Wind Zone', 'WindZone')}><IconPlus /> Wind</button>
                   <button className={gameClass.createButton} onClick={createBehaviorObject}><IconCode /> Behavior</button>
                 </div>
-                <div className={gameClass.previewCanvas} onClick={handleViewportClick}>
+                <div ref={viewportFrameRef} className={gameClass.previewCanvas} onClick={handleViewportClick}>
+                  {nativeSceneError && (
+                    <div className={gameClass.nativeError}>
+                      Native Scene View failed, using canvas fallback: {nativeSceneError}
+                    </div>
+                  )}
                   <ViewportCanvas
                     sceneVersion={sceneVersion}
                     cameraRef={cameraRef}
@@ -2525,6 +2749,7 @@ export default function EditorPage({
                     onResize={handleViewportResize}
                     viewMode={viewMode}
                     editorCamera
+                    suspendReadback={nativeSceneActive}
                   />
                   <SelectionOverlay sceneTree={sceneTree} selectedId={selectedId} camera={cameraRef.current} width={viewportSize.width} height={viewportSize.height} viewMode={viewMode} />
                 </div>

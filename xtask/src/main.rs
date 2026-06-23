@@ -30,6 +30,14 @@ fn run() -> EngineResult<()> {
             "--features",
             "agent-tools",
         ]),
+        Some("viewport-perf") => cargo([
+            "run",
+            "-p",
+            "engine-render-wgpu",
+            "--release",
+            "--example",
+            "viewport_path_perf",
+        ]),
         Some("package") => package(args.collect()),
         Some("test") => cargo(["test", "--workspace"]),
         Some("check") => cargo(["check", "--workspace", "--all-features"]),
@@ -37,7 +45,7 @@ fn run() -> EngineResult<()> {
             "unknown xtask command `{command}`"
         ))),
         None => Err(EngineError::config(
-            "expected xtask command: runtime-min, build-editor, agent-smoke, package, test, or check",
+            "expected xtask command: runtime-min, build-editor, agent-smoke, viewport-perf, package, test, or check",
         )),
     }
 }

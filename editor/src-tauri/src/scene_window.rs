@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use engine_core::math::{Transform, Vec3};
 use engine_core::{EngineConfig, EntityId};
-use engine_render::{RenderCamera, RenderDevice, RenderFrame, RenderProjection};
+use engine_render::{
+    PresentStrategy, RenderCamera, RenderDevice, RenderFrame, RenderPerformanceConfig,
+    RenderProjection,
+};
 use engine_render_wgpu::WgpuRenderDevice;
 use runtime_min::RuntimeServices;
 use winit::application::ApplicationHandler;
@@ -615,7 +618,7 @@ impl SceneApp {
             .ok_or_else(|| "scene window is not initialized".to_owned())?;
         let renderer = WgpuRenderDevice::new_with_performance(
             window,
-            engine_render::RenderPerformanceConfig::editor_1080p75(),
+            scene_surface_performance_config(&self.mode),
         )
         .map_err(|error| format!("wgpu device: {error}"))?;
         let mut runtime = snapshot
@@ -934,7 +937,17 @@ impl RawSceneApp {
                 raw_window,
                 self.width,
                 self.height,
-                engine_render::RenderPerformanceConfig::editor_1080p75(),
+                scene_surface_performance_config(&SceneWindowMode::CompositorRaw {
+                    surface: self.surface,
+                    surface_width: self.width,
+                    surface_height: self.height,
+                    viewport: self.viewport.unwrap_or(SceneViewportRect {
+                        x: 0,
+                        y: 0,
+                        width: self.width,
+                        height: self.height,
+                    }),
+                }),
             )
         }
         .map_err(|error| format!("wgpu device: {error}"))?;
@@ -1008,6 +1021,18 @@ impl RawSceneApp {
     }
 }
 
+fn scene_surface_performance_config(mode: &SceneWindowMode) -> RenderPerformanceConfig {
+    let mut config = RenderPerformanceConfig::editor_1080p75();
+    if matches!(
+        mode,
+        SceneWindowMode::WaylandEmbedded { .. } | SceneWindowMode::CompositorRaw { .. }
+    ) {
+        config.present_strategy = PresentStrategy::LowLatency;
+        config.maximum_frame_latency = 1;
+    }
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,6 +1042,48 @@ mod tests {
         std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("WAYLAND_SOCKET").is_some()
             || std::env::var_os("DISPLAY").is_some()
+    }
+
+    #[test]
+    fn embedded_scene_surfaces_use_low_latency_policy() {
+        let config = scene_surface_performance_config(&SceneWindowMode::WaylandEmbedded {
+            socket_name: "aster-editor-test".to_owned(),
+            viewport: SceneViewportRect {
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 180,
+            },
+        });
+
+        assert_eq!(config.present_strategy, PresentStrategy::LowLatency);
+        assert_eq!(config.maximum_frame_latency, 1);
+
+        let config = scene_surface_performance_config(&SceneWindowMode::CompositorRaw {
+            surface: SceneRawSurface::Xlib {
+                display: 1,
+                window: 1,
+            },
+            surface_width: 320,
+            surface_height: 180,
+            viewport: SceneViewportRect {
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 180,
+            },
+        });
+
+        assert_eq!(config.present_strategy, PresentStrategy::LowLatency);
+        assert_eq!(config.maximum_frame_latency, 1);
+    }
+
+    #[test]
+    fn floating_scene_surface_keeps_editor_vsync_policy() {
+        let config = scene_surface_performance_config(&SceneWindowMode::Floating);
+
+        assert_eq!(config.present_strategy, PresentStrategy::VSync);
+        assert_eq!(config.maximum_frame_latency, 2);
     }
 
     #[test]

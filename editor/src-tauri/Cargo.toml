@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-wayland-embedded-compositor = ["dep:smithay"]
+wayland-embedded-compositor = ["dep:smithay", "dep:wayland-egl", "smithay/backend_winit"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -55,6 +55,7 @@ gdk = "0.18"
 gdkwayland-sys = "0.18"
 gdkx11-sys = "0.18"
 smithay = { version = "0.7.0", default-features = false, features = ["renderer_gl", "use_system_lib", "wayland_frontend"], optional = true }
+wayland-egl = { version = "0.32.7", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -149,7 +149,7 @@ pub(crate) fn linux_platform_support_for_runtime(is_wayland: bool) -> EditorComp
         return EditorCompositorSupport {
             backend: EditorCompositorBackend::LinuxGtk,
             available: false,
-            reason: "Linux GTK native-host-window is disabled on Wayland; use wayland-embedded-compositor with DMA-BUF import or canvas readback fallback.",
+            reason: "Linux GTK/Wayland native-host-window adapter is disabled because it creates a separate child surface instead of a real host-composited Scene View; use wayland-embedded-compositor or canvas fallback.",
         };
     }
 
@@ -271,7 +271,7 @@ pub fn presentation_capabilities_for(
                 available: wayland_embedded_available,
                 default: default_mode == ViewportPresentationMode::WaylandEmbeddedCompositor,
                 zero_copy: true,
-                experimental: false,
+                experimental: true,
                 backend: wayland_embedded_compositor::BACKEND_ID,
                 cpu_readback: false,
                 gpu_native_surface: true,
@@ -281,7 +281,7 @@ pub fn presentation_capabilities_for(
             },
             ViewportPresentationAdapter {
                 mode: ViewportPresentationMode::NativeHostWindow,
-                available: native_host_available && !wayland_embedded_available,
+                available: native_host_available,
                 default: default_mode == ViewportPresentationMode::NativeHostWindow,
                 zero_copy: true,
                 experimental: false,
@@ -361,6 +361,7 @@ fn wayland_embedded_status_id(
 ) -> &'static str {
     match status {
         wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::Available => "available",
+        wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::Incomplete => "incomplete",
         wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::FeatureDisabled => {
             "feature-disabled"
         }
@@ -383,7 +384,8 @@ fn canvas_readback_fallback_reason(
 
     if !compositor_requested {
         return Some(
-            "Canvas readback selected because ASTER_EDITOR_COMPOSITOR is not enabled.".to_owned(),
+            "Canvas readback selected because no no-CPU-readback viewport adapter is enabled."
+                .to_owned(),
         );
     }
 
@@ -508,7 +510,7 @@ mod tests {
         let support = linux_platform_support_for_runtime(true);
         assert_eq!(support.backend, EditorCompositorBackend::LinuxGtk);
         assert!(!support.available);
-        assert!(support.reason.contains("Wayland"));
+        assert!(support.reason.contains("wayland-embedded-compositor"));
     }
 
     #[cfg(target_os = "linux")]
@@ -688,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_capabilities_prefer_wayland_embedded_compositor_when_available() {
+    fn presentation_capabilities_select_wayland_embedded_compositor_when_available() {
         let capabilities = presentation_capabilities_for(
             true,
             EditorCompositorSupport {
@@ -707,9 +709,11 @@ mod tests {
             == ViewportPresentationMode::WaylandEmbeddedCompositor
             && adapter.available
             && adapter.default
+            && adapter.experimental
             && adapter.zero_copy
             && !adapter.cpu_readback
-            && adapter.gpu_native_surface));
+            && adapter.gpu_native_surface
+            && adapter.gpu_composited));
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::CanvasReadback
             && !adapter.default));

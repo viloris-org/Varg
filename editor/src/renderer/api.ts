@@ -174,6 +174,22 @@ export interface WaylandEmbeddedCompositorRuntimeStatus {
   viewport: { x: number; y: number; width: number; height: number } | null;
   dmabuf_available: boolean;
   dmabuf_reason: string;
+  imported_frames: number;
+  committed_frames: number;
+  frame_callbacks_sent: number;
+  pending_frame_callbacks: number;
+  latest_frame: {
+    width: number;
+    height: number;
+    fourcc: number;
+    import_sequence: number;
+    commit_sequence: number;
+  } | null;
+  output_composition: {
+    attached: boolean;
+    composed_frames: number;
+    reason: string;
+  };
 }
 
 export function viewportPresentationCapabilities(): Promise<ViewportPresentationCapabilities> {
@@ -182,6 +198,10 @@ export function viewportPresentationCapabilities(): Promise<ViewportPresentation
 
 export function viewportPresentationStatus(): Promise<ViewportPresentationStatus> {
   return invoke<ViewportPresentationStatus>('viewport_presentation_status');
+}
+
+export function waylandEmbeddedCompositorStatus(): Promise<WaylandEmbeddedCompositorRuntimeStatus> {
+  return invoke<WaylandEmbeddedCompositorRuntimeStatus>('wayland_embedded_compositor_status');
 }
 
 export async function syncEditorCompositorViewport(params: {

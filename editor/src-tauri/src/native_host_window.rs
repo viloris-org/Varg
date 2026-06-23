@@ -15,9 +15,27 @@ use crate::scene_window;
 
 pub struct NativeHostSceneTarget {
     pub surface: scene_window::SceneRawSurface,
-    pub surface_width: u32,
-    pub surface_height: u32,
     pub layout_mode: NativeHostLayoutMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeHostSceneRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<scene_window::SceneViewportRect> for NativeHostSceneRect {
+    fn from(rect: scene_window::SceneViewportRect) -> Self {
+        let rect = rect.sanitized();
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +209,32 @@ pub fn main_window_scene_target(app: &tauri::AppHandle) -> Result<NativeHostScen
     }
 }
 
+pub fn resize_main_window_scene_surface(
+    app: tauri::AppHandle,
+    rect: NativeHostSceneRect,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = mpsc::channel();
+        app.clone()
+            .run_on_main_thread(move || {
+                let result = resize_linux_host_surface_on_main_thread(&app, rect);
+                let _ = tx.send(result);
+            })
+            .map_err(|error| format!("schedule native host surface resize: {error}"))?;
+        return rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("native host surface resize timed out: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        let _ = rect;
+        Ok(())
+    }
+}
+
 fn platform_plan_error(
     plan: editor_compositor::NativeHostPlatformPlan,
     host_boundaries: &[&str],
@@ -231,9 +275,6 @@ fn create_root_window_scene_surface(
     let window = app
         .get_window("main")
         .ok_or_else(|| "main editor window is not available".to_owned())?;
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("main window inner size: {error}"))?;
     let handle = window
         .window_handle()
         .map_err(|error| format!("main window handle: {error}"))?
@@ -261,8 +302,6 @@ fn create_root_window_scene_surface(
     };
     Ok(NativeHostSceneTarget {
         surface,
-        surface_width: size.width.max(1),
-        surface_height: size.height.max(1),
         layout_mode: NativeHostLayoutMode::HostOwnedRoot,
     })
 }
@@ -334,23 +373,49 @@ fn create_linux_host_surface_on_main_thread(
     let drawing = find_named_widget(&vbox_widget, HOST_DRAWING_NAME)
         .and_then(|widget| widget.downcast::<gtk::DrawingArea>().ok())
         .ok_or_else(|| "native host drawing surface is missing".to_owned())?;
-    drawing.set_size_request(-1, -1);
     drawing.show_all();
     drawing.realize();
     while gtk::events_pending() {
         gtk::main_iteration_do(false);
     }
 
-    let allocation = drawing.allocation();
-    let surface_width = allocation.width().max(1) as u32;
-    let surface_height = allocation.height().max(1) as u32;
     let surface = gtk_drawing_area_raw_surface(&drawing, backend)?;
     Ok(NativeHostSceneTarget {
         surface,
-        surface_width,
-        surface_height,
         layout_mode: NativeHostLayoutMode::HostOwnedRoot,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn resize_linux_host_surface_on_main_thread(
+    app: &tauri::AppHandle,
+    rect: NativeHostSceneRect,
+) -> Result<(), String> {
+    use gtk::prelude::*;
+
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main editor window is not available".to_owned())?;
+    let vbox = window
+        .default_vbox()
+        .map_err(|error| format!("main GTK vbox: {error}"))?;
+    let vbox_widget: gtk::Widget = vbox.upcast();
+    let overlay = ensure_native_host_root(&vbox_widget)?;
+    let drawing = find_named_widget(&vbox_widget, HOST_DRAWING_NAME)
+        .and_then(|widget| widget.downcast::<gtk::DrawingArea>().ok())
+        .ok_or_else(|| "native host drawing surface is missing".to_owned())?;
+
+    let allocation = overlay.allocation();
+    let right = (allocation.width() - rect.x - rect.width as i32).max(0);
+    let bottom = (allocation.height() - rect.y - rect.height as i32).max(0);
+    drawing.set_margin_start(rect.x.max(0));
+    drawing.set_margin_top(rect.y.max(0));
+    drawing.set_margin_end(right);
+    drawing.set_margin_bottom(bottom);
+    drawing.set_size_request(rect.width.max(1) as i32, rect.height.max(1) as i32);
+    drawing.queue_resize();
+    drawing.show_all();
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -384,6 +449,7 @@ fn ensure_native_host_root(vbox_widget: &gtk::Widget) -> Result<gtk::Overlay, St
     drawing.set_vexpand(true);
     drawing.set_halign(gtk::Align::Fill);
     drawing.set_valign(gtk::Align::Fill);
+    drawing.set_no_show_all(false);
 
     let overlay = gtk::Overlay::new();
     overlay.set_widget_name(HOST_OVERLAY_NAME);
