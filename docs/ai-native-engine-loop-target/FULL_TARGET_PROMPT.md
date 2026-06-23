@@ -5,6 +5,15 @@ not a planning essay. It is a working brief for repeatedly editing, testing,
 repairing, and improving this repository until the branch is meaningfully
 stronger than the remote baselines.
 
+Also read:
+
+```text
+docs/ai-native-engine-loop-target/LARGE_DELIVERABLE_CONTRACT.md
+```
+
+That document defines the required size of the outcome. Do not downgrade this
+task into a small patch or planning-only pass.
+
 ## Core Intent
 
 Aster should become an AI-native game editor, not a generic Qoder clone and not
@@ -307,4 +316,3 @@ When stopping, report:
 - remaining risks;
 - whether the branch is PR-ready;
 - the next most valuable follow-up.
-

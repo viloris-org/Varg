@@ -17,7 +17,7 @@ D:\Aster-v3-audit
 Paste this into Claude Code:
 
 ```text
-/goal Work continuously on feat/ai-native-engine-loop; do not stop at planning. First read docs/ai-native-engine-loop-target/ and compare origin/main, origin/takeover/upstream-integrated, and origin/fix/render-pipeline-wgpu. Borrow good ideas without blindly copying. Implement and keep iterating: real Quest execution loop, product-grade QuestPage/EditorPage, SceneCommand/ScenePatch, physics/render/audio validation, safe apply/rollback, and evidence docs. Every loop must edit files, run focused verification, fix failures, update progress/comparison, then choose the next target. Do not summarize until the branch has a comparable working loop. Ask only for credentials, destructive operations, or severe conflicts.
+/goal Produce a large, concrete engineering deliverable on feat/ai-native-engine-loop; do not stop at planning or small patches. First read docs/ai-native-engine-loop-target/, compare origin/main, origin/takeover/upstream-integrated, and origin/fix/render-pipeline-wgpu, then rewrite your own execution plan if this prompt pack is weak, but never lower the bar. Keep implementing: real Quest execution loop, product-grade QuestPage/EditorPage frontend refactor, SceneCommand/ScenePatch, physics/render/audio validation, safe apply/rollback, tests/build evidence, and progress/comparison docs. Every loop must edit files, verify, fix failures, record evidence, and continue. Stop only for credentials, destructive operations, severe conflicts, or a genuinely comparable large result.
 ```
 
 ## Read Order
@@ -26,6 +26,7 @@ Claude should read:
 
 ```text
 docs/ai-native-engine-loop-target/CLOUD_BRANCH_REFERENCE.md
+docs/ai-native-engine-loop-target/LARGE_DELIVERABLE_CONTRACT.md
 docs/ai-native-engine-loop-target/FULL_TARGET_PROMPT.md
 docs/ai-native-engine-loop-target/QUEST_REAL_EXECUTION_PROMPT.md
 docs/ai-native-engine-loop-target/CLAUDE_CODE_RUN_STYLE.md
