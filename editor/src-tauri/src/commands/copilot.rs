@@ -1,0 +1,133 @@
+use serde_json::Value;
+use tauri::{Emitter, State};
+
+use crate::state::EditorHostState;
+use crate::{CompletedCopilotRequest, CopilotRequestState};
+
+#[tauri::command]
+pub(crate) fn start_copilot_plan(
+    app: tauri::AppHandle,
+    state: State<'_, EditorHostState>,
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+    params: Value,
+) -> Result<(), String> {
+    let prepared = state
+        .with_host(|host| host.prepare_copilot_request(&params))
+        .map_err(|error| error.to_string())?;
+    let requests = requests.requests.clone();
+    std::thread::spawn(move || {
+        let original_prompt = prepared.original_prompt.clone();
+        let cached_context = prepared.cached_context;
+        let knowledge_entries_used = prepared.knowledge_entries_used;
+        let approval_mode = prepared.approval_mode;
+        let result = engine_ai::providers::create_provider(
+            &prepared.provider,
+            &prepared.model,
+            prepared.api_key.as_deref(),
+            prepared.endpoint.as_deref(),
+            prepared.max_tokens,
+            prepared.codex_oauth,
+            prepared.mimo_config.as_ref(),
+            prepared.glm_config.as_ref(),
+        )
+        .and_then(|model| {
+            model.chat_stream(prepared.request, &mut |delta| {
+                if requests
+                    .lock()
+                    .expect("poisoned lock")
+                    .cancelled
+                    .contains(&request_id)
+                {
+                    return;
+                }
+                let delta_payload = match &delta {
+                    engine_ai::AiStreamDelta::ToolCallDelta(tc) => {
+                        serde_json::to_string(tc).unwrap_or_default()
+                    }
+                    _ => delta.text().to_owned(),
+                };
+                let _ = app.emit(
+                    "copilot-stream",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "kind": delta.kind(),
+                        "delta": delta_payload,
+                    }),
+                );
+            })
+        });
+        let mut request_state = requests.lock().expect("poisoned lock");
+        if request_state.cancelled.remove(&request_id) {
+            drop(request_state);
+            let _ = app.emit(
+                "copilot-stream-complete",
+                serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
+        let (content_result, tool_calls) = match result {
+            Ok(response) => (Ok(response.content), response.tool_calls),
+            Err(e) => (Err(e.to_string()), Vec::new()),
+        };
+        request_state.completed.insert(
+            request_id.clone(),
+            CompletedCopilotRequest {
+                original_prompt,
+                response: content_result,
+                tool_calls,
+                cached_context,
+                knowledge_entries_used,
+                approval_mode,
+            },
+        );
+        drop(request_state);
+        let _ = app.emit(
+            "copilot-stream-complete",
+            serde_json::json!({ "request_id": request_id }),
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn finish_copilot_plan(
+    state: State<'_, EditorHostState>,
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+) -> Result<Value, String> {
+    let completed = requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .completed
+        .remove(&request_id)
+        .ok_or_else(|| "copilot request has not completed".to_owned())?;
+    let response = completed.response?;
+    state
+        .with_host(|host| {
+            host.finish_copilot_response_with_tools(
+                &completed.original_prompt,
+                &response,
+                &completed.tool_calls,
+                completed.cached_context,
+                completed.knowledge_entries_used,
+                completed.approval_mode,
+            )
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn cancel_copilot_plan(
+    requests: State<'_, CopilotRequestState>,
+    request_id: String,
+) -> Result<(), String> {
+    requests
+        .requests
+        .lock()
+        .expect("poisoned lock")
+        .cancelled
+        .insert(request_id);
+    Ok(())
+}
