@@ -684,6 +684,13 @@ impl ProjectContext {
                 "flow_velocity": [f.flow_velocity.x, f.flow_velocity.y, f.flow_velocity.z],
                 "surface_offset": f.surface_offset,
             }),
+            ComponentData::BuoyancyProbeSet(b) => serde_json::json!({
+                "type": "BuoyancyProbeSet",
+                "probe_count": b.probes.len(),
+                "buoyancy": b.buoyancy,
+                "damping": b.damping,
+                "angular_response": b.angular_response,
+            }),
             ComponentData::WindZone(w) => serde_json::json!({
                 "type": "WindZone",
                 "size": [w.size.x, w.size.y, w.size.z],

@@ -136,6 +136,10 @@ pub struct VargRuntimeContext {
     pub input: engine_platform::InputState,
     /// Delta time for the lifecycle call.
     pub delta_time: f32,
+    /// Total elapsed runtime time in seconds.
+    pub total_time: f32,
+    /// Monotonic runtime frame index.
+    pub frame_index: u64,
     /// Editor-exposed overrides keyed by exported property name.
     pub exported_values: HashMap<String, serde_json::Value>,
     /// Persistent script state keyed by state variable name.
@@ -157,8 +161,29 @@ pub struct VargRuntimeOutput {
 enum RuntimeStatement {
     Log(String),
     Translate(Expression),
+    SetPosition(Expression),
+    SetPositionAxis {
+        axis: Axis,
+        value: Expression,
+    },
     AddToPosition {
         axis: Axis,
+        value: Expression,
+    },
+    DeclareLocal {
+        name: String,
+        value: Expression,
+    },
+    AssignBinding {
+        name: String,
+        value: Expression,
+    },
+    AddToBinding {
+        name: String,
+        value: Expression,
+    },
+    SubFromBinding {
+        name: String,
         value: Expression,
     },
     AssignState {
@@ -176,14 +201,27 @@ enum RuntimeStatement {
     If {
         condition: ConditionExpression,
         statements: Vec<RuntimeStatement>,
+        else_statements: Vec<RuntimeStatement>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum ConditionExpression {
-    InputPressed(String),
+    InputDown(String),
+    InputJustPressed(String),
+    InputJustReleased(String),
     ActionDown(String),
-    StateGreaterThan { name: String, value: Expression },
+    ActionJustPressed(String),
+    ActionJustReleased(String),
+    ActionUp(String),
+    Not(Box<ConditionExpression>),
+    And(Box<ConditionExpression>, Box<ConditionExpression>),
+    Or(Box<ConditionExpression>, Box<ConditionExpression>),
+    Compare {
+        lhs: Expression,
+        op: CompareOp,
+        rhs: Expression,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -193,6 +231,10 @@ enum Expression {
     Bool(bool),
     Variable(String),
     Member(String, String),
+    Call {
+        function: String,
+        args: Vec<Expression>,
+    },
     Vec3(Box<Expression>, Box<Expression>, Box<Expression>),
     Binary {
         op: BinaryOp,
@@ -207,6 +249,16 @@ enum BinaryOp {
     Sub,
     Mul,
     Div,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompareOp {
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,9 +363,12 @@ impl VargScript {
             script: self,
             input: &context.input,
             delta_time: context.delta_time,
+            total_time: context.total_time,
+            frame_index: context.frame_index,
             exported_values: &context.exported_values,
             transform: &mut output.transform,
             state: &mut output.state,
+            locals: HashMap::new(),
             logs: &mut output.logs,
         };
         for statement in statements {
@@ -380,7 +435,7 @@ impl<'a> Parser<'a> {
                 );
             }
 
-            if let Some(header) = parse_header(trimmed) {
+            if let Some(header) = parse_header(trimmed).filter(|_| !trimmed.starts_with("} else")) {
                 self.validate_top_level_header(&header, stack.len(), line_no, raw_line);
                 self.validate_declaration_name(&header, stack.len(), line_no, raw_line);
                 let declarative = header.kind == "behavior"
@@ -537,7 +592,7 @@ impl<'a> Parser<'a> {
     ) {
         let expected = match signature.name.as_str() {
             "start" => Some(""),
-            "update" | "fixedUpdate" => Some("_ dt: Float"),
+            "update" | "fixedUpdate" | "lateUpdate" => Some("_ dt: Float"),
             "collisionEnter" | "collisionExit" => Some("_ other: Entity"),
             "event" => Some("_ name: String, _ data: EventData"),
             _ => None,
@@ -710,9 +765,12 @@ struct RuntimeEnvironment<'a> {
     script: &'a VargScript,
     input: &'a engine_platform::InputState,
     delta_time: f32,
+    total_time: f32,
+    frame_index: u64,
     exported_values: &'a HashMap<String, serde_json::Value>,
     transform: &'a mut Transform,
     state: &'a mut HashMap<String, serde_json::Value>,
+    locals: HashMap<String, serde_json::Value>,
     logs: &'a mut Vec<String>,
 }
 
@@ -723,6 +781,17 @@ impl RuntimeEnvironment<'_> {
             RuntimeStatement::Translate(expression) => {
                 let delta = self.eval_vec3(expression);
                 self.transform.translation += delta;
+            }
+            RuntimeStatement::SetPosition(expression) => {
+                self.transform.translation = self.eval_vec3(expression);
+            }
+            RuntimeStatement::SetPositionAxis { axis, value } => {
+                let value = self.eval_number(value);
+                match axis {
+                    Axis::X => self.transform.translation.x = value,
+                    Axis::Y => self.transform.translation.y = value,
+                    Axis::Z => self.transform.translation.z = value,
+                }
             }
             RuntimeStatement::AddToPosition { axis, value } => {
                 let value = self.eval_number(value);
@@ -748,14 +817,40 @@ impl RuntimeEnvironment<'_> {
                 self.state
                     .insert(name.clone(), serde_json::Value::from(next as f64));
             }
+            RuntimeStatement::DeclareLocal { name, value } => {
+                let value = self.eval_json(value);
+                self.locals.insert(name.clone(), value);
+            }
+            RuntimeStatement::AssignBinding { name, value } => {
+                let value = self.eval_json(value);
+                if self.locals.contains_key(name) {
+                    self.locals.insert(name.clone(), value);
+                } else {
+                    self.state.insert(name.clone(), value);
+                }
+            }
+            RuntimeStatement::AddToBinding { name, value } => {
+                let current = self.binding_number(name);
+                let next = current + self.eval_number(value);
+                self.assign_number_binding(name, next);
+            }
+            RuntimeStatement::SubFromBinding { name, value } => {
+                let current = self.binding_number(name);
+                let next = current - self.eval_number(value);
+                self.assign_number_binding(name, next);
+            }
             RuntimeStatement::If {
                 condition,
                 statements,
+                else_statements,
             } => {
-                if self.eval_condition(condition) {
-                    for statement in statements {
-                        self.execute(statement);
-                    }
+                let branch = if self.eval_condition(condition) {
+                    statements
+                } else {
+                    else_statements
+                };
+                for statement in branch {
+                    self.execute(statement);
                 }
             }
         }
@@ -763,11 +858,40 @@ impl RuntimeEnvironment<'_> {
 
     fn eval_condition(&self, condition: &ConditionExpression) -> bool {
         match condition {
-            ConditionExpression::InputPressed(action) | ConditionExpression::ActionDown(action) => {
-                action_pressed(self.input, action)
+            ConditionExpression::InputDown(action) | ConditionExpression::ActionDown(action) => {
+                input_action_down(self.input, action)
             }
-            ConditionExpression::StateGreaterThan { name, value } => {
-                self.state_number(name) > self.eval_number(value)
+            ConditionExpression::InputJustPressed(action) => {
+                input_action_pressed(self.input, action)
+            }
+            ConditionExpression::InputJustReleased(action) => {
+                input_action_released(self.input, action)
+            }
+            ConditionExpression::ActionUp(action) => !input_action_down(self.input, action),
+            ConditionExpression::ActionJustPressed(action) => {
+                input_action_pressed(self.input, action)
+            }
+            ConditionExpression::ActionJustReleased(action) => {
+                input_action_released(self.input, action)
+            }
+            ConditionExpression::Not(condition) => !self.eval_condition(condition),
+            ConditionExpression::And(lhs, rhs) => {
+                self.eval_condition(lhs) && self.eval_condition(rhs)
+            }
+            ConditionExpression::Or(lhs, rhs) => {
+                self.eval_condition(lhs) || self.eval_condition(rhs)
+            }
+            ConditionExpression::Compare { lhs, op, rhs } => {
+                let lhs = self.eval_number(lhs);
+                let rhs = self.eval_number(rhs);
+                match op {
+                    CompareOp::Equal => (lhs - rhs).abs() <= f32::EPSILON,
+                    CompareOp::NotEqual => (lhs - rhs).abs() > f32::EPSILON,
+                    CompareOp::GreaterThan => lhs > rhs,
+                    CompareOp::GreaterThanOrEqual => lhs >= rhs,
+                    CompareOp::LessThan => lhs < rhs,
+                    CompareOp::LessThanOrEqual => lhs <= rhs,
+                }
             }
         }
     }
@@ -804,6 +928,7 @@ impl RuntimeEnvironment<'_> {
             }
             Expression::Variable(name) => self.variable_number(name),
             Expression::Member(owner, field) => self.member_number(owner, field),
+            Expression::Call { function, args } => self.call_number(function, args),
             Expression::Vec3(_, _, _) => 0.0,
             Expression::Binary { op, lhs, rhs } => {
                 let lhs = self.eval_number(lhs);
@@ -828,9 +953,13 @@ impl RuntimeEnvironment<'_> {
         if name == "dt" {
             return self.delta_time;
         }
+        if name == "time" {
+            return self.total_time;
+        }
         if let Some(value) = self
             .exported_values
             .get(name)
+            .or_else(|| self.locals.get(name))
             .or_else(|| self.state.get(name))
             .and_then(json_number)
         {
@@ -854,6 +983,10 @@ impl RuntimeEnvironment<'_> {
             ("Input", "moveX") => self.input.action_value("MoveX"),
             ("Input", "moveY") => self.input.action_value("MoveY"),
             ("InputAction", action) => self.input.action_value(action),
+            ("Time", "time") | ("Time", "elapsed") => self.total_time,
+            ("Time", "delta") | ("Time", "dt") => self.delta_time,
+            ("Time", "frame") => self.frame_index as f32,
+            ("state", name) => self.state.get(name).and_then(json_number).unwrap_or(0.0),
             _ => self
                 .state
                 .get(owner)
@@ -865,6 +998,69 @@ impl RuntimeEnvironment<'_> {
 
     fn state_number(&self, name: &str) -> f32 {
         self.state.get(name).and_then(json_number).unwrap_or(0.0)
+    }
+
+    fn binding_number(&self, name: &str) -> f32 {
+        self.locals
+            .get(name)
+            .or_else(|| self.state.get(name))
+            .and_then(json_number)
+            .unwrap_or(0.0)
+    }
+
+    fn assign_number_binding(&mut self, name: &str, value: f32) {
+        let value = serde_json::Value::from(value as f64);
+        if self.locals.contains_key(name) {
+            self.locals.insert(name.to_string(), value);
+        } else {
+            self.state.insert(name.to_string(), value);
+        }
+    }
+
+    fn call_number(&self, function: &str, args: &[Expression]) -> f32 {
+        match function {
+            "sin" | "Math.sin" => self.unary_math(args, f32::sin),
+            "cos" | "Math.cos" => self.unary_math(args, f32::cos),
+            "tan" | "Math.tan" => self.unary_math(args, f32::tan),
+            "abs" | "Math.abs" => self.unary_math(args, f32::abs),
+            "sqrt" | "Math.sqrt" => self.unary_math(args, |value| value.max(0.0).sqrt()),
+            "floor" | "Math.floor" => self.unary_math(args, f32::floor),
+            "ceil" | "Math.ceil" => self.unary_math(args, f32::ceil),
+            "round" | "Math.round" => self.unary_math(args, f32::round),
+            "min" | "Math.min" => args
+                .iter()
+                .map(|arg| self.eval_number(arg))
+                .reduce(f32::min)
+                .unwrap_or(0.0),
+            "max" | "Math.max" => args
+                .iter()
+                .map(|arg| self.eval_number(arg))
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            "clamp" | "Math.clamp" => {
+                if args.len() != 3 {
+                    return 0.0;
+                }
+                self.eval_number(&args[0])
+                    .clamp(self.eval_number(&args[1]), self.eval_number(&args[2]))
+            }
+            "lerp" | "Math.lerp" => {
+                if args.len() != 3 {
+                    return 0.0;
+                }
+                let from = self.eval_number(&args[0]);
+                let to = self.eval_number(&args[1]);
+                let t = self.eval_number(&args[2]);
+                from + (to - from) * t
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn unary_math(&self, args: &[Expression], op: impl FnOnce(f32) -> f32) -> f32 {
+        args.first()
+            .map(|arg| op(self.eval_number(arg)))
+            .unwrap_or(0.0)
     }
 }
 
@@ -901,9 +1097,12 @@ fn parse_runtime_statements(lines: &[String], index: &mut usize) -> Vec<RuntimeS
         if let Some(condition) = parse_if_condition(trimmed) {
             let nested = collect_inline_or_block(lines, index);
             let mut nested_index = 0usize;
+            let else_nested = collect_else_block(lines, index);
+            let mut else_index = 0usize;
             statements.push(RuntimeStatement::If {
                 condition,
                 statements: parse_runtime_statements(&nested, &mut nested_index),
+                else_statements: parse_runtime_statements(&else_nested, &mut else_index),
             });
             continue;
         }
@@ -921,6 +1120,21 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
     if let Some(content) = method_args(line, "entity.translate") {
         return parse_expression(content).map(RuntimeStatement::Translate);
     }
+    if let Some((name, value)) = parse_local_declaration(line) {
+        return Some(RuntimeStatement::DeclareLocal {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some(value) = parse_position_assignment(line) {
+        return Some(RuntimeStatement::SetPosition(parse_expression(value)?));
+    }
+    if let Some((axis, value)) = parse_position_axis_assignment(line) {
+        return Some(RuntimeStatement::SetPositionAxis {
+            axis,
+            value: parse_expression(value)?,
+        });
+    }
     if let Some((axis, value)) = parse_position_add(line) {
         return Some(RuntimeStatement::AddToPosition {
             axis,
@@ -933,8 +1147,20 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
             value: parse_expression(value)?,
         });
     }
+    if let Some((name, value)) = parse_binding_add(line) {
+        return Some(RuntimeStatement::AddToBinding {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
     if let Some((name, value)) = parse_state_sub(line) {
         return Some(RuntimeStatement::SubFromState {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some((name, value)) = parse_binding_sub(line) {
+        return Some(RuntimeStatement::SubFromBinding {
             name: name.to_string(),
             value: parse_expression(value)?,
         });
@@ -945,25 +1171,69 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
             value: parse_expression(value)?,
         });
     }
+    if let Some((name, value)) = parse_binding_assignment(line) {
+        return Some(RuntimeStatement::AssignBinding {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
     None
 }
 
 fn parse_if_condition(line: &str) -> Option<ConditionExpression> {
     let rest = line.strip_prefix("if ")?.trim();
     let condition = rest.strip_suffix('{').unwrap_or(rest).trim();
+    parse_condition_expression(condition)
+}
+
+fn parse_condition_expression(condition: &str) -> Option<ConditionExpression> {
+    let condition = strip_wrapping_parens(condition.trim());
+    if let Some((lhs, rhs)) = split_logical(condition, "||") {
+        return Some(ConditionExpression::Or(
+            Box::new(parse_condition_expression(lhs)?),
+            Box::new(parse_condition_expression(rhs)?),
+        ));
+    }
+    if let Some((lhs, rhs)) = split_logical(condition, "&&") {
+        return Some(ConditionExpression::And(
+            Box::new(parse_condition_expression(lhs)?),
+            Box::new(parse_condition_expression(rhs)?),
+        ));
+    }
+    if let Some(inner) = condition.strip_prefix('!') {
+        return Some(ConditionExpression::Not(Box::new(
+            parse_condition_expression(inner.trim())?,
+        )));
+    }
     if let Some(action) = function_args(condition, "Input.pressed") {
-        return parse_string_literal(action).map(ConditionExpression::InputPressed);
+        return parse_string_literal(action).map(ConditionExpression::InputDown);
+    }
+    if let Some(action) = function_args(condition, "Input.down") {
+        return parse_string_literal(action).map(ConditionExpression::InputDown);
+    }
+    if let Some(action) = function_args(condition, "Input.justPressed") {
+        return parse_string_literal(action).map(ConditionExpression::InputJustPressed);
+    }
+    if let Some(action) = function_args(condition, "Input.justReleased") {
+        return parse_string_literal(action).map(ConditionExpression::InputJustReleased);
     }
     if let Some(action) = function_args(condition, "Input.actionDown") {
         return parse_string_literal(action).map(ConditionExpression::ActionDown);
     }
-    if let Some((lhs, rhs)) = condition.split_once('>') {
-        let lhs = lhs.trim();
-        let rhs = rhs.trim();
-        let name = lhs.strip_prefix("state.").unwrap_or(lhs).trim();
-        return Some(ConditionExpression::StateGreaterThan {
-            name: name.to_string(),
-            value: parse_expression(rhs)?,
+    if let Some(action) = function_args(condition, "Input.actionPressed") {
+        return parse_string_literal(action).map(ConditionExpression::ActionJustPressed);
+    }
+    if let Some(action) = function_args(condition, "Input.actionReleased") {
+        return parse_string_literal(action).map(ConditionExpression::ActionJustReleased);
+    }
+    if let Some(action) = function_args(condition, "Input.actionUp") {
+        return parse_string_literal(action).map(ConditionExpression::ActionUp);
+    }
+    if let Some((lhs, op, rhs)) = split_comparison(condition) {
+        return Some(ConditionExpression::Compare {
+            lhs: parse_expression(lhs)?,
+            op,
+            rhs: parse_expression(rhs)?,
         });
     }
     None
@@ -1042,6 +1312,15 @@ fn parse_atom(source: &str) -> Option<Expression> {
         return parse_string_literal(action)
             .map(|action| Expression::Member("InputAction".to_string(), action));
     }
+    if let Some((function, args)) = parse_expression_call(source) {
+        return Some(Expression::Call {
+            function: function.to_string(),
+            args: split_top_level_commas(args)
+                .into_iter()
+                .map(parse_expression)
+                .collect::<Option<Vec<_>>>()?,
+        });
+    }
     if let Some((owner, field)) = source.rsplit_once('.') {
         return Some(Expression::Member(
             owner.trim().to_string(),
@@ -1075,15 +1354,56 @@ fn parse_default_literal(value: &str) -> Option<serde_json::Value> {
     parse_string_literal(value).map(serde_json::Value::String)
 }
 
+fn parse_local_declaration(line: &str) -> Option<(&str, &str)> {
+    let rest = line
+        .strip_prefix("let ")
+        .or_else(|| line.strip_prefix("var "))?
+        .trim();
+    let (name_part, value) = rest.split_once('=')?;
+    let name = name_part
+        .split_once(':')
+        .map_or(name_part, |(name, _)| name)
+        .trim();
+    if is_valid_runtime_binding_name(name) {
+        Some((name, value.trim()))
+    } else {
+        None
+    }
+}
+
+fn parse_position_assignment(line: &str) -> Option<&str> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    match lhs.trim() {
+        "entity.position" | "position" => Some(rhs.trim()),
+        _ => None,
+    }
+}
+
+fn parse_position_axis_assignment(line: &str) -> Option<(Axis, &str)> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    let axis = parse_position_axis(lhs.trim())?;
+    Some((axis, rhs.trim()))
+}
+
 fn parse_position_add(line: &str) -> Option<(Axis, &str)> {
     let (lhs, rhs) = line.split_once("+=")?;
-    let axis = match lhs.trim() {
-        "entity.position.x" | "position.x" => Axis::X,
-        "entity.position.y" | "position.y" => Axis::Y,
-        "entity.position.z" | "position.z" => Axis::Z,
-        _ => return None,
-    };
+    let axis = parse_position_axis(lhs.trim())?;
     Some((axis, rhs.trim()))
+}
+
+fn parse_position_axis(lhs: &str) -> Option<Axis> {
+    match lhs {
+        "entity.position.x" | "position.x" => Some(Axis::X),
+        "entity.position.y" | "position.y" => Some(Axis::Y),
+        "entity.position.z" | "position.z" => Some(Axis::Z),
+        _ => None,
+    }
 }
 
 fn parse_state_add(line: &str) -> Option<(&str, &str)> {
@@ -1112,6 +1432,40 @@ fn parse_state_assignment(line: &str) -> Option<(&str, &str)> {
         .map(|name| (name, rhs.trim()))
 }
 
+fn parse_binding_add(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once("+=")?;
+    let name = lhs.trim();
+    is_valid_runtime_binding_name(name).then_some((name, rhs.trim()))
+}
+
+fn parse_binding_sub(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once("-=")?;
+    let name = lhs.trim();
+    is_valid_runtime_binding_name(name).then_some((name, rhs.trim()))
+}
+
+fn parse_binding_assignment(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    let name = lhs.trim();
+    is_valid_runtime_binding_name(name).then_some((name, rhs.trim()))
+}
+
+fn is_valid_runtime_binding_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !matches!(
+            name,
+            "if" | "else" | "for" | "while" | "return" | "true" | "false"
+        )
+}
+
 fn collect_inline_or_block(lines: &[String], index: &mut usize) -> Vec<String> {
     let mut collected = Vec::new();
     let mut depth = 1isize;
@@ -1119,6 +1473,10 @@ fn collect_inline_or_block(lines: &[String], index: &mut usize) -> Vec<String> {
         let line = lines[*index].clone();
         *index += 1;
         let trimmed = strip_line_comment(&line).trim();
+        if depth == 1 && trimmed.starts_with("} else") {
+            *index = (*index).saturating_sub(1);
+            break;
+        }
         depth += trimmed.matches('{').count() as isize;
         depth -= trimmed.matches('}').count() as isize;
         if depth <= 0 {
@@ -1127,6 +1485,18 @@ fn collect_inline_or_block(lines: &[String], index: &mut usize) -> Vec<String> {
         collected.push(line);
     }
     collected
+}
+
+fn collect_else_block(lines: &[String], index: &mut usize) -> Vec<String> {
+    if *index >= lines.len() {
+        return Vec::new();
+    }
+    let trimmed = strip_line_comment(&lines[*index]).trim();
+    if trimmed == "else {" || trimmed == "} else {" {
+        *index += 1;
+        return collect_inline_or_block(lines, index);
+    }
+    Vec::new()
 }
 
 fn collect_block(lines: &[&str], start: usize) -> (Vec<String>, usize) {
@@ -1163,6 +1533,39 @@ fn parse_string_literal(value: &str) -> Option<String> {
     Some(value[..end].to_string())
 }
 
+fn parse_expression_call(source: &str) -> Option<(&str, &str)> {
+    let open = source.find('(')?;
+    let function = source[..open].trim();
+    if function.is_empty()
+        || !function
+            .chars()
+            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let args = source[open + 1..].strip_suffix(')')?;
+    spans_whole_call(source).then_some((function, args))
+}
+
+fn spans_whole_call(source: &str) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && index + ch.len_utf8() < source.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
 fn split_top_level_commas(source: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
@@ -1184,18 +1587,143 @@ fn split_top_level_commas(source: &str) -> Vec<&str> {
     parts
 }
 
+fn strip_wrapping_parens(source: &str) -> &str {
+    let mut current = source.trim();
+    loop {
+        let Some(inner) = current
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+        else {
+            return current;
+        };
+        if spans_whole_expression(current) {
+            current = inner.trim();
+        } else {
+            return current;
+        }
+    }
+}
+
+fn spans_whole_expression(source: &str) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && index + ch.len_utf8() < source.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn split_logical<'a>(source: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = source[index..].chars().next()?;
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if !in_string && depth == 0 && source[index..].starts_with(operator) {
+            let lhs = source[..index].trim();
+            let rhs = source[index + operator.len()..].trim();
+            if !lhs.is_empty() && !rhs.is_empty() {
+                return Some((lhs, rhs));
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn split_comparison(source: &str) -> Option<(&str, CompareOp, &str)> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = source[index..].chars().next()?;
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if !in_string && depth == 0 {
+            for (symbol, op) in [
+                ("==", CompareOp::Equal),
+                ("!=", CompareOp::NotEqual),
+                (">=", CompareOp::GreaterThanOrEqual),
+                ("<=", CompareOp::LessThanOrEqual),
+                (">", CompareOp::GreaterThan),
+                ("<", CompareOp::LessThan),
+            ] {
+                if source[index..].starts_with(symbol) {
+                    let lhs = source[..index].trim();
+                    let rhs = source[index + symbol.len()..].trim();
+                    if !lhs.is_empty() && !rhs.is_empty() {
+                        return Some((lhs, op, rhs));
+                    }
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
 fn json_number(value: &serde_json::Value) -> Option<f32> {
     value.as_f64().map(|number| number as f32)
 }
 
-fn action_pressed(input: &engine_platform::InputState, action: &str) -> bool {
+fn input_action_down(input: &engine_platform::InputState, action: &str) -> bool {
+    if let Some(keys) = default_action_keys(action) {
+        return keys.iter().any(|key| input.key_down(*key));
+    }
+    input.action_down(action)
+}
+
+fn input_action_pressed(input: &engine_platform::InputState, action: &str) -> bool {
+    if let Some(keys) = default_action_keys(action) {
+        return keys.iter().any(|key| input.key_pressed(*key));
+    }
+    false
+}
+
+fn input_action_released(input: &engine_platform::InputState, action: &str) -> bool {
+    if let Some(keys) = default_action_keys(action) {
+        return keys.iter().any(|key| input.key_released(*key));
+    }
+    false
+}
+
+fn default_action_keys(action: &str) -> Option<&'static [engine_platform::KeyCode]> {
+    use engine_platform::KeyCode;
+
     match action {
-        "jump" => input.key_down(engine_platform::KeyCode::Space),
-        "moveForward" | "MoveForward" => input.action_down("MoveForward"),
-        "moveBackward" | "MoveBackward" => input.action_down("MoveBackward"),
-        "moveLeft" | "MoveLeft" => input.action_down("MoveLeft"),
-        "moveRight" | "MoveRight" => input.action_down("MoveRight"),
-        other => input.action_down(other),
+        "jump" | "Jump" | "Space" => Some(&[KeyCode::Space]),
+        "fire" | "Fire" => Some(&[KeyCode::Character('f'), KeyCode::Character('e')]),
+        "interact" | "Interact" => Some(&[KeyCode::Character('e')]),
+        "pause" | "Pause" | "Escape" => Some(&[KeyCode::Escape]),
+        "moveForward" | "MoveForward" => Some(&[KeyCode::Character('w'), KeyCode::ArrowUp]),
+        "moveBackward" | "MoveBackward" | "MoveBack" => {
+            Some(&[KeyCode::Character('s'), KeyCode::ArrowDown])
+        }
+        "moveLeft" | "MoveLeft" => Some(&[KeyCode::Character('a'), KeyCode::ArrowLeft]),
+        "moveRight" | "MoveRight" => Some(&[KeyCode::Character('d'), KeyCode::ArrowRight]),
+        _ => None,
     }
 }
 
@@ -1303,5 +1831,232 @@ mod tests {
         );
 
         assert_eq!(diagnostics[0].code, "VARG3002");
+    }
+
+    #[test]
+    fn runtime_supports_else_and_comparisons() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/health.varg",
+            r#"script Health {
+    var hp: Int = 2
+
+    func update(_ dt: Float) {
+        if state.hp <= 0 {
+            state.dead = 1
+        } else {
+            state.dead = 0
+            state.hp -= 2
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let context = VargRuntimeContext {
+            transform: Transform::default(),
+            input: engine_platform::InputState::default(),
+            delta_time: 0.016,
+            total_time: 0.016,
+            frame_index: 1,
+            exported_values: HashMap::new(),
+            state: HashMap::new(),
+        };
+        let output = script.run_hook("update", context);
+        assert_eq!(
+            output.state.get("dead").and_then(|value| value.as_f64()),
+            Some(0.0)
+        );
+        assert_eq!(
+            output.state.get("hp").and_then(|value| value.as_f64()),
+            Some(0.0)
+        );
+
+        let context = VargRuntimeContext {
+            transform: Transform::default(),
+            input: engine_platform::InputState::default(),
+            delta_time: 0.016,
+            total_time: 0.032,
+            frame_index: 2,
+            exported_values: HashMap::new(),
+            state: output.state,
+        };
+        let output = script.run_hook("update", context);
+        assert_eq!(
+            output.state.get("dead").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn runtime_supports_locals_boolean_conditions_and_position_assignment() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/movement.varg",
+            r#"script Movement {
+    @export var speed: Float = 3.0
+    var ticks: Int = 0
+
+    func update(_ dt: Float) {
+        let moveX: Float = Input.actionValue("MoveX")
+        let distance: Float = moveX * speed
+
+        if Input.down("moveRight") && !Input.down("jump") {
+            position.x = distance
+        }
+
+        if state.ticks == 0 || position.x >= 3.0 {
+            state.ready = 1
+        }
+
+        ticks += 1
+        position = Vec3(position.x, 2.0, 0.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.bind_default_player_actions();
+        input.apply_event(engine_platform::InputEvent::KeyDown(
+            engine_platform::KeyCode::Character('d'),
+        ));
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input,
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+            },
+        );
+
+        assert_eq!(output.transform.translation.x, 3.0);
+        assert_eq!(output.transform.translation.y, 2.0);
+        assert_eq!(
+            output.state.get("ready").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            output.state.get("ticks").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert!(!output.state.contains_key("moveX"));
+        assert!(!output.state.contains_key("distance"));
+    }
+
+    #[test]
+    fn runtime_supports_action_pressed_aliases() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/input.varg",
+            r#"script InputProbe {
+    func update(_ dt: Float) {
+        if Input.actionPressed("Fire") {
+            state.fired = 1
+        }
+
+        if Input.actionReleased("Fire") {
+            state.released = 1
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::KeyDown(
+            engine_platform::KeyCode::Character('f'),
+        ));
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input,
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+            },
+        );
+        assert_eq!(
+            output.state.get("fired").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::KeyDown(
+            engine_platform::KeyCode::Character('f'),
+        ));
+        input.end_frame();
+        input.apply_event(engine_platform::InputEvent::KeyUp(
+            engine_platform::KeyCode::Character('f'),
+        ));
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input,
+                delta_time: 0.016,
+                total_time: 0.032,
+                frame_index: 2,
+                exported_values: HashMap::new(),
+                state: output.state,
+            },
+        );
+        assert_eq!(
+            output
+                .state
+                .get("released")
+                .and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn runtime_supports_time_and_math_for_wave_motion() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/buoy.varg",
+            r#"script Buoy {
+    @export var amplitude: Float = 2.0
+    @export var frequency: Float = 3.1415927
+
+    func update(_ dt: Float) {
+        let wave: Float = sin(Time.time * frequency) * amplitude
+        let lift: Float = clamp(wave, -1.0, 1.0)
+        position.y = lerp(position.y, lift, 1.0)
+        state.frame = Time.frame
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.5,
+                frame_index: 7,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+            },
+        );
+
+        assert!((output.transform.translation.y - 1.0).abs() < 0.0001);
+        assert_eq!(
+            output.state.get("frame").and_then(|value| value.as_f64()),
+            Some(7.0)
+        );
     }
 }

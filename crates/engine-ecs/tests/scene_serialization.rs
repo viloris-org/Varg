@@ -1,8 +1,8 @@
 use engine_core::math::{Transform, Vec3};
 use engine_ecs::{
-    AudioSourceComponentData, CameraComponentData, ColliderComponentData, ComponentData,
-    FluidVolumeComponentData, MaterialRef, MeshRendererComponentData, ParticleEmitterComponentData,
-    RigidbodyComponentData, Scene,
+    AudioSourceComponentData, BuoyancyProbeSetComponentData, CameraComponentData,
+    ColliderComponentData, ComponentData, FluidVolumeComponentData, MaterialRef,
+    MeshRendererComponentData, ParticleEmitterComponentData, RigidbodyComponentData, Scene,
 };
 
 /// Test that a scene with all component types can be serialized to JSON and
@@ -121,6 +121,19 @@ fn scene_with_all_components_round_trip() {
                 size: Vec3::new(8.0, 2.0, 8.0),
                 flow_velocity: Vec3::new(1.0, 0.0, 0.0),
                 ..FluidVolumeComponentData::default()
+            }),
+        )
+        .unwrap();
+
+    let boat = scene.create_object("ProbeBoat").unwrap();
+    scene
+        .upsert_component(
+            boat,
+            ComponentData::BuoyancyProbeSet(BuoyancyProbeSetComponentData {
+                probes: vec![Vec3::new(-1.0, -0.5, 0.0), Vec3::new(1.0, -0.5, 0.0)],
+                buoyancy: 1.4,
+                damping: 3.0,
+                angular_response: 0.75,
             }),
         )
         .unwrap();
@@ -420,6 +433,16 @@ fn fluid_volume_exports_reflective_render_material_params() {
     assert_approx_eq(roughness, 0.04);
     assert!(base_color[2] > base_color[0]);
     assert!(emissive[0] > 0.0);
+}
+
+#[test]
+fn buoyancy_probe_set_defaults_to_four_corner_probes() {
+    let probes = BuoyancyProbeSetComponentData::default();
+
+    assert_eq!(probes.probes.len(), 4);
+    assert!(probes.buoyancy > 0.0);
+    assert!(probes.damping > 0.0);
+    assert!(probes.angular_response > 0.0);
 }
 
 fn assert_approx_eq(actual: f32, expected: f32) {

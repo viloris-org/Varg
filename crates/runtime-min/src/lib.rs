@@ -23,15 +23,19 @@ use engine_audio::{
     SourceHandle, SpatialMode, VirtualizationPolicy, VoiceCategory, solve_direct_propagation,
 };
 #[cfg(feature = "physics")]
-use engine_core::math::Vec3;
+use engine_core::math::{Transform, Vec3};
 use engine_core::{EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging};
 #[cfg(feature = "audio")]
 use engine_ecs::AudioSourceComponentData;
-use engine_ecs::{BuildConfiguration, ComponentData, ProjectManifest, Scene};
+use engine_ecs::{
+    BuildConfiguration, BuoyancyProbeSetComponentData, ComponentData, FluidVolumeComponentData,
+    ProjectManifest, Scene,
+};
 #[cfg(feature = "physics")]
 use engine_physics::{
     BodyHandle, BodyKind, CharacterControllerDesc, ColliderDesc, ColliderShape, ColliderShapeRef,
-    PhysicsWorld, QueryFilter, RapierPhysicsBackend, RigidbodyDesc, built_in_physical_material,
+    PhysicsBackend, PhysicsWorld, QueryFilter, RapierPhysicsBackend, RigidbodyDesc,
+    built_in_physical_material,
 };
 #[cfg(feature = "runtime-game")]
 use engine_platform::GamepadProvider;
@@ -184,6 +188,17 @@ struct PhysicsBinding {
     object: engine_core::EntityId,
     body: BodyHandle,
     last_position: engine_core::math::Vec3,
+    last_rotation: engine_core::math::Quat,
+}
+
+#[cfg(feature = "physics")]
+#[derive(Clone, Debug)]
+struct FluidSample {
+    fluid: FluidVolumeComponentData,
+    transform: Transform,
+    inverse_transform: Transform,
+    min: Vec3,
+    max: Vec3,
 }
 
 #[cfg(feature = "audio")]
@@ -342,7 +357,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
         // ── begin_frame ────────────────────────────────────────────────
         logging::log_frame(self.frame_counter.get());
-        self.input.end_frame();
         #[cfg(feature = "runtime-game")]
         {
             let gamepads = self.gamepad_provider.poll_gamepads();
@@ -386,6 +400,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
             // ── late_update ────────────────────────────────────────────
             self.scene.tick_runtime_frame();
+            self.run_varg_scripts_late_update(dt);
         }
 
         #[cfg(feature = "audio")]
@@ -445,6 +460,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.stats.gpu_frame_ms = render_metrics.gpu_frame_ms;
         self.stats.estimated_latency_ms = render_metrics.estimated_latency_ms;
         self.stats.dropped_frames = render_metrics.dropped_frames;
+        self.input.end_frame();
         self.frame_counter.advance();
         Ok(())
     }
@@ -489,6 +505,10 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
     fn run_varg_scripts_update(&mut self, dt: f32) {
         self.run_varg_lifecycle("update", dt, false);
+    }
+
+    fn run_varg_scripts_late_update(&mut self, dt: f32) {
+        self.run_varg_lifecycle("lateUpdate", dt, false);
     }
 
     fn run_varg_lifecycle(&mut self, hook: &str, dt: f32, once: bool) {
@@ -539,6 +559,8 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     transform,
                     input: self.input.clone(),
                     delta_time: dt,
+                    total_time: self.time.total_time,
+                    frame_index: self.time.frame_index,
                     exported_values: script.exported_values.clone(),
                     state: script.state.clone(),
                 },
@@ -1093,6 +1115,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 object: object.id,
                 body,
                 last_position: world_transform.translation,
+                last_rotation: world_transform.rotation,
             });
         }
         Ok(())
@@ -1117,6 +1140,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             return Ok(());
         }
 
+        let time_seconds = self.time.total_time;
         let mut fluid_volumes = Vec::new();
         let mut wind_zones = Vec::new();
         for (entity, object) in self.scene.iter_objects() {
@@ -1127,8 +1151,13 @@ impl<R: RenderDevice> RuntimeServices<R> {
                         let half_extents = (fluid.size * transform.scale) * 0.5;
                         let min = transform.translation - half_extents;
                         let max = transform.translation + half_extents;
-                        let surface_y = (max.y + fluid.surface_offset).clamp(min.y, max.y);
-                        fluid_volumes.push((fluid.clone(), min, max, surface_y));
+                        fluid_volumes.push(FluidSample {
+                            fluid: fluid.clone(),
+                            transform,
+                            inverse_transform: transform.inverse(),
+                            min,
+                            max,
+                        });
                     }
                     ComponentData::WindZone(wind) => {
                         let half_extents = (wind.size * transform.scale) * 0.5;
@@ -1175,6 +1204,13 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     ComponentData::Collider(collider) => Some(collider),
                     _ => None,
                 });
+            let probe_set = object
+                .components
+                .iter()
+                .find_map(|component| match component {
+                    ComponentData::BuoyancyProbeSet(probe_set) => Some(probe_set),
+                    _ => None,
+                });
             let collider_size = collider.map_or(Vec3::ONE, |collider| collider.size);
             let body_half = (collider_size * transform.scale) * 0.5;
             let body_min = transform.translation - body_half;
@@ -1185,50 +1221,38 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 .unwrap_or(1.0)
                 .max(0.001);
 
-            for (fluid, volume_min, volume_max, surface_y) in &fluid_volumes {
-                let overlap_min = Vec3::new(
-                    body_min.x.max(volume_min.x),
-                    body_min.y.max(volume_min.y),
-                    body_min.z.max(volume_min.z),
-                );
-                let overlap_max = Vec3::new(
-                    body_max.x.min(volume_max.x),
-                    body_max.y.min(*surface_y),
-                    body_max.z.min(volume_max.z),
-                );
-                let overlap = overlap_max - overlap_min;
-                if overlap.x <= 0.0 || overlap.y <= 0.0 || overlap.z <= 0.0 {
-                    continue;
-                }
-
-                let body_aabb_volume = ((body_max.x - body_min.x)
-                    * (body_max.y - body_min.y)
-                    * (body_max.z - body_min.z))
-                    .max(f32::EPSILON);
-                let overlap_volume = overlap.x * overlap.y * overlap.z;
-                let submerged_fraction = (overlap_volume / body_aabb_volume).clamp(0.0, 1.0);
-                if submerged_fraction <= f32::EPSILON {
-                    continue;
-                }
-
-                let mass = rigidbody.mass.max(0.001);
-                let displaced_volume = collider_volume * submerged_fraction;
-                // Scene mass is not yet propagated into every physics backend, so
-                // scale buoyancy into an acceleration-like force here.
-                let buoyancy = Vec3::new(
-                    0.0,
-                    fluid.density.max(0.0) * displaced_volume * gravity * fluid.buoyancy_scale
-                        / mass,
-                    0.0,
-                );
-                let relative_velocity = velocity - fluid.flow_velocity;
-                let drag =
-                    relative_velocity * (-fluid.linear_drag.max(0.0) * mass) * submerged_fraction;
-                let force = buoyancy + drag;
-                if force.length_squared() > f32::EPSILON {
-                    self.physics
-                        .backend_mut()
-                        .apply_force(binding.body, force)?;
+            for fluid in &fluid_volumes {
+                if let Some(probe_set) = probe_set {
+                    let previous_transform = engine_core::math::Transform {
+                        translation: binding.last_position,
+                        rotation: binding.last_rotation,
+                        scale: transform.scale,
+                    };
+                    apply_probe_buoyancy(
+                        self.physics.backend_mut(),
+                        binding.body,
+                        fluid,
+                        probe_set,
+                        transform,
+                        previous_transform,
+                        rigidbody.mass.max(0.001),
+                        gravity,
+                        dt,
+                        time_seconds,
+                    )?;
+                } else {
+                    apply_volume_buoyancy(
+                        self.physics.backend_mut(),
+                        binding.body,
+                        fluid,
+                        body_min,
+                        body_max,
+                        velocity,
+                        collider_volume,
+                        rigidbody.mass.max(0.001),
+                        gravity,
+                        time_seconds,
+                    )?;
                 }
             }
 
@@ -1265,6 +1289,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 let transform = self.physics.backend().body_transform(binding.body)?;
                 self.scene.transforms_mut().set_world(entity, transform);
                 binding.last_position = transform.translation;
+                binding.last_rotation = transform.rotation;
             }
         }
         Ok(())
@@ -1689,6 +1714,153 @@ fn collider_desc_from_scene(
         restitution_combine: material.restitution_combine,
         ..ColliderDesc::default()
     }
+}
+
+#[cfg(feature = "physics")]
+fn apply_volume_buoyancy(
+    backend: &mut dyn PhysicsBackend,
+    body: BodyHandle,
+    fluid: &FluidSample,
+    body_min: Vec3,
+    body_max: Vec3,
+    velocity: Vec3,
+    collider_volume: f32,
+    mass: f32,
+    gravity: f32,
+    time_seconds: f32,
+) -> EngineResult<()> {
+    let sample_position = Vec3::new(
+        (body_min.x + body_max.x) * 0.5,
+        (body_min.y + body_max.y) * 0.5,
+        (body_min.z + body_max.z) * 0.5,
+    );
+    let surface_y = fluid_surface_world_y(fluid, sample_position, time_seconds);
+    let overlap_min = Vec3::new(
+        body_min.x.max(fluid.min.x),
+        body_min.y.max(fluid.min.y),
+        body_min.z.max(fluid.min.z),
+    );
+    let overlap_max = Vec3::new(
+        body_max.x.min(fluid.max.x),
+        body_max.y.min(surface_y.min(fluid.max.y)),
+        body_max.z.min(fluid.max.z),
+    );
+    let overlap = overlap_max - overlap_min;
+    if overlap.x <= 0.0 || overlap.y <= 0.0 || overlap.z <= 0.0 {
+        return Ok(());
+    }
+
+    let body_aabb_volume =
+        ((body_max.x - body_min.x) * (body_max.y - body_min.y) * (body_max.z - body_min.z))
+            .max(f32::EPSILON);
+    let overlap_volume = overlap.x * overlap.y * overlap.z;
+    let submerged_fraction = (overlap_volume / body_aabb_volume).clamp(0.0, 1.0);
+    if submerged_fraction <= f32::EPSILON {
+        return Ok(());
+    }
+
+    let displaced_volume = collider_volume * submerged_fraction;
+    let buoyancy = Vec3::new(
+        0.0,
+        fluid.fluid.density.max(0.0) * displaced_volume * gravity * fluid.fluid.buoyancy_scale
+            / mass,
+        0.0,
+    );
+    let relative_velocity = velocity - fluid.fluid.flow_velocity;
+    let drag = relative_velocity * (-fluid.fluid.linear_drag.max(0.0) * mass) * submerged_fraction;
+    let force = buoyancy + drag;
+    if force.length_squared() > f32::EPSILON {
+        backend.apply_force(body, force)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "physics")]
+fn apply_probe_buoyancy(
+    backend: &mut dyn PhysicsBackend,
+    body: BodyHandle,
+    fluid: &FluidSample,
+    probe_set: &BuoyancyProbeSetComponentData,
+    transform: Transform,
+    previous_transform: Transform,
+    mass: f32,
+    gravity: f32,
+    dt: f32,
+    time_seconds: f32,
+) -> EngineResult<()> {
+    let live_probes: Vec<_> = probe_set
+        .probes
+        .iter()
+        .copied()
+        .filter(|probe| probe.x.is_finite() && probe.y.is_finite() && probe.z.is_finite())
+        .collect();
+    if live_probes.is_empty() {
+        return Ok(());
+    }
+
+    let probe_count = live_probes.len() as f32;
+    for local_probe in live_probes {
+        let world_probe = transform.transform_point(local_probe);
+        let local_to_fluid = fluid.inverse_transform.transform_point(world_probe);
+        if local_to_fluid.x < -fluid.fluid.size.x * 0.5
+            || local_to_fluid.x > fluid.fluid.size.x * 0.5
+            || local_to_fluid.z < -fluid.fluid.size.z * 0.5
+            || local_to_fluid.z > fluid.fluid.size.z * 0.5
+            || local_to_fluid.y < -fluid.fluid.size.y * 0.5
+        {
+            continue;
+        }
+
+        let depth = fluid.fluid.depth_at(local_to_fluid, time_seconds);
+        if depth <= f32::EPSILON {
+            continue;
+        }
+
+        let depth_fraction = (depth / fluid.fluid.size.y.max(f32::EPSILON)).clamp(0.0, 1.0);
+        let previous_world_probe = previous_transform.transform_point(local_probe);
+        let probe_velocity = (world_probe - previous_world_probe) / dt;
+        let relative_velocity = probe_velocity - fluid.fluid.flow_velocity;
+        let buoyancy = Vec3::new(
+            0.0,
+            fluid.fluid.density.max(0.0)
+                * gravity
+                * fluid.fluid.buoyancy_scale
+                * probe_set.buoyancy.max(0.0)
+                * depth_fraction
+                / (mass * probe_count),
+            0.0,
+        );
+        let drag = relative_velocity
+            * (-probe_set.damping.max(0.0) * fluid.fluid.linear_drag.max(0.0) * depth_fraction);
+        let force = buoyancy + drag;
+        if force.length_squared() <= f32::EPSILON {
+            continue;
+        }
+
+        backend.apply_force(body, force)?;
+        let lever_arm = world_probe - transform.translation;
+        let torque = lever_arm.cross(force) * probe_set.angular_response.max(0.0);
+        if torque.length_squared() > f32::EPSILON {
+            backend.apply_torque(body, torque)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "physics")]
+fn fluid_surface_world_y(fluid: &FluidSample, world_position: Vec3, time_seconds: f32) -> f32 {
+    let local = fluid.inverse_transform.transform_point(world_position);
+    let local_surface = Vec3::new(
+        local.x,
+        fluid.fluid.surface_height_at(local, time_seconds),
+        local.z,
+    );
+    fluid
+        .transform
+        .transform_point(local_surface)
+        .y
+        .clamp(fluid.min.y, fluid.max.y)
 }
 
 #[cfg(feature = "physics")]
@@ -2719,6 +2891,94 @@ mod tests {
         assert_eq!(
             script.state.get("ticks").and_then(|value| value.as_f64()),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn varg_script_sees_transient_input_and_late_update() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("input.varg"),
+            r#"script InputProbe {
+    var pressed: Int = 0
+    var released: Int = 0
+    var lateTicks: Int = 0
+
+    func update(_ dt: Float) {
+        if Input.justPressed("jump") {
+            state.pressed += 1
+        }
+
+        if Input.justReleased("jump") {
+            state.released += 1
+        }
+    }
+
+    func lateUpdate(_ dt: Float) {
+        state.lateTicks += 1
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Scripted").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/input.varg")),
+            )
+            .unwrap();
+
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Space,
+            ));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyUp(
+                engine_platform::KeyCode::Space,
+            ));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let object = services.scene.object(entity).unwrap();
+        let script = object
+            .components
+            .iter()
+            .find_map(|component| match component {
+                ComponentData::Script(script) => Some(script),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            script.state.get("pressed").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            script
+                .state
+                .get("released")
+                .and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            script
+                .state
+                .get("lateTicks")
+                .and_then(|value| value.as_f64()),
+            Some(2.0)
         );
     }
 

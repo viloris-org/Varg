@@ -20,12 +20,12 @@ pub use scene::{
     AcousticGeometryComponentData, AcousticMaterialComponentData, AcousticPortalComponentData,
     AcousticRoomComponentData, AnimationPlayerComponentData, AudioListenerComponentData,
     AudioSourceComponentData, AudioStreamPlayer2DComponentData, AudioStreamPlayer3DComponentData,
-    AudioZoneComponentData, Camera2DComponentData, CameraComponentData, CameraRole,
-    ColliderComponentData, ComponentData, FluidVolumeComponentData, GameObject, LifecycleStage,
-    Light2DComponentData, LightComponentData, MaterialRef, MeshRendererComponentData,
-    ObjectIdAllocator, Occluder2DComponentData, ParticleEmitterComponentData,
-    RigidbodyComponentData, Scene, SceneFile, SceneMode, ScriptComponent,
-    SkinnedMeshRendererComponentData, SkyboxComponentData, Sprite2DComponentData,
+    AudioZoneComponentData, BuoyancyProbeSetComponentData, Camera2DComponentData,
+    CameraComponentData, CameraRole, ColliderComponentData, ComponentData,
+    FluidVolumeComponentData, GameObject, LifecycleStage, Light2DComponentData, LightComponentData,
+    MaterialRef, MeshRendererComponentData, ObjectIdAllocator, Occluder2DComponentData,
+    ParticleEmitterComponentData, RigidbodyComponentData, Scene, SceneFile, SceneMode,
+    ScriptComponent, SkinnedMeshRendererComponentData, SkyboxComponentData, Sprite2DComponentData,
     TileMap2DComponentData, WindZoneComponentData,
 };
 pub use schema::{

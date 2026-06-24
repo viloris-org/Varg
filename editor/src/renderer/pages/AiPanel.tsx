@@ -15,7 +15,7 @@ import {
 import {
   IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
   IconChevronDown, IconChevronRight, IconInfo, IconLoader,
-  IconSave, IconUndo, IconPlay, IconSettings, IconSparkles, IconRefresh,
+  IconSave, IconUndo, IconPlay, IconStop, IconSettings, IconSparkles, IconRefresh,
   IconBrain, IconFile, IconHand, IconShield, IconShieldCheck,
 } from '../icons';
 
@@ -157,6 +157,167 @@ interface ActiveToolCall {
   name: string;
   argumentsPreview: string;
   complete: boolean;
+}
+
+interface ParsedToolContent {
+  content: string;
+  toolCalls: ActiveToolCall[];
+}
+
+function objectEnd(source: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function linePrefixStart(source: string, objectStart: number): number {
+  const lineStart = Math.max(source.lastIndexOf('\n', objectStart - 1) + 1, 0);
+  const prefix = source.slice(lineStart, objectStart);
+  return /^[A-Za-z0-9_-]{1,8}$/.test(prefix) ? lineStart : objectStart;
+}
+
+function argumentsPreviewFromValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return '';
+}
+
+function toolCallFromObject(value: unknown, fallbackIndex: number): ActiveToolCall | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.name === 'string' && ('arguments_delta' in record || 'arguments' in record)) {
+    return {
+      id: typeof record.id === 'string' && record.id ? record.id : `embedded-tool-${fallbackIndex}`,
+      name: record.name,
+      argumentsPreview: argumentsPreviewFromValue(record.arguments_delta ?? record.arguments),
+      complete: true,
+    };
+  }
+  if (typeof record.action === 'string') {
+    const action = record.action;
+    const isToolAction = /^(read_|write_|create_|update_|delete_|apply_|run_|execute_|inspect_|diagnose_)/.test(action)
+      || action === 'write_script'
+      || action === 'create_scene_object'
+      || action === 'set_component';
+    const hasToolShape = 'path' in record || 'content' in record || 'target' in record || 'command' in record || 'args' in record;
+    if (isToolAction && hasToolShape) {
+      return {
+        id: `embedded-tool-${fallbackIndex}`,
+        name: action,
+        argumentsPreview: JSON.stringify(record),
+        complete: true,
+      };
+    }
+  }
+  return null;
+}
+
+function extractEmbeddedToolCalls(content: string): ParsedToolContent {
+  const toolCalls: ActiveToolCall[] = [];
+  let cleaned = '';
+  let cursor = 0;
+  let inFence = false;
+  const lines = content.split(/(\n)/);
+  const visible = lines.join('');
+
+  while (cursor < visible.length) {
+    const fenceAt = visible.indexOf('```', cursor);
+    const objectAt = visible.indexOf('{', cursor);
+    if (objectAt === -1) {
+      cleaned += visible.slice(cursor);
+      break;
+    }
+    if (fenceAt !== -1 && fenceAt < objectAt) {
+      const fenceEnd = visible.indexOf('```', fenceAt + 3);
+      const end = fenceEnd === -1 ? visible.length : fenceEnd + 3;
+      cleaned += visible.slice(cursor, end);
+      cursor = end;
+      inFence = !inFence && fenceEnd === -1;
+      continue;
+    }
+    if (inFence) {
+      cleaned += visible.slice(cursor, objectAt + 1);
+      cursor = objectAt + 1;
+      continue;
+    }
+
+    const end = objectEnd(visible, objectAt);
+    if (end === -1) {
+      cleaned += visible.slice(cursor);
+      break;
+    }
+    const objectText = visible.slice(objectAt, end);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(objectText);
+    } catch {
+      cleaned += visible.slice(cursor, objectAt + 1);
+      cursor = objectAt + 1;
+      continue;
+    }
+    const toolCall = toolCallFromObject(parsed, toolCalls.length);
+    if (!toolCall) {
+      cleaned += visible.slice(cursor, objectAt + 1);
+      cursor = objectAt + 1;
+      continue;
+    }
+    const removeStart = linePrefixStart(visible, objectAt);
+    cleaned += visible.slice(cursor, removeStart);
+    toolCalls.push(toolCall);
+    cursor = end;
+  }
+
+  return {
+    content: cleaned.replace(/\n{3,}/g, '\n\n').trimEnd(),
+    toolCalls,
+  };
+}
+
+function appendToolCallDelta(toolCalls: ActiveToolCall[], delta: string): ActiveToolCall[] {
+  try {
+    const tcDelta = JSON.parse(delta);
+    const next = [...toolCalls];
+    if (tcDelta.name) {
+      next.push({
+        id: tcDelta.id || `tc-${next.length}`,
+        name: tcDelta.name,
+        argumentsPreview: '',
+        complete: false,
+      });
+    }
+    if (tcDelta.arguments_delta && next.length > 0) {
+      const last = next[next.length - 1];
+      next[next.length - 1] = {
+        ...last,
+        argumentsPreview: last.argumentsPreview + tcDelta.arguments_delta,
+      };
+    }
+    return next;
+  } catch {
+    return toolCalls;
+  }
 }
 
 // ─── Context Bar ────────────────────────────────────────────────────────────
@@ -1161,33 +1322,16 @@ export default function AiPanel({
             };
           }
           if (kind === 'tool_call') {
-            // Parse the tool call delta
-            try {
-              const tcDelta = JSON.parse(delta);
-              const toolCalls = [...(message.activeToolCalls ?? [])];
-              if (tcDelta.name) {
-                // New tool call starting
-                toolCalls.push({
-                  id: tcDelta.id || `tc-${toolCalls.length}`,
-                  name: tcDelta.name,
-                  argumentsPreview: '',
-                  complete: false,
-                });
-              }
-              if (tcDelta.arguments_delta && toolCalls.length > 0) {
-                // Accumulating arguments
-                const last = toolCalls[toolCalls.length - 1];
-                last.argumentsPreview += tcDelta.arguments_delta;
-              }
-              return { ...message, activeToolCalls: toolCalls };
-            } catch {
-              // Partial JSON fragments are expected during streaming; skip silently
-              return message;
-            }
+            return {
+              ...message,
+              activeToolCalls: appendToolCallDelta(message.activeToolCalls ?? [], delta),
+            };
           }
+          const parsed = extractEmbeddedToolCalls(message.content + delta);
           return {
             ...message,
-            content: message.content + delta,
+            content: parsed.content,
+            activeToolCalls: [...(message.activeToolCalls ?? []), ...parsed.toolCalls],
           };
         }));
       });
@@ -1220,18 +1364,22 @@ export default function AiPanel({
       setStatus(result.operations.length > 0 ? 'ready' : 'complete');
       setConversationTurns(t => t + 1);
 
-      const finalContent = result.message || (result.operations.length > 0
+      const finalFallback = result.operations.length > 0
           ? `${t('ai_propose_ops').replace('{count}', String(result.operations.length))}`
-          : t('ai_no_changes'));
+          : t('ai_no_changes');
+      const finalContent = result.message || finalFallback;
       setMessages(prev => prev.map(message => message.id === streamingMessageId
-        ? {
-            ...message,
-            content: message.content || finalContent,
-            activeToolCalls: message.activeToolCalls?.map(tc => ({ ...tc, complete: true })),
-            cards: result.operations.length > 0
-              ? [{ type: 'plan', data: result }]
-              : undefined,
-          }
+        ? (() => {
+            const parsed = extractEmbeddedToolCalls(message.content || finalContent);
+            return {
+              ...message,
+              content: parsed.content || finalFallback,
+              activeToolCalls: [...(message.activeToolCalls ?? []), ...parsed.toolCalls].map(tc => ({ ...tc, complete: true })),
+              cards: result.operations.length > 0
+                ? [{ type: 'plan', data: result }]
+                : undefined,
+            };
+          })()
         : message));
       if (result.operations.length > 0) setWorkspaceView('changes');
 
@@ -1629,6 +1777,28 @@ export default function AiPanel({
   const approvedWriteCount = plan?.operations.filter(operation => (
     operation.requires_write && approved.has(operation.index)
   )).length ?? 0;
+  const sendButtonMode: 'send' | 'stop' | 'stopping' | 'disabled' = requestActive && status !== 'executing'
+    ? (interruptRequested ? 'stopping' : 'stop')
+    : status === 'executing'
+      ? 'disabled'
+      : 'send';
+  const sendButtonDisabled = sendButtonMode === 'send'
+    ? !input.trim()
+    : sendButtonMode !== 'stop';
+  const sendButtonLabel = sendButtonMode === 'stop'
+    ? t('btn_stop_response')
+    : sendButtonMode === 'stopping'
+      ? t('btn_stopping')
+      : t('btn_send');
+  const handleComposerAction = () => {
+    if (sendButtonMode === 'stop') {
+      requestInterrupt();
+      return;
+    }
+    if (sendButtonMode === 'send') {
+      queueOrSubmitPrompt(input);
+    }
+  };
   const toggleKnowledge = useCallback((id: string) => {
     setSelectedKnowledgeIds(current => {
       const next = new Set(current);
@@ -1984,24 +2154,17 @@ export default function AiPanel({
         )}
 
         {(requestActive || status === 'executing' || queuedPrompts.length > 0) && (
-          <div className="mb-2 flex items-center justify-between gap-2.5 rounded-[7px] border border-[var(--border-light)] bg-[var(--accent-dim)] px-2 py-[7px] text-[11px] text-[var(--text-secondary)] [&>div]:flex [&>div]:min-w-0 [&>div]:items-center [&>div]:gap-1.5 [&_svg]:h-[11px] [&_svg]:w-[11px] [&_svg]:shrink-0 [&_button]:shrink-0 [&_button]:cursor-pointer [&_button]:rounded-[5px] [&_button]:border [&_button]:border-[rgba(248,113,113,0.35)] [&_button]:bg-[rgba(239,68,68,0.09)] [&_button]:px-[7px] [&_button]:py-1 [&_button]:font-[var(--font-sans)] [&_button]:text-[11px] [&_button]:font-semibold [&_button]:text-[#fca5a5] [&_button:hover:not(:disabled)]:border-[#f87171] [&_button:disabled]:cursor-default [&_button:disabled]:opacity-55" role="status">
-            <div>
-              <IconLoader className={requestActive || status === 'executing' ? commonSpinnerClass : undefined} />
-              <span>
-                {interruptRequested
-                  ? t('queue_stopping')
-                  : queuedPrompts.length > 0
-                    ? t('queue_messages_queued').replace('{count}', String(queuedPrompts.length))
-                    : status === 'executing'
-                      ? t('queue_applying')
-                      : t('queue_responding')}
-              </span>
-            </div>
-            {requestActive && status !== 'executing' && (
-              <button onClick={requestInterrupt} disabled={interruptRequested}>
-                {interruptRequested ? t('btn_stopping') : t('btn_stop_response')}
-              </button>
-            )}
+          <div className="mb-2 flex items-center gap-1.5 px-1 text-[11px] text-[var(--text-secondary)] [&_svg]:h-[11px] [&_svg]:w-[11px] [&_svg]:shrink-0" role="status">
+            <IconLoader className={requestActive || status === 'executing' ? commonSpinnerClass : undefined} />
+            <span>
+              {interruptRequested
+                ? t('queue_stopping')
+                : queuedPrompts.length > 0
+                  ? t('queue_messages_queued').replace('{count}', String(queuedPrompts.length))
+                  : status === 'executing'
+                    ? t('queue_applying')
+                    : t('queue_responding')}
+            </span>
           </div>
         )}
 
@@ -2043,13 +2206,18 @@ export default function AiPanel({
           <button
             className={cls(
               "flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg border-0 bg-[var(--brand)] text-white transition-[background,opacity] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-40",
+              sendButtonMode === 'stop' && "bg-[#b91c1c] hover:not-disabled:bg-[#dc2626]",
+              sendButtonMode === 'stopping' && "bg-[#7f1d1d]",
               compact && "h-8 w-8 shrink-0 rounded-full bg-[#9a9a9a] text-[#202020] hover:not-disabled:bg-white",
+              compact && sendButtonMode === 'stop' && "bg-[#ef4444] text-white hover:not-disabled:bg-[#f87171]",
+              compact && sendButtonMode === 'stopping' && "bg-[#7f1d1d] text-white",
             )}
-            onClick={() => queueOrSubmitPrompt(input)}
-            disabled={!input.trim()}
-            aria-label={t('btn_send')}
+            onClick={handleComposerAction}
+            disabled={sendButtonDisabled}
+            aria-label={sendButtonLabel}
+            title={sendButtonLabel}
           >
-            <IconSend />
+            {sendButtonMode === 'stop' ? <IconStop /> : sendButtonMode === 'stopping' ? <IconLoader className={commonSpinnerClass} /> : <IconSend />}
           </button>
         </div>
         <div className={cls("mt-2 flex items-center gap-2", compact && "px-1 text-[11px]")}>

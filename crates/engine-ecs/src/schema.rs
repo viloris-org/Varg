@@ -228,6 +228,22 @@ impl ComponentSchemaRegistry {
             evolution: SchemaEvolution::default(),
         });
         registry.register(ComponentSchema {
+            type_id: "BuoyancyProbeSet".to_string(),
+            display_name: "Buoyancy Probe Set".to_string(),
+            version: 1,
+            fields: vec![
+                field(
+                    "probes",
+                    ComponentFieldKind::String,
+                    "-0.5,-0.5,-0.5;0.5,-0.5,-0.5;-0.5,-0.5,0.5;0.5,-0.5,0.5",
+                ),
+                field("buoyancy", ComponentFieldKind::F32, "1"),
+                field("damping", ComponentFieldKind::F32, "2"),
+                field("angular_response", ComponentFieldKind::F32, "1"),
+            ],
+            evolution: SchemaEvolution::default(),
+        });
+        registry.register(ComponentSchema {
             type_id: "AudioSource".to_string(),
             display_name: "Audio Source".to_string(),
             version: 3,
