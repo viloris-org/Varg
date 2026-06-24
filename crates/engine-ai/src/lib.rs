@@ -225,14 +225,14 @@ pub enum AgentOperation {
         #[serde(default)]
         params: serde_json::Value,
     },
-    /// Create or update an Aster Script file.
+    /// Create or update a Varg script file.
     WriteScript {
-        /// Path relative to the asset root (e.g. "scripts/player.aster").
+        /// Path relative to the asset root (e.g. "scripts/player.varg").
         path: String,
-        /// Aster Script source code.
+        /// Varg source code.
         source: String,
     },
-    /// Run final language-service validation on one or more Aster Script files.
+    /// Run final language-service validation on one or more Varg script files.
     CheckScript {
         /// Paths relative to the asset root.
         paths: Vec<String>,
@@ -510,15 +510,13 @@ pub struct AgentPlan {
 
 /// An AI agent session bound to a project.
 ///
-/// Owns the project context, command registry, script backend, and undo stack
+/// Owns the project context, command registry, and undo stack
 /// for the duration of an AI interaction.
 pub struct AgentSession {
     /// Project state including scene, assets, and manifest.
     pub context: ProjectContext,
     /// Available editor commands.
     pub commands: CommandRegistry,
-    /// Rhai script backend for compiling and creating scripts.
-    pub script_backend: engine_script_rhai::RhaiScriptBackend,
     /// Undo/redo stack for reversible operations.
     pub undo_stack: UndoRedoStack,
     /// Console service for logging.
@@ -541,16 +539,11 @@ impl AgentSession {
         engine_editor::register_core_commands(&mut commands);
         engine_editor::register_ai_commands(&mut commands);
 
-        let mut script_backend = engine_script_rhai::RhaiScriptBackend::new();
         let asset_root = context.root.join(&context.manifest.asset_root);
-
-        // Pre-load any existing scripts from the scene
-        script_backend.load_scene_scripts(&context.scene, &asset_root)?;
 
         Ok(Self {
             context,
             commands,
-            script_backend,
             undo_stack: UndoRedoStack::default(),
             console: ConsoleService::default(),
             selection: SelectionService::default(),
@@ -774,9 +767,7 @@ impl AgentSession {
             }
             AgentOperation::WriteScript { path, source } => {
                 let relative = PathBuf::from(path);
-                let full_path =
-                    self.script_backend
-                        .create_script(&self.asset_root, &relative, source)?;
+                let full_path = write_varg_script(&self.asset_root, &relative, source)?;
                 self.console.push(ConsoleEntry {
                     timestamp: "now".into(),
                     level: ConsoleLevel::Info,
@@ -792,21 +783,32 @@ impl AgentSession {
             AgentOperation::CheckScript { paths } => {
                 if paths.is_empty() {
                     return Err(EngineError::config(
-                        "check_script requires at least one .aster path",
+                        "check_script requires at least one .varg path",
                     ));
                 }
                 let mut error_count = 0usize;
                 for path in paths {
                     let relative = sanitize_project_relative_path(path)?;
+                    if relative.extension().and_then(|ext| ext.to_str()) != Some("varg") {
+                        return Err(EngineError::config(format!(
+                            "check_script path must use .varg extension: {path}"
+                        )));
+                    }
                     let full_path = self.asset_root.join(&relative);
-                    let diagnostics = self.script_backend.diagnose_file(&full_path)?;
+                    let source = std::fs::read_to_string(&full_path).map_err(|source| {
+                        EngineError::Filesystem {
+                            path: full_path.clone(),
+                            source,
+                        }
+                    })?;
+                    let diagnostics = engine_script_varg::diagnose_source(&full_path, &source);
                     for diagnostic in diagnostics {
                         error_count += 1;
                         self.console.push(ConsoleEntry {
                             timestamp: "now".into(),
                             level: ConsoleLevel::Error,
                             source: ConsoleSource {
-                                subsystem: "aster-language-service".into(),
+                                subsystem: "varg-language-service".into(),
                                 file: Some(full_path.clone()),
                                 line: diagnostic.line.map(|line| line as u32),
                             },
@@ -826,21 +828,18 @@ impl AgentSession {
                 }
                 if error_count > 0 {
                     return Err(EngineError::config(format!(
-                        "Aster Script acceptance failed with {error_count} diagnostic(s). Fix every diagnostic and run check_script again."
+                        "Varg script acceptance failed with {error_count} diagnostic(s). Fix every diagnostic and run check_script again."
                     )));
                 }
                 self.console.push(ConsoleEntry {
                     timestamp: "now".into(),
                     level: ConsoleLevel::Info,
                     source: ConsoleSource {
-                        subsystem: "aster-language-service".into(),
+                        subsystem: "varg-language-service".into(),
                         file: None,
                         line: None,
                     },
-                    message: format!(
-                        "Aster Script acceptance passed for {} file(s).",
-                        paths.len()
-                    ),
+                    message: format!("Varg script acceptance passed for {} file(s).", paths.len()),
                 });
                 Ok(())
             }
@@ -1840,6 +1839,47 @@ fn sanitize_project_relative_path(path: &str) -> EngineResult<PathBuf> {
     Ok(relative)
 }
 
+fn write_varg_script(asset_root: &Path, relative: &Path, source: &str) -> EngineResult<PathBuf> {
+    if relative.extension().and_then(|ext| ext.to_str()) != Some("varg") {
+        return Err(EngineError::config(format!(
+            "write_script path must use .varg extension: {}",
+            relative.display()
+        )));
+    }
+    let full_path = asset_root.join(relative);
+    let diagnostics = engine_script_varg::diagnose_source(&full_path, source);
+    if !diagnostics.is_empty() {
+        let details = diagnostics
+            .iter()
+            .map(|diagnostic| {
+                format!(
+                    "{} at {}:{}: {} Suggestion: {}",
+                    diagnostic.code,
+                    diagnostic.line.unwrap_or(1),
+                    diagnostic.column.unwrap_or(1),
+                    diagnostic.message,
+                    diagnostic.suggestion
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(EngineError::config(format!(
+            "Varg script validation failed before write:\n{details}"
+        )));
+    }
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&full_path, source).map_err(|source| EngineError::Filesystem {
+        path: full_path.clone(),
+        source,
+    })?;
+    Ok(full_path)
+}
+
 fn operation_is_transactional(operation: &AgentOperation) -> bool {
     match operation {
         AgentOperation::WriteScript { .. }
@@ -1972,10 +2012,10 @@ fn preview_operation(operation: &AgentOperation) -> String {
             format!("Execute editor command `{command}`")
         }
         AgentOperation::WriteScript { path, .. } => {
-            format!("Create or update Aster Script `{path}`")
+            format!("Create or update Varg script `{path}`")
         }
         AgentOperation::CheckScript { paths } => {
-            format!("Validate {} Aster Script file(s)", paths.len())
+            format!("Validate {} Varg script file(s)", paths.len())
         }
         AgentOperation::CheckAmdl { paths } => {
             format!("Validate {} AMDL model file(s)", paths.len())
@@ -2450,19 +2490,19 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write_script".into(),
-            description: "Create or update an Aster Script file in the project.".into(),
+            description: "Create or update a Varg script file in the project.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to asset root, using the .aster extension, e.g. scripts/player.aster" },
-                    "source": { "type": "string", "description": "Aster Script source code" }
+                    "path": { "type": "string", "description": "Path relative to asset root, using the .varg extension, e.g. scripts/player.varg" },
+                    "source": { "type": "string", "description": "Varg source code" }
                 },
                 "required": ["path", "source"]
             }),
         },
         ToolDefinition {
             name: "check_script".into(),
-            description: "Run strict final acceptance validation for one or more .aster files. Returns precise diagnostics with location, cause, source line, and a concrete fix suggestion. Call once after all script edits, before complete.".into(),
+            description: "Run strict final acceptance validation for one or more .varg files. Returns precise diagnostics with location, cause, source line, and a concrete fix suggestion. Call once after all script edits, before complete.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2470,7 +2510,7 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "minItems": 1,
-                        "description": "Asset-root-relative .aster paths to validate together"
+                        "description": "Asset-root-relative .varg paths to validate together"
                     }
                 },
                 "required": ["paths"]
@@ -2764,7 +2804,7 @@ mod tests {
             id: "check-1".into(),
             name: "check_script".into(),
             arguments: serde_json::json!({
-                "paths": ["scripts/player.aster", "scripts/enemy.aster"]
+                "paths": ["scripts/player.varg", "scripts/enemy.varg"]
             }),
         })
         .unwrap();

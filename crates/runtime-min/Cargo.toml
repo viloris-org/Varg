@@ -65,16 +65,12 @@ script-python = [
     "engine-platform/script-python",
     "engine-render/script-python",
 ]
-script-rhai = [
-    "dep:engine-script-rhai",
-    "dep:engine-editor",
-]
 shader = ["dep:engine-shader", "engine-shader/runtime-game"]
 render-2d = ["dep:engine-render-2d", "engine-render-2d/runtime-game"]
 ui = ["dep:engine-ui", "engine-ui/runtime-game"]
 animation = ["dep:engine-animation", "engine-animation/runtime-game"]
 skeleton = ["dep:engine-skeleton", "engine-skeleton/runtime-game"]
-dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "script-rhai", "physics", "audio", "shader", "render-2d", "ui", "animation", "skeleton"]
+dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "physics", "audio", "shader", "render-2d", "ui", "animation", "skeleton"]
 
 [dependencies]
 engine-assets.workspace = true
@@ -87,7 +83,7 @@ engine-physics = { workspace = true, optional = true }
 engine-platform.workspace = true
 engine-render.workspace = true
 engine-render-wgpu = { workspace = true, optional = true }
-engine-script-rhai = { workspace = true, optional = true }
+engine-script-varg.workspace = true
 engine-shader = { workspace = true, optional = true }
 engine-render-2d = { workspace = true, optional = true }
 engine-ui = { workspace = true, optional = true }
@@ -96,3 +92,6 @@ engine-skeleton = { workspace = true, optional = true }
 serde_json.workspace = true
 toml.workspace = true
 winit = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

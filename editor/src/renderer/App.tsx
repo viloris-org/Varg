@@ -170,8 +170,8 @@ export default function App() {
     setScreen('hub');
   }, [refreshHubState]);
 
-  const handleOpenQuest = useCallback(() => {
-    setInitialQuestId(null);
+  const handleOpenQuest = useCallback((questId?: string | null) => {
+    setInitialQuestId(questId ?? null);
     setScreen('quest');
   }, []);
 

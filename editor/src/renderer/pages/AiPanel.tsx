@@ -5,7 +5,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { rpc, streamCopilotPlan } from '../api';
 import { useTranslation } from '../i18n';
-import { listKnowledge, type KnowledgeEntry } from '../quest';
+import { listKnowledge, promoteQuest, type KnowledgeEntry } from '../quest';
 import {
   aiEntityContextCompBadgeClass,
   aiPlanBadgeClass,
@@ -53,7 +53,7 @@ const traceResultClass = (result: string) => result === 'applied' ? 'text-[#10b9
 const consoleLevelClass = (level: string) => cls('font-bold uppercase text-[var(--text-secondary)]', level === 'error' && 'text-[#ef4444]', (level === 'warn' || level === 'warning') && 'text-[#f59e0b]');
 const permissionStateClass = (allowed: boolean) => cls('text-[9px] font-semibold', allowed ? 'text-[#22c55e]' : 'text-[#f87171]');
 const permissionButtonClass = 'cursor-pointer rounded border border-[var(--border)] bg-[var(--bg-surface)] px-[7px] py-1 font-[var(--font-sans)] text-[9px] font-medium text-[var(--text-secondary)] hover:border-[var(--border-light)] hover:text-[var(--text-primary)]';
-const changeKindClass = (kind: CopilotOperation['permission_kind']) => cls('rounded-[3px] px-1 py-0.5 text-center font-[var(--font-mono)] text-[10px] font-bold', kind === 'write' && 'bg-[rgba(245,158,11,0.14)] text-[#f59e0b]', kind === 'read' && 'bg-[rgba(34,197,94,0.12)] text-[#22c55e]', kind === 'command' && 'bg-[var(--accent-dim)] text-[var(--text-secondary)]');
+const changeKindClass = (kind: CopilotOperation['permission_kind']) => cls('rounded-[3px] px-1 py-0.5 text-center font-[var(--font-mono)] text-[10px] font-bold', kind === 'write' && 'bg-[rgba(245,158,11,0.14)] text-[#f59e0b]', kind === 'read' && 'bg-[rgba(34,197,94,0.12)] text-[#22c55e]', kind === 'command' && 'bg-[var(--accent-dim)] text-[var(--text-secondary)]', kind === 'unsupported' && 'bg-[rgba(239,68,68,0.12)] text-[#f87171]');
 const workflowStepClass = (active = false) => cls('rounded-[5px] px-[3px] py-1.5 text-[10px] font-medium text-[var(--text-muted)]', active && 'bg-[var(--accent-dim)] text-[var(--accent)]');
 const mentionItemClass = (active: boolean) => cls('flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-2.5 py-1.5 text-left font-[var(--font-sans)] text-xs text-[var(--text-primary)] hover:bg-[var(--accent-dim)]', active && 'bg-[var(--accent-dim)]');
 const messageStateClass = (state: 'queued' | 'interrupted') => cls('mt-1.5 w-fit rounded px-1.5 py-0.5 text-[9px] font-semibold', state === 'queued' ? 'bg-[rgba(245,158,11,0.12)] text-[#fbbf24]' : 'bg-[rgba(148,163,184,0.12)] text-[#94a3b8]');
@@ -66,7 +66,14 @@ export interface CopilotOperation {
   index: number;
   preview: string;
   requires_write: boolean;
-  permission_kind: 'read' | 'write' | 'command';
+  id?: string;
+  kind?: string;
+  permission_kind: 'read' | 'write' | 'command' | 'unsupported';
+  target?: string;
+  risk_hint?: 'low' | 'medium' | 'high' | 'unsupported' | string;
+  requires_approval?: boolean;
+  undo_hint?: 'available' | 'unavailable' | 'unknown' | string;
+  validation_hint?: string | null;
   command?: string | null;
   permanently_allowed?: boolean;
 }
@@ -511,14 +518,15 @@ function PlanCard({ data }: { data: CopilotPlan }) {
     <div className="">
       {data.operations.map((op) => {
         const isRead = op.permission_kind === 'read';
+        const isUnsupported = op.permission_kind === 'unsupported';
         const isApproved = ctx?.approved.has(op.index);
         const isDenied = ctx?.denied.has(op.index);
-        const showControls = ctx?.active && !isRead;
+        const showControls = ctx?.active && !isRead && !isUnsupported;
 
         return (
           <div key={op.index} className="flex min-h-7 items-center gap-1.5 py-[5px] text-xs">
             <span className={aiPlanBadgeClass(op.requires_write ? 'write' : 'read')}>
-              {op.permission_kind === 'read' ? 'R' : op.permission_kind === 'command' ? 'CMD' : 'W'}
+              {op.permission_kind === 'read' ? 'R' : op.permission_kind === 'command' ? 'CMD' : op.permission_kind === 'unsupported' ? 'BLOCK' : 'W'}
             </span>
             <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{op.preview}</span>
             {showControls && (
@@ -549,6 +557,9 @@ function PlanCard({ data }: { data: CopilotPlan }) {
             )}
             {isRead && (
               <span className={planItemStateClass('auto')}>{t('op_auto')}</span>
+            )}
+            {isUnsupported && (
+              <span className={planItemStateClass('denied')}>{t('op_unsupported')}</span>
             )}
           </div>
         );
@@ -642,6 +653,7 @@ export interface AiPanelProps {
   contextualRequest?: { id: number; prompt: string } | null;
   onContextualRequestConsumed?: (id: number) => void;
   onOpenSettings?: () => void;
+  onOpenQuest?: (questId?: string | null) => void;
 }
 
 export interface AiWorkspaceState {
@@ -668,6 +680,7 @@ export default function AiPanel({
   contextualRequest,
   onContextualRequestConsumed,
   onOpenSettings,
+  onOpenQuest,
 }: AiPanelProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
@@ -696,6 +709,7 @@ export default function AiPanel({
   const [knowledgeEntries, setKnowledgeEntries] = useState<KnowledgeEntry[]>([]);
   const [selectedKnowledgeIds, setSelectedKnowledgeIds] = useState<Set<string>>(new Set());
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [promotingQuest, setPromotingQuest] = useState(false);
   const continuationDepthRef = useRef(0);
   const activeRequestRef = useRef(false);
   const interruptRequestedRef = useRef(false);
@@ -861,6 +875,17 @@ export default function AiPanel({
       if (selectedKnowledgeIds.size > 0) {
         planParams.knowledge_ids = Array.from(selectedKnowledgeIds);
       }
+      planParams.editor_context = {
+        project_name: projectName ?? null,
+        scene_object_count: sceneObjectCount,
+        selected_entity_id: selectedEntity ?? null,
+        selected_entity_name: selectedEntityName ?? null,
+        attached_knowledge_count: selectedKnowledgeIds.size,
+        recent_messages: messages.slice(-6).map(message => ({
+          role: message.role,
+          content: message.content,
+        })),
+      };
 
       const streamHandle = streamCopilotPlan<CopilotPlan>(planParams, (delta, kind) => {
         if (interruptRequestedRef.current) return;
@@ -1086,6 +1111,9 @@ export default function AiPanel({
     operation: CopilotOperation,
     decision: 'once' | 'session' | 'always' | 'deny',
   ) => {
+    if (operation.permission_kind === 'unsupported' && decision !== 'deny') {
+      return;
+    }
     if (decision === 'deny') {
       setApproved(current => {
         const next = new Set(current);
@@ -1115,7 +1143,7 @@ export default function AiPanel({
       return;
     }
 
-    if (decision === 'always' && operation.command) {
+    if (decision === 'always' && operation.command && operation.permission_kind === 'command') {
       await rpc('copilot/allow_command', { command: operation.command });
       setPlan(current => current ? {
         ...current,
@@ -1207,6 +1235,81 @@ export default function AiPanel({
     setStatus('idle');
     setWorkspaceView('chat');
   }, []);
+
+  const buildQuestPromotionContext = useCallback(() => {
+    const recentMessages = messages
+      .slice(-8)
+      .map(message => `${message.role.toUpperCase()}: ${message.content || message.thinking || ''}`.trim())
+      .filter(Boolean)
+      .join('\n\n');
+    const selectedEntityContext = entityDetails
+      ? [
+          `Selected entity: ${entityDetails.name} (${entityDetails.id})`,
+          `Tag: ${entityDetails.tag || 'untagged'}`,
+          `Position: ${entityDetails.transform.position.map(value => value.toFixed(2)).join(', ')}`,
+          `Components: ${entityDetails.components.map(component => component.type).join(', ') || 'none'}`,
+        ].join('\n')
+      : 'Selected entity: none';
+    const proposedOperations = plan?.operations.length
+      ? plan.operations
+          .map(operation => [
+            `- [${operation.permission_kind.toUpperCase()}] ${operation.preview}`,
+            approved.has(operation.index) ? '  Decision: approved' : denied.has(operation.index) ? '  Decision: denied' : '  Decision: pending',
+            operation.command ? `  Command: ${operation.command}` : null,
+          ].filter(Boolean).join('\n'))
+          .join('\n')
+      : 'No active proposed operations.';
+    const completed = completedBundle
+      ? [
+          `Last applied summary: ${completedBundle.summary}`,
+          `Operations performed: ${completedBundle.operationsPerformed}`,
+          `Trace entries: ${completedBundle.traceEntries.map(entry => `${entry.tool}:${entry.result}`).join(', ') || 'none'}`,
+          `Console entries: ${completedBundle.consoleEntries.map(entry => `${entry.level}:${entry.message}`).join(' | ') || 'none'}`,
+        ].join('\n')
+      : 'No applied Copilot result in this session.';
+    const knowledge = attachedKnowledge.length
+      ? attachedKnowledge.map(entry => `- ${entry.category}: ${entry.content}`).join('\n')
+      : 'No Knowledge entries attached.';
+
+    return [
+      `Source: Promoted from Editor Copilot`,
+      `Project: ${projectName || 'current project'}`,
+      `Scene object count: ${sceneObjectCount}`,
+      selectedEntityContext,
+      '',
+      'Recent conversation:',
+      recentMessages || 'No prior conversation captured.',
+      '',
+      'Proposed operations:',
+      proposedOperations,
+      '',
+      'Latest applied result:',
+      completed,
+      '',
+      'Attached Knowledge:',
+      knowledge,
+    ].join('\n');
+  }, [approved, attachedKnowledge, completedBundle, denied, entityDetails, messages, plan, projectName, sceneObjectCount]);
+
+  const promoteCurrentWorkToQuest = useCallback(async () => {
+    if (promotingQuest) return;
+    const prompt = lastPromptRef.current
+      || messages.slice().reverse().find(message => message.role === 'user')?.content
+      || input
+      || t('ai_promote_default_goal');
+    setPromotingQuest(true);
+    try {
+      const quest = await promoteQuest(prompt, buildQuestPromotionContext());
+      addMessage('assistant', t('ai_promoted_to_quest').replace('{title}', quest.title));
+      onOpenQuest?.(quest.id);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
+      setStatus('error');
+      addMessage('assistant', t('ai_promote_failed'), [{ type: 'error', data: msg }]);
+    } finally {
+      setPromotingQuest(false);
+    }
+  }, [addMessage, buildQuestPromotionContext, input, messages, onOpenQuest, promotingQuest, t]);
 
   // ── Keyboard ──
 
@@ -1373,6 +1476,16 @@ export default function AiPanel({
             ) : <>
               <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--text-muted)]">
                 <span>{t('changes_decision_hint')}</span>
+                {onOpenQuest && (
+                  <button
+                    className={buttonClass('ghost', 'sm')}
+                    onClick={promoteCurrentWorkToQuest}
+                    disabled={promotingQuest}
+                  >
+                    {promotingQuest ? <IconLoader className={commonSpinnerClass} /> : <IconSparkles />}
+                    {t('ai_promote_to_quest')}
+                  </button>
+                )}
               </div>
               {plan.operations.map(operation => (
               <div key={operation.index} className="grid grid-cols-[58px_1fr] items-start gap-2 rounded-lg border border-dashed border-[var(--border)] bg-[var(--accent-dim)] p-2.5 text-[11px] leading-[1.45] text-[var(--text-secondary)] hover:border-[var(--border-light)]">
@@ -1383,6 +1496,8 @@ export default function AiPanel({
                 <div className="col-start-2 flex flex-wrap gap-[5px]">
                   {operation.permission_kind === 'read' ? (
                     <span className={permissionStateClass(true)}>{t('op_allowed_auto')}</span>
+                  ) : operation.permission_kind === 'unsupported' ? (
+                    <span className={permissionStateClass(false)}>{t('op_unsupported')}</span>
                   ) : approved.has(operation.index) ? (
                     <span className={permissionStateClass(true)}>
                       {operation.permission_kind === 'command' && operation.permanently_allowed ? t('op_always_allowed') : t('op_allowed')}
@@ -1479,24 +1594,19 @@ export default function AiPanel({
 
       {/* Plan approval bar */}
       {hasPlan && (() => {
-        const pendingOps = plan!.operations.filter(
-          op => !approved.has(op.index) && !denied.has(op.index) && op.permission_kind !== 'read'
-        );
+        const approvableOps = plan!.operations.filter(op => op.permission_kind === 'write' || op.permission_kind === 'command');
+        const pendingOps = approvableOps.filter(op => !approved.has(op.index) && !denied.has(op.index));
         const approveAll = () => {
-          const count = plan!.operations.filter(op => op.permission_kind !== 'read').length;
+          const count = approvableOps.length;
           if (!window.confirm(t('confirm_approve_all').replace('{count}', String(count)))) return;
           setApproved(current => {
             const next = new Set(current);
-            plan!.operations
-              .filter(op => op.permission_kind !== 'read')
-              .forEach(op => next.add(op.index));
+            approvableOps.forEach(op => next.add(op.index));
             return next;
           });
           setDenied(current => {
             const next = new Set(current);
-            plan!.operations
-              .filter(op => op.permission_kind !== 'read')
-              .forEach(op => next.delete(op.index));
+            approvableOps.forEach(op => next.delete(op.index));
             return next;
           });
         };
@@ -1525,6 +1635,16 @@ export default function AiPanel({
             >
               {t('btn_discard')}
             </button>
+            {onOpenQuest && (
+              <button
+                className={buttonClass('secondary', 'sm')}
+                onClick={promoteCurrentWorkToQuest}
+                disabled={promotingQuest}
+              >
+                {promotingQuest ? <IconLoader className={commonSpinnerClass} /> : <IconSparkles />}
+                {t('ai_promote_to_quest')}
+              </button>
+            )}
             {approvedWriteCount > 0 && <span className="shrink-0 rounded bg-[rgba(245,158,11,0.12)] px-1.5 py-[3px] text-[9px] font-semibold text-[#f59e0b]">{approvedWriteCount} {approvedWriteCount === 1 ? t('label_write') : t('label_writes')}</span>}
           </div>
         );

@@ -440,12 +440,18 @@ impl WgpuRenderDevice {
         &self.bloom_mip_views[0]
     }
 
-    pub(crate) fn ensure_post_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
+    pub(crate) fn ensure_post_bind_group(&mut self, taa_enabled: bool) -> Arc<wgpu::BindGroup> {
+        if self.post_cached_uses_taa != taa_enabled {
+            self.post_cached_bg = None;
+        }
         if self.post_cached_bg.is_none() {
-            let hdr_cv = self
-                .taa_resolved_view
-                .as_ref()
-                .unwrap_or(&self.hdr_target.as_ref().unwrap().color_view);
+            let hdr_cv = if taa_enabled {
+                self.taa_resolved_view
+                    .as_ref()
+                    .unwrap_or(&self.hdr_target.as_ref().unwrap().color_view)
+            } else {
+                &self.hdr_target.as_ref().unwrap().color_view
+            };
             let depth_view = self
                 .hdr_target
                 .as_ref()
@@ -511,6 +517,7 @@ impl WgpuRenderDevice {
                 ],
             }));
             self.post_cached_bg = Some(Arc::clone(&bg));
+            self.post_cached_uses_taa = taa_enabled;
             bg
         } else {
             Arc::clone(self.post_cached_bg.as_ref().unwrap())
@@ -524,8 +531,8 @@ impl WgpuRenderDevice {
         output_view: &wgpu::TextureView,
         viewport: Option<SurfaceViewportRect>,
     ) {
-        if let Some(taa_bg) = &res.taa_bg {
-            self.encode_taa_resolve_pass(encoder, taa_bg);
+        if res.taa_enabled() {
+            self.encode_taa_resolve_pass(encoder, res.taa_bg.as_ref().unwrap());
         }
         let post_bg = res.post_bg.as_ref().unwrap();
         let load = viewport.map_or(

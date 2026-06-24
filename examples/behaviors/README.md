@@ -91,9 +91,9 @@ These JSON behaviors are significantly easier for LLMs to generate correctly com
 4. **Validatable**: JSON Schema can catch errors
 5. **Pattern-based**: Consistent, repeatable structures
 
-## Comparison with Rhai
+## Comparison with Imperative Scripts
 
-**Rhai (Imperative)**:
+**Imperative**:
 - 27+ lines of code for enemy AI
 - Manual state management
 - Loop logic, conditionals, math

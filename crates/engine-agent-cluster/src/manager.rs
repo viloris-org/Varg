@@ -278,7 +278,7 @@ impl DefaultManager {
     /// Infers Worker specializations from a task description.
     fn infer_worker_kind(objective: &str) -> ProtoWorkerKind {
         let lower = objective.to_lowercase();
-        if lower.contains("script") || lower.contains("rhai") || lower.contains("code") {
+        if lower.contains("script") || lower.contains("varg") || lower.contains("code") {
             ProtoWorkerKind::Script
         } else if lower.contains("asset") || lower.contains("import") || lower.contains("material")
         {

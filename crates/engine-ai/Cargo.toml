@@ -15,7 +15,7 @@ engine-assets.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor = { workspace = true, features = ["agent-tools"] }
-engine-script-rhai.workspace = true
+engine-script-varg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "3", features = ["json"] }

@@ -139,6 +139,17 @@ pub enum UiCompositionPolicy {
     SeparateTexture,
 }
 
+/// Anti-aliasing algorithm applied before final post-processing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AntiAliasingMode {
+    /// Disable post-process anti-aliasing.
+    Off,
+    /// Temporal anti-aliasing using jitter, motion vectors, and history reprojection.
+    #[default]
+    Taa,
+}
+
 /// Project-facing scaling and frame generation settings.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
@@ -163,6 +174,8 @@ pub struct RenderScalingSettings {
     pub frame_generation: FrameGenerationKind,
     /// UI composition policy.
     pub ui_composition: UiCompositionPolicy,
+    /// Anti-aliasing algorithm.
+    pub anti_aliasing: AntiAliasingMode,
 }
 
 impl Default for RenderScalingSettings {
@@ -178,6 +191,7 @@ impl Default for RenderScalingSettings {
             battery_policy: BatteryPolicy::Balanced,
             frame_generation: FrameGenerationKind::Disabled,
             ui_composition: UiCompositionPolicy::AfterFrameGeneration,
+            anti_aliasing: AntiAliasingMode::Taa,
         }
     }
 }

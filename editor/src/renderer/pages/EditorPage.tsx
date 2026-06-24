@@ -144,7 +144,7 @@ interface AssetReferenceRow {
   detail: string;
 }
 
-interface AsterScriptDiagnostic {
+interface ScriptDiagnostic {
   code: string;
   severity: 'error' | 'warning';
   line?: number;
@@ -154,7 +154,7 @@ interface AsterScriptDiagnostic {
   source_line?: string;
 }
 
-type TextAssetDiagnostic = AsterScriptDiagnostic;
+type TextAssetDiagnostic = ScriptDiagnostic;
 
 interface VargExport {
   name: string;
@@ -178,7 +178,7 @@ interface VargAstSummary {
 interface Props {
   onCloseProject: () => void;
   onOpenSettings?: () => void;
-  onOpenQuest?: () => void;
+  onOpenQuest?: (questId?: string | null) => void;
   questArtifact?: QuestEditorArtifact | null;
   onDismissQuestArtifact?: () => void;
 }
@@ -535,6 +535,13 @@ const inspectorClass = {
   componentFields: 'border-t border-[var(--border)]',
   emptyField: 'px-2.5 py-2 text-[10px] text-[var(--text-muted)]',
   addRow: 'mt-2 flex gap-1.5',
+};
+
+const hierarchyContextMenuClass = {
+  root: 'fixed z-[1000] min-w-[156px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] py-1 shadow-[var(--shadow-lg)]',
+  item: 'flex min-h-8 w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 text-left text-[12px] text-[var(--text-primary)] hover:bg-[var(--bg-hover)]',
+  danger: 'text-[var(--danger)] hover:bg-[var(--danger-dim)]',
+  separator: 'mx-2 my-1 h-px bg-[var(--border)]',
 };
 
 const scriptSurfaceClass = {
@@ -944,7 +951,7 @@ function ComponentFieldEditor({ componentType, fieldName, value, onCommit }: {
 }
 
 function isScriptPath(path?: string): boolean {
-  return Boolean(path && /\.(varg|vscene|vasset|aster|rhai|js|ts|tsx|lua|rs)$/i.test(path));
+  return Boolean(path && /\.(varg|vscene|vasset|js|ts|tsx|lua|rs)$/i.test(path));
 }
 
 // Infer a scene-tree icon from a node's name/tag, the way Godot shows a
@@ -1430,7 +1437,7 @@ export default function EditorPage({
   const [scriptSavedContent, setScriptSavedContent] = useState('');
   const [scriptSaving, setScriptSaving] = useState(false);
   const [scriptLineRange, setScriptLineRange] = useState<[number, number] | null>(null);
-  const [scriptDiagnostics, setScriptDiagnostics] = useState<AsterScriptDiagnostic[]>([]);
+  const [scriptDiagnostics, setScriptDiagnostics] = useState<ScriptDiagnostic[]>([]);
   const [vargAst, setVargAst] = useState<VargAstSummary | null>(null);
   const [consoleEntries, setConsoleEntries] = useState<EditorConsoleEntry[]>([]);
   const [consoleBusy, setConsoleBusy] = useState(false);
@@ -1445,6 +1452,11 @@ export default function EditorPage({
   const [artifactQuestionOpen, setArtifactQuestionOpen] = useState(false);
   const [artifactQuestion, setArtifactQuestion] = useState('');
   const [contextualRequest, setContextualRequest] = useState<{ id: number; prompt: string } | null>(null);
+  const [hierarchyContextMenu, setHierarchyContextMenu] = useState<{
+    x: number;
+    y: number;
+    object: SceneObject;
+  } | null>(null);
   const [guides, setGuides] = useState<GuideEntity[]>([]);
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
@@ -1579,6 +1591,17 @@ export default function EditorPage({
   useEffect(() => {
     window.localStorage.setItem('aster.hierarchyOpen', String(hierarchyOpen));
   }, [hierarchyOpen]);
+
+  useEffect(() => {
+    if (!hierarchyContextMenu) return undefined;
+    const close = () => setHierarchyContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', close);
+    };
+  }, [hierarchyContextMenu]);
 
   // Periodic state poll
   useEffect(() => {
@@ -1780,7 +1803,7 @@ export default function EditorPage({
       const result = await rpc<{ entries: Array<{ path: string; kind: string }>; assets: ProjectAssetMeta[] }>('project/list_assets');
       setAssets(result.assets);
       const paths = result.entries
-        .filter(entry => /script|model/i.test(entry.kind) || /\.(varg|vscene|vasset|aster|rhai|amdl|js|ts|lua)$/i.test(entry.path))
+        .filter(entry => /script|model/i.test(entry.kind) || /\.(varg|vscene|vasset|amdl|js|ts|lua)$/i.test(entry.path))
         .map(entry => entry.path);
       setScripts(paths);
       setSelectedScript(current => current && paths.includes(current) ? current : paths[0] ?? null);
@@ -1824,7 +1847,7 @@ export default function EditorPage({
 
   useEffect(() => {
     const lowerPath = selectedScript?.toLowerCase() ?? '';
-    const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset') || lowerPath.endsWith('.aster') || lowerPath.endsWith('.rhai')
+    const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset')
       ? 'project/check_script'
       : lowerPath.endsWith('.amdl')
         ? 'project/check_amdl'
@@ -2106,33 +2129,26 @@ export default function EditorPage({
     if (object) focusOnPosition(object.position);
   }, [focusOnPosition, sceneTree]);
 
-  const createSceneObject = useCallback(async (name = 'New Object') => {
-    const created = await rpc<SceneObject>('shell/create_object', {
-      name,
-      parent_id: selectedId ?? undefined,
-    });
-    await refreshSceneTree();
-    selectSceneObject(created.id);
-  }, [refreshSceneTree, selectSceneObject, selectedId]);
-
   const renameSelectedObject = useCallback(async () => {
     if (!selectedId || !selectedEntityNameDraft.trim()) return;
     await rpc('shell/rename_object', { id: selectedId, name: selectedEntityNameDraft.trim() });
     await refreshSceneTree();
   }, [refreshSceneTree, selectedEntityNameDraft, selectedId]);
 
-  const duplicateSelectedObject = useCallback(async () => {
-    if (!selectedId) return;
-    const duplicated = await rpc<SceneObject>('shell/duplicate_object', { id: selectedId });
+  const duplicateSelectedObject = useCallback(async (targetId = selectedId) => {
+    if (!targetId) return;
+    const duplicated = await rpc<SceneObject>('shell/duplicate_object', { id: targetId });
     await refreshSceneTree();
     selectSceneObject(duplicated.id);
   }, [refreshSceneTree, selectSceneObject, selectedId]);
 
-  const deleteSelectedObject = useCallback(async () => {
-    if (!selectedId) return;
-    await rpc('shell/delete_object', { id: selectedId });
-    setSelectedId(null);
-    setSelectedEntityDetails(null);
+  const deleteSelectedObject = useCallback(async (targetId = selectedId) => {
+    if (!targetId) return;
+    await rpc('shell/delete_object', { id: targetId });
+    if (targetId === selectedId) {
+      setSelectedId(null);
+      setSelectedEntityDetails(null);
+    }
     await refreshSceneTree();
   }, [refreshSceneTree, selectedId]);
 
@@ -2340,7 +2356,7 @@ export default function EditorPage({
     setScriptSaving(true);
     try {
       const lowerPath = selectedScript.toLowerCase();
-      const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset') || lowerPath.endsWith('.aster') || lowerPath.endsWith('.rhai')
+      const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset')
         ? 'project/check_script'
         : lowerPath.endsWith('.amdl')
           ? 'project/check_amdl'
@@ -2579,7 +2595,7 @@ export default function EditorPage({
                 <header className={gameClass.panelHeader}>
                   <div className={gameClass.panelHeaderText}><span>Hierarchy</span><strong className={gameClass.panelHeaderTitle}>{sceneTree.length} objects</strong></div>
                   <div className={gameClass.panelHeaderActions}>
-                    <button className={gameClass.iconButton} onClick={() => createSceneObject()} title="Create object"><IconPlus /></button>
+                    <button className={gameClass.iconButton} onClick={() => createPresetObject('Camera', 'Camera')} title="Create camera"><IconPlus /></button>
                     <button className={gameClass.iconButton} onClick={() => setHierarchyOpen(false)} title="Close Hierarchy"><IconX /></button>
                   </div>
                 </header>
@@ -2594,6 +2610,15 @@ export default function EditorPage({
                         key={object.id}
                         className={cx(gameClass.hierarchyItem, selected && gameClass.hierarchyItemSelected)}
                         onClick={() => selectSceneObject(object.id)}
+                        onContextMenu={event => {
+                          event.preventDefault();
+                          selectSceneObject(object.id);
+                          setHierarchyContextMenu({
+                            x: event.clientX,
+                            y: event.clientY,
+                            object,
+                          });
+                        }}
                         style={{ paddingLeft: depth * 14 + 6 }}
                       >
                         {hasChildren ? (
@@ -2647,7 +2672,6 @@ export default function EditorPage({
                   </div>
                 </div>
                 <div className={gameClass.createPresets} aria-label="Create scene preset">
-                  <button className={gameClass.createButton} onClick={() => createSceneObject()}><IconPlus /> Empty</button>
                   <button className={gameClass.createButton} onClick={() => createPresetObject('Camera', 'Camera')}><IconPlus /> Camera</button>
                   <button className={gameClass.createButton} onClick={() => createPresetObject('Light', 'Light')}><IconPlus /> Light</button>
                   <button className={gameClass.createButton} onClick={() => createPresetObject('Mesh Object', 'MeshRenderer')}><IconPlus /> Mesh</button>
@@ -2722,8 +2746,8 @@ export default function EditorPage({
                         </select>
                       </label>
                       <div className={inspectorClass.actionRow}>
-                        <button className={inspectorClass.actionButton} onClick={duplicateSelectedObject}><IconCopy /> Duplicate</button>
-                        <button className={inspectorClass.actionButton} onClick={deleteSelectedObject}><IconTrash /> Delete</button>
+                        <button className={inspectorClass.actionButton} onClick={() => duplicateSelectedObject()}><IconCopy /> Duplicate</button>
+                        <button className={inspectorClass.actionButton} onClick={() => deleteSelectedObject()}><IconTrash /> Delete</button>
                       </div>
                     </section>
                     {(['position', 'rotation', 'scale'] as const).map(field => (
@@ -3082,6 +3106,48 @@ export default function EditorPage({
           {artifactSelection && <div className={artifactPopoverClass.root} style={{ left: artifactSelection.x, top: artifactSelection.y }}>
             {!artifactQuestionOpen ? <button className={artifactPopoverClass.button} onClick={() => setArtifactQuestionOpen(true)}><IconSparkles /> {t('artifact_ask_about').replace('{kind}', artifactSelection.kind)}</button> : <div className={artifactPopoverClass.panel}><header className={artifactPopoverClass.header}><span className={artifactPopoverClass.label}>{artifactSelection.label}</span><button className={artifactPopoverClass.closeButton} onClick={() => setArtifactSelection(null)}><IconX /></button></header><div className={artifactPopoverClass.form}><input className={artifactPopoverClass.input} autoFocus value={artifactQuestion} onChange={event => setArtifactQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') submitArtifactQuestion(); if (event.key === 'Escape') setArtifactQuestionOpen(false); }} placeholder={t('artifact_ask_placeholder')} /><button className={artifactPopoverClass.submit} onClick={submitArtifactQuestion} disabled={!artifactQuestion.trim()}>{t('btn_ask')}</button></div></div>}
           </div>}
+
+          {hierarchyContextMenu && (
+            <div
+              className={hierarchyContextMenuClass.root}
+              style={{ left: hierarchyContextMenu.x, top: hierarchyContextMenu.y }}
+              onClick={event => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={hierarchyContextMenuClass.item}
+                onClick={() => {
+                  setHierarchyContextMenu(null);
+                  selectSceneObject(hierarchyContextMenu.object.id);
+                  setInspectorOpen(true);
+                }}
+              >
+                <IconView /> Inspect
+              </button>
+              <button
+                type="button"
+                className={hierarchyContextMenuClass.item}
+                onClick={() => {
+                  setHierarchyContextMenu(null);
+                  duplicateSelectedObject(hierarchyContextMenu.object.id);
+                }}
+              >
+                <IconCopy /> Duplicate
+              </button>
+              <div className={hierarchyContextMenuClass.separator} />
+              <button
+                type="button"
+                className={cx(hierarchyContextMenuClass.item, hierarchyContextMenuClass.danger)}
+                onClick={() => {
+                  const id = hierarchyContextMenu.object.id;
+                  setHierarchyContextMenu(null);
+                  deleteSelectedObject(id);
+                }}
+              >
+                <IconTrash /> Delete
+              </button>
+            </div>
+          )}
         </main>
 
         {aiPanelOpen ? (
@@ -3123,6 +3189,7 @@ export default function EditorPage({
                 contextualRequest={contextualRequest}
                 onContextualRequestConsumed={id => setContextualRequest(current => current?.id === id ? null : current)}
                 onOpenSettings={onOpenSettings}
+                onOpenQuest={onOpenQuest}
               />
             </aside>
           </>

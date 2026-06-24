@@ -170,7 +170,7 @@ pub enum ResourceKind {
     SkinnedModel,
     /// Animation clip or animation set.
     Animation,
-    /// Script source for runtime engines (e.g., .aster).
+    /// Varg script source for the runtime.
     Script,
     /// Reusable scene object subset.
     Prefab,
@@ -2061,9 +2061,9 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         "wgsl" | "glsl" => Some((ResourceKind::Shader, "shader-source")),
         "wav" | "ogg" => Some((ResourceKind::Audio, "audio")),
         "py" => Some((ResourceKind::Script, "script-python")),
-        "aster" => Some((ResourceKind::Script, "script-rhai")),
-        // Legacy projects may still contain Rhai-named scripts.
-        "rhai" => Some((ResourceKind::Script, "script-rhai")),
+        "varg" => Some((ResourceKind::Script, "script-varg")),
+        "vscene" => Some((ResourceKind::Scene, "vscene")),
+        "vasset" => Some((ResourceKind::Material, "vasset")),
         "json" => {
             let path_text = path.to_string_lossy();
             if path_text.contains("cubemap") || path_text.contains("skybox") {
@@ -3401,8 +3401,12 @@ mod tests {
         std::fs::write(root.join("models/hero.gltf"), gltf_json).unwrap();
         // Shader: .wgsl file
         std::fs::write(root.join("shaders/pbr.wgsl"), "fn main() {}").unwrap();
-        // Script: .aster file
-        std::fs::write(root.join("scripts/player.aster"), "fn on_update(dt) {}").unwrap();
+        // Script: .varg file
+        std::fs::write(
+            root.join("scripts/player.varg"),
+            "script Player { func update(_ dt: Float) {} }",
+        )
+        .unwrap();
         std::fs::write(
             root.join("scripts/player.py"),
             "def update(ctx):\n    pass\n",
@@ -3444,11 +3448,11 @@ mod tests {
         );
         assert_eq!(
             database
-                .entry_for_path(Path::new("scripts/player.aster"))
+                .entry_for_path(Path::new("scripts/player.varg"))
                 .unwrap()
                 .kind,
             ResourceKind::Script,
-            "Aster Script files should map to Script"
+            "Varg script files should map to Script"
         );
         assert_eq!(
             database

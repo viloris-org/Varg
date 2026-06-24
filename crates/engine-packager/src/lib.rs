@@ -453,11 +453,7 @@ fn build_runtime_binary(repo_root: &Path, release: bool, features: &str) -> Engi
 }
 
 fn runtime_features(configured: &[String]) -> String {
-    let mut features = vec![
-        "runtime-game".to_owned(),
-        "wgpu".to_owned(),
-        "script-rhai".to_owned(),
-    ];
+    let mut features = vec!["runtime-game".to_owned(), "wgpu".to_owned()];
     for feature in configured {
         if feature == "runtime-min" || feature == "runtime-game" {
             continue;

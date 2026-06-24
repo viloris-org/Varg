@@ -11,7 +11,6 @@ members = [
     "crates/engine-editor",
     "crates/engine-i18n",
     "crates/engine-script-varg",
-    "crates/engine-script-rhai",
     "crates/engine-script-declarative",
     "crates/engine-shader",
     "crates/engine-render-2d",
@@ -52,7 +51,6 @@ wgpu = "29.0.3"
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "0.4"
 rapier3d = "0.22.0"
-rhai = "1.21"
 notify = "6.1"
 cpal = "0.15.3"
 symphonia = { version = "0.5.4", default-features = false, features = ["ogg", "pcm", "vorbis", "wav"] }
@@ -68,7 +66,6 @@ engine-audio = { path = "crates/engine-audio", version = "0.1.0" }
 engine-editor = { path = "crates/engine-editor", version = "0.1.0" }
 engine-i18n = { path = "crates/engine-i18n", version = "0.1.0" }
 engine-script-varg = { path = "crates/engine-script-varg", version = "0.1.0" }
-engine-script-rhai = { path = "crates/engine-script-rhai", version = "0.1.0" }
 engine-script-declarative = { path = "crates/engine-script-declarative", version = "0.1.0" }
 engine-shader = { path = "crates/engine-shader", version = "0.1.0" }
 engine-render-2d = { path = "crates/engine-render-2d", version = "0.1.0" }

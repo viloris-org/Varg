@@ -131,7 +131,7 @@ function TreeNodeItem({
   setRenameText?: (v: string) => void;
   onRenameSubmit?: () => void;
   onRenameCancel?: () => void;
-  onOpenScript?: (path: string, language: 'varg' | 'rhai' | 'python') => void;
+  onOpenScript?: (path: string, language: 'varg' | 'python') => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const hasChildren = node.children.length > 0;
@@ -156,8 +156,8 @@ function TreeNodeItem({
         onDoubleClick={() => {
           if (!node.isDir && onOpenScript) {
             const ext = node.name.split('.').pop()?.toLowerCase();
-            if (ext === 'varg' || ext === 'vscene' || ext === 'vasset' || ext === 'aster' || ext === 'rhai' || ext === 'py') {
-              onOpenScript(node.path, ext === 'py' ? 'python' : ext === 'varg' || ext === 'vscene' || ext === 'vasset' ? 'varg' : 'rhai');
+            if (ext === 'varg' || ext === 'vscene' || ext === 'vasset' || ext === 'py') {
+              onOpenScript(node.path, ext === 'py' ? 'python' : 'varg');
             }
           }
         }}
@@ -227,7 +227,7 @@ function TreeNodeItem({
 // ─── Project Panel ──────────────────────────────────────────────────────────
 
 interface ProjectPanelProps {
-  onOpenScript?: (path: string, language: 'varg' | 'rhai' | 'python') => void;
+  onOpenScript?: (path: string, language: 'varg' | 'python') => void;
 }
 
 export default function ProjectPanel({ onOpenScript }: ProjectPanelProps = {}) {

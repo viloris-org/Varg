@@ -316,7 +316,7 @@ fn project_lists_scene_references_for_script_assets() {
     let script = host
         .handle(
             "project/create_script",
-            &serde_json::json!({ "name": "controller", "backend": "rhai" }),
+            &serde_json::json!({ "name": "controller" }),
         )
         .expect("create script");
     let script_path = script["path"].as_str().unwrap();

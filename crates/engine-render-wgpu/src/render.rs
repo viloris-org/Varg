@@ -719,6 +719,12 @@ impl WgpuRenderDevice {
         bloom_enabled: bool,
         _encoder_label: &str,
     ) -> FrameResources {
+        let taa_enabled = self.anti_aliasing == engine_render::AntiAliasingMode::Taa
+            && self
+                .active_frame_plan
+                .as_ref()
+                .map(|plan| plan.temporal_inputs)
+                .unwrap_or(true);
         self.queue.write_buffer(
             &self.post_uniform,
             0,
@@ -749,7 +755,7 @@ impl WgpuRenderDevice {
                     0.0
                 },
                 taa_history_weight: 0.88,
-                taa_enabled: 1.0,
+                taa_enabled: if taa_enabled { 1.0 } else { 0.0 },
                 _pad: 0.0,
             }),
         );
@@ -791,7 +797,9 @@ impl WgpuRenderDevice {
         );
 
         self.ensure_hdr_target(tw, th);
-        self.ensure_taa_targets();
+        if taa_enabled {
+            self.ensure_taa_targets();
+        }
         self.ensure_bloom_mips(tw, th);
         if ssao_enabled {
             self.ensure_ssao_output();
@@ -826,8 +834,12 @@ impl WgpuRenderDevice {
         };
         let ssgi_view = self.ssgi_output_view.clone();
         let (bloom_down_bgs, bloom_up_bgs) = self.ensure_bloom_bind_groups();
-        let taa_bg = Some(self.ensure_taa_bind_group());
-        let post_bg = Some(self.ensure_post_bind_group());
+        let taa_bg = if taa_enabled {
+            Some(self.ensure_taa_bind_group())
+        } else {
+            None
+        };
+        let post_bg = Some(self.ensure_post_bind_group(taa_enabled));
 
         FrameResources {
             ssao_bg,

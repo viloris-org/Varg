@@ -233,7 +233,7 @@ const mockSceneEntities: SceneEntity[] = [
 
 const mockAssets = [
   { name: 'Meadow.scene', kind: 'scene', path: 'scenes/Meadow.scene', updated: '2m ago' },
-  { name: 'PlayerController.aster', kind: 'script', path: 'scripts/PlayerController.aster', updated: '8m ago' },
+  { name: 'PlayerController.varg', kind: 'script', path: 'scripts/PlayerController.varg', updated: '8m ago' },
   { name: 'ground_moss.mat', kind: 'material', path: 'materials/ground_moss.mat', updated: '18m ago' },
   { name: 'capsule_player.prefab', kind: 'prefab', path: 'prefabs/capsule_player.prefab', updated: '1h ago' },
   { name: 'ambient_forest.wav', kind: 'audio', path: 'audio/ambient_forest.wav', updated: '1d ago' },
@@ -242,7 +242,7 @@ const mockAssets = [
 const mockProblems = [
   {
     severity: 'warning',
-    file: 'scripts/PlayerController.aster',
+    file: 'scripts/PlayerController.varg',
     line: 42,
     title: 'Input axis "dash" has no binding in the active profile.',
   },
@@ -426,18 +426,19 @@ function SectionHeader({
   );
 }
 
-function NumberField({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+function NumberField({ value, onChange, label }: { value: number; onChange: (value: number) => void; label?: string }) {
   return (
     <input
       type="number"
       className="h-7 min-w-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 font-mono text-[12px] text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--brand)]"
       value={Number.isInteger(value) ? value : value.toFixed(2)}
       onChange={(event) => onChange(Number(event.target.value))}
+      aria-label={label}
     />
   );
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label?: string }) {
   return (
     <button
       type="button"
@@ -449,6 +450,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: b
       )}
       onClick={() => onChange(!checked)}
       aria-pressed={checked}
+      aria-label={label}
     >
       <span
         className={cx(
@@ -834,12 +836,46 @@ function FieldRow({
   children: React.ReactNode;
 }) {
   return (
-    <label className="grid min-h-8 grid-cols-[78px_minmax(0,1fr)] items-center gap-3 px-3 py-1.5 text-[12px]">
+    <div className="grid min-h-8 grid-cols-[78px_minmax(0,1fr)] items-center gap-3 px-3 py-1.5 text-[12px]">
       <span className="truncate text-[var(--text-muted)]">{label}</span>
       <div className="min-w-0">{children}</div>
-    </label>
+    </div>
   );
 }
+
+function isVec3Record(value: unknown): value is { x: number; y: number; z: number } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.x === 'number' && typeof record.y === 'number' && typeof record.z === 'number';
+}
+
+function isColorField(name: string): boolean {
+  return name === 'color' || name.endsWith('_color');
+}
+
+function vec3ToHex(value: { x: number; y: number; z: number }): string {
+  return `#${[value.x, value.y, value.z]
+    .map((channel) => Math.round(Math.max(0, Math.min(1, channel)) * 255).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
+
+function hexToVec3(hex: string): { x: number; y: number; z: number } | null {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return null;
+  const value = match[1];
+  return {
+    x: parseInt(value.slice(0, 2), 16) / 255,
+    y: parseInt(value.slice(2, 4), 16) / 255,
+    z: parseInt(value.slice(4, 6), 16) / 255,
+  };
+}
+
+const hierarchyContextMenuClass = {
+  root: 'fixed z-[1000] min-w-[156px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-surface)] py-1 shadow-[var(--shadow-lg)]',
+  item: 'flex min-h-8 w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 text-left text-[12px] text-[var(--text-primary)] hover:bg-[var(--bg-hover)]',
+  danger: 'text-[var(--danger)] hover:bg-[var(--danger-dim)]',
+  separator: 'mx-2 my-1 h-px bg-[var(--border)]',
+};
 
 function ComponentField({
   name,
@@ -853,14 +889,14 @@ function ComponentField({
   if (typeof value === 'boolean') {
     return (
       <FieldRow label={name}>
-        <Toggle checked={value} onChange={onChange} />
+        <Toggle checked={value} onChange={onChange} label={name} />
       </FieldRow>
     );
   }
   if (typeof value === 'number') {
     return (
       <FieldRow label={name}>
-        <NumberField value={value} onChange={onChange} />
+        <NumberField value={value} onChange={onChange} label={name} />
       </FieldRow>
     );
   }
@@ -871,7 +907,97 @@ function ComponentField({
           className="h-7 w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--brand)]"
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          aria-label={name}
         />
+      </FieldRow>
+    );
+  }
+  if (isVec3Record(value)) {
+    if (isColorField(name)) {
+      const hex = vec3ToHex(value);
+      const commitHex = (rawHex: string) => {
+        const next = hexToVec3(rawHex);
+        if (next) onChange(next);
+      };
+
+      return (
+        <FieldRow label={name}>
+          <div className="grid gap-1.5">
+            <div className="flex items-center gap-2">
+              <label className="relative grid size-7 shrink-0 cursor-pointer place-items-center overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)]" title="Pick color">
+                <input
+                  type="color"
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  value={hex}
+                  onChange={(event) => commitHex(event.target.value)}
+                  aria-label={`${name} color`}
+                />
+                <span className="size-full" style={{ backgroundColor: hex }} />
+              </label>
+              <input
+                key={hex}
+                className="h-7 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 font-mono text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--brand)]"
+                defaultValue={hex}
+                spellCheck={false}
+                aria-label={`${name} hex`}
+                onBlur={(event) => commitHex(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  if (event.key === 'Escape') event.currentTarget.blur();
+                }}
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {(['x', 'y', 'z'] as const).map((axis, index) => (
+                <label key={axis} className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-1.5 py-1">
+                  <span className="font-mono text-[10px] text-[var(--text-muted)]">{['R', 'G', 'B'][index]}</span>
+                  <input
+                    key={`${axis}-${value[axis]}`}
+                    className="min-w-0 border-0 bg-transparent p-0 text-right font-mono text-[11px] text-[var(--text-primary)] outline-none"
+                    defaultValue={value[axis].toFixed(2)}
+                    inputMode="decimal"
+                    aria-label={`${name} ${['red', 'green', 'blue'][index]}`}
+                    onBlur={(event) => {
+                      const next = Number(event.target.value);
+                      if (Number.isFinite(next)) onChange({ ...value, [axis]: next });
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') event.currentTarget.blur();
+                      if (event.key === 'Escape') event.currentTarget.blur();
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        </FieldRow>
+      );
+    }
+
+    return (
+      <FieldRow label={name}>
+        <div className="grid grid-cols-3 gap-1.5">
+          {(['x', 'y', 'z'] as const).map((axis) => (
+            <label key={axis} className="grid grid-cols-[16px_minmax(0,1fr)] items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-1.5 py-1">
+              <span className="font-mono text-[10px] text-[var(--text-muted)]">{axis.toUpperCase()}</span>
+              <input
+                key={`${axis}-${value[axis]}`}
+                className="min-w-0 border-0 bg-transparent p-0 text-right font-mono text-[11px] text-[var(--text-primary)] outline-none"
+                defaultValue={value[axis].toFixed(2)}
+                inputMode="decimal"
+                aria-label={`${name} ${axis}`}
+                onBlur={(event) => {
+                  const next = Number(event.target.value);
+                  if (Number.isFinite(next)) onChange({ ...value, [axis]: next });
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  if (event.key === 'Escape') event.currentTarget.blur();
+                }}
+              />
+            </label>
+          ))}
+        </div>
       </FieldRow>
     );
   }
@@ -881,6 +1007,7 @@ function ComponentField({
         className="h-16 w-full resize-none rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1 font-mono text-[11px] text-[var(--text-secondary)] outline-none focus:border-[var(--brand)]"
         value={JSON.stringify(value ?? null, null, 2)}
         spellCheck={false}
+        aria-label={name}
         onChange={(event) => {
           try {
             onChange(JSON.parse(event.target.value));
@@ -932,6 +1059,11 @@ export default function CalmEditorPrototype({
   const [buildBusy, setBuildBusy] = useState(false);
   const [buildMessage, setBuildMessage] = useState<string | null>(null);
   const [addComponentType, setAddComponentType] = useState('Camera');
+  const [hierarchyContextMenu, setHierarchyContextMenu] = useState<{
+    x: number;
+    y: number;
+    entity: SceneEntity;
+  } | null>(null);
   const [openInspector, setOpenInspector] = useState<Record<InspectorSection, boolean>>({
     transform: true,
     script: true,
@@ -990,7 +1122,7 @@ export default function CalmEditorPrototype({
   });
   const scriptAssets = useMemo(() => (
     projectAssets
-      .filter((asset) => /script|model/i.test(asset.kind) || /\.(aster|rhai|amdl|js|ts|lua)$/i.test(asset.path))
+      .filter((asset) => /script|model/i.test(asset.kind) || /\.(varg|vscene|vasset|amdl|js|ts|lua)$/i.test(asset.path))
       .map((asset) => asset.path)
   ), [projectAssets]);
   const selectedBuildTarget = buildTargets.find((target) => target.id === buildTarget) ?? buildTargets[0];
@@ -1253,7 +1385,7 @@ export default function CalmEditorPrototype({
   ];
 
   const commands = [
-    { title: 'Create Empty Entity', detail: 'Add an entity to Meadow.scene' },
+    { title: 'Create Camera', detail: 'Add a camera object to Meadow.scene' },
     { title: 'Open Selected Script', detail: selectedScript ?? 'No script selected' },
     { title: 'Run Scene Validation', detail: 'Check components, assets, and policy rules' },
     { title: 'Package Current Build', detail: `${selectedBuildTarget.label} / ${buildFormat} / ${buildChannel}` },
@@ -1285,6 +1417,17 @@ export default function CalmEditorPrototype({
     }, 2000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!hierarchyContextMenu) return undefined;
+    const close = () => setHierarchyContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', close);
+    };
+  }, [hierarchyContextMenu]);
 
   useEffect(() => {
     if (
@@ -1419,7 +1562,7 @@ export default function CalmEditorPrototype({
       return;
     }
     const lowerPath = selectedScript.toLowerCase();
-    const checkMethod = lowerPath.endsWith('.aster')
+    const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset')
       ? 'project/check_script'
       : lowerPath.endsWith('.amdl')
         ? 'project/check_amdl'
@@ -1475,11 +1618,25 @@ export default function CalmEditorPrototype({
     await refreshSceneTree();
   };
 
-  const createSceneObject = async () => {
+  const createCameraObject = async () => {
     if (!backendReady) return;
-    const created = await rpc<SceneObject>('shell/create_object', { name: 'New Object' }).catch(() => null);
+    const created = await rpc<SceneObject>('shell/create_object', { name: 'Camera' }).catch(() => null);
+    if (created) {
+      await rpc('shell/add_component', { id: created.id, component_type: 'Camera' }).catch(() => {});
+    }
     await refreshSceneTree();
     if (created) selectEntity(created.id);
+  };
+
+  const deleteSceneObject = async (id: string) => {
+    if (!backendReady) return;
+    await rpc('shell/delete_object', { id }).catch(() => {});
+    if (selectedEntityId === id) {
+      const fallback = entities.find((entity) => entity.id !== id);
+      setSelectedEntityId(fallback?.id ?? 'world');
+      setSelectedEntityDetails(null);
+    }
+    await refreshSceneTree();
   };
 
   const runGame = async () => {
@@ -1491,7 +1648,7 @@ export default function CalmEditorPrototype({
   };
 
   const runCommand = async (title: string) => {
-    if (title === 'Create Empty Entity') await createSceneObject();
+    if (title === 'Create Camera') await createCameraObject();
     else if (title === 'Open Selected Script' && selectedScript) openScript(selectedScript);
     else if (title === 'Run Scene Validation') setBottomTab('problems');
     else if (title === 'Package Current Build') await runBuild();
@@ -1641,7 +1798,7 @@ export default function CalmEditorPrototype({
               <div className="font-mono text-[10px] text-[var(--text-muted)]">{backendReady ? 'Live backend' : 'Prototype data'}</div>
             </div>
             <div className="flex items-center gap-1">
-              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40" onClick={createSceneObject} disabled={!backendReady}>
+              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40" onClick={createCameraObject} disabled={!backendReady} title="Create camera">
                 <IconPlus size={13} />
               </button>
               <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
@@ -1673,7 +1830,7 @@ export default function CalmEditorPrototype({
                   type="button"
                   className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]"
                   onClick={() => {
-                    if (/script/i.test(asset.kind) || /\.(aster|rhai|amdl|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
+                    if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|amdl|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
                   }}
                 >
                   <span className="grid size-7 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)]">
@@ -1800,6 +1957,15 @@ export default function CalmEditorPrototype({
                         selectedEntity.id === entity.id ? 'bg-[rgba(34,197,94,0.10)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
                       )}
                       onClick={() => selectEntity(entity.id)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        selectEntity(entity.id);
+                        setHierarchyContextMenu({
+                          x: event.clientX,
+                          y: event.clientY,
+                          entity,
+                        });
+                      }}
                     >
                       <span className={cx('size-1.5 rounded-full', entity.visible ? 'bg-[var(--brand)]' : 'bg-[var(--text-muted)]')} />
                       <span className="min-w-0 flex-1 truncate">{entity.name}</span>
@@ -2034,7 +2200,6 @@ export default function CalmEditorPrototype({
                 <span className="min-w-0 truncate text-[13px] font-semibold">{inspectorEntity.name}</span>
                 <span className="shrink-0 rounded-full border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">{inspectorEntity.type}</span>
               </div>
-              <div className="mt-1 truncate font-mono text-[10px] text-[var(--text-muted)]">entity/{inspectorEntity.id}</div>
             </div>
             <div className="flex items-center gap-1">
               <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
@@ -2143,6 +2308,38 @@ export default function CalmEditorPrototype({
             ))}
           </div>
         </aside>
+
+        {hierarchyContextMenu && (
+          <div
+            className={hierarchyContextMenuClass.root}
+            style={{ left: hierarchyContextMenu.x, top: hierarchyContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className={hierarchyContextMenuClass.item}
+              onClick={() => {
+                selectEntity(hierarchyContextMenu.entity.id);
+                setHierarchyContextMenu(null);
+              }}
+            >
+              <IconView size={13} /> Inspect
+            </button>
+            <div className={hierarchyContextMenuClass.separator} />
+            <button
+              type="button"
+              className={cx(hierarchyContextMenuClass.item, hierarchyContextMenuClass.danger)}
+              disabled={!backendReady}
+              onClick={() => {
+                const id = hierarchyContextMenu.entity.id;
+                setHierarchyContextMenu(null);
+                deleteSceneObject(id);
+              }}
+            >
+              <IconTrash size={13} /> Delete
+            </button>
+          </div>
+        )}
       </main>
 
       <footer className="flex h-6 min-h-6 items-center justify-between border-t border-[var(--border)] bg-[rgba(18,19,22,0.92)] px-3 font-mono text-[10px] text-[var(--text-muted)]">

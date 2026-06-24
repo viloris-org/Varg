@@ -10,8 +10,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(feature = "script-rhai")]
-use engine_script_rhai::RhaiScriptBackend;
 #[cfg(feature = "script-python")]
 use std::time::Instant;
 
@@ -44,24 +42,15 @@ use engine_physics::{
 use engine_platform::GamepadProvider;
 use engine_platform::{ActionMap, InputState};
 use engine_render::{
-    BatteryPolicy, FrameGenerationKind, HeadlessRenderDevice, ImageDesc, ImageFormat, ImageHandle,
-    ImageUsage, PresentStrategy, RenderApi, RenderDevice, RenderFrame, RenderGraph,
-    RenderGraphBuilder, RenderMaterialTextures, RenderPerformanceConfig, RenderPlatformClass,
-    RenderQualityMode, RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState,
-    UiCompositionPolicy, UpscalerKind,
+    AntiAliasingMode, BatteryPolicy, FrameGenerationKind, HeadlessRenderDevice, ImageDesc,
+    ImageFormat, ImageHandle, ImageUsage, PresentStrategy, RenderApi, RenderDevice, RenderFrame,
+    RenderGraph, RenderGraphBuilder, RenderMaterialTextures, RenderPerformanceConfig,
+    RenderPlatformClass, RenderQualityMode, RenderScalingContext, RenderScalingSettings,
+    RenderWorld, ThermalState, UiCompositionPolicy, UpscalerKind,
 };
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
-
-#[cfg(feature = "script-rhai")]
-struct RhaiWrapper(RhaiScriptBackend);
-
-#[cfg(feature = "script-rhai")]
-impl std::fmt::Debug for RhaiWrapper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RhaiScriptBackend").finish_non_exhaustive()
-    }
-}
+use engine_script_varg::{VargRuntimeContext, VargScript, compile_script_source};
 
 /// Explicit runtime services. There is no hidden global mutable state.
 #[derive(Debug)]
@@ -124,8 +113,7 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     python_script_runtime: PythonScriptRuntimeConfig,
     #[cfg(feature = "script-python")]
     script_diagnostics_this_frame: usize,
-    #[cfg(feature = "script-rhai")]
-    rhai_script_backend: RhaiWrapper,
+    varg_script_cache: HashMap<PathBuf, VargScript>,
     #[cfg(feature = "audio")]
     audio_bindings: Vec<AudioBinding>,
     #[cfg(feature = "audio")]
@@ -325,8 +313,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             python_script_runtime: PythonScriptRuntimeConfig::default(),
             #[cfg(feature = "script-python")]
             script_diagnostics_this_frame: 0,
-            #[cfg(feature = "script-rhai")]
-            rhai_script_backend: RhaiWrapper(RhaiScriptBackend::new()),
+            varg_script_cache: HashMap::new(),
             #[cfg(feature = "audio")]
             audio_bindings: Vec::new(),
             #[cfg(feature = "audio")]
@@ -422,14 +409,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
         let should_simulate = !self.paused || single_step;
 
-        // ── script setup (Rhai) ──────────────────────────────────────
-        #[cfg(feature = "script-rhai")]
-        {
-            self.rhai_script_backend
-                .0
-                .set_input_state(self.input.clone());
-        }
-
+        // ── script startup ───────────────────────────────────────────
         if should_simulate {
             #[cfg(feature = "physics")]
             self.ensure_physics_bindings()?;
@@ -437,8 +417,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             self.ensure_audio_bindings()?;
             #[cfg(feature = "script-python")]
             self.run_python_scripts("start", dt);
-            #[cfg(feature = "script-rhai")]
-            self.run_rhai_scripts_start();
+            self.run_varg_scripts_start();
 
             // ── fixed_timestep_loop ────────────────────────────────────
             let mut fixed_steps = 0;
@@ -458,11 +437,8 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     let fixed_dt = self.time.fixed_delta_seconds;
                     self.run_python_scripts("fixed_update", fixed_dt);
                 }
-                #[cfg(feature = "script-rhai")]
-                {
-                    let fixed_dt = self.time.fixed_delta_seconds;
-                    self.run_rhai_scripts_fixed_update(fixed_dt);
-                }
+                let fixed_dt = self.time.fixed_delta_seconds;
+                self.run_varg_scripts_fixed_update(fixed_dt);
                 self.scene.tick_fixed_frame();
                 fixed_steps += 1;
             }
@@ -471,8 +447,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             self.apply_builtin_player_controller();
             #[cfg(feature = "script-python")]
             self.run_python_scripts("update", dt);
-            #[cfg(feature = "script-rhai")]
-            self.run_rhai_scripts_update(dt);
+            self.run_varg_scripts_update(dt);
 
             // ── late_update ────────────────────────────────────────────
             self.scene.tick_runtime_frame();
@@ -569,139 +544,172 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.frame_counter.get()
     }
 
-    #[cfg(feature = "script-rhai")]
-    fn run_rhai_scripts_start(&mut self) {
-        let invocations: Vec<(String, PathBuf)> = self
+    fn run_varg_scripts_start(&mut self) {
+        self.run_varg_lifecycle("start", 0.0, true);
+    }
+
+    fn run_varg_scripts_fixed_update(&mut self, fixed_dt: f32) {
+        self.run_varg_lifecycle("fixedUpdate", fixed_dt, false);
+    }
+
+    fn run_varg_scripts_update(&mut self, dt: f32) {
+        self.run_varg_lifecycle("update", dt, false);
+    }
+
+    fn run_varg_lifecycle(&mut self, hook: &str, dt: f32, once: bool) {
+        let invocations = self
             .scene
             .iter_objects()
             .flat_map(|(entity, object)| {
-                let entity_id = format_entity_id(entity);
                 object
                     .scripts
                     .iter()
-                    .chain(object.components.iter().filter_map(|c| match c {
-                        engine_ecs::ComponentData::Script(s) => Some(s),
-                        _ => None,
-                    }))
-                    .filter(|s| s.legacy_backend.as_deref().unwrap_or("varg") == "rhai")
-                    .map(move |s| (entity_id.clone(), PathBuf::from(&s.source)))
+                    .chain(
+                        object
+                            .components
+                            .iter()
+                            .filter_map(|component| match component {
+                                ComponentData::Script(script) => Some(script),
+                                _ => None,
+                            }),
+                    )
+                    .filter(|script| {
+                        script
+                            .legacy_backend
+                            .as_deref()
+                            .is_none_or(|backend| backend == "varg")
+                    })
+                    .cloned()
+                    .map(move |script| (entity, script))
                     .collect::<Vec<_>>()
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        for (entity_id, script_ref) in &invocations {
-            let Ok(script_path) =
-                resolve_rhai_script_path(script_ref.as_path(), self.project_root.as_deref())
-            else {
+        for (entity, script) in invocations {
+            if once && !script.pending_recovery && script.state.contains_key("__varg_started") {
                 continue;
+            }
+            let script_path = self.resolve_project_path(&script.source);
+            let compiled = match self.load_varg_script(&script_path) {
+                Ok(script) => script.clone(),
+                Err(error) => {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "script".to_string(),
+                        level: "error".to_string(),
+                        message: format!("varg load error: {error}"),
+                        file: Some(script_path),
+                        line: None,
+                    });
+                    continue;
+                }
             };
-            if let Err(error) = self.rhai_script_backend.0.load_script(&script_path) {
+            let transform = self.scene.transforms().local(entity).unwrap_or_default();
+            let mut output = compiled.run_hook(
+                hook,
+                VargRuntimeContext {
+                    transform,
+                    input: self.input.clone(),
+                    delta_time: dt,
+                    exported_values: script.exported_values.clone(),
+                    state: script.state.clone(),
+                },
+            );
+            if once {
+                output
+                    .state
+                    .insert("__varg_started".to_string(), serde_json::Value::Bool(true));
+            }
+            self.scene
+                .transforms_mut()
+                .set_local(entity, output.transform);
+            self.apply_varg_script_state(entity, &script.source, output.state);
+            for message in output.logs {
                 self.diagnostics.push(RuntimeDiagnostic {
                     source: "script".to_string(),
-                    level: "error".to_string(),
-                    message: format!("rhai load error: {error}"),
-                    file: Some(script_path),
+                    level: "info".to_string(),
+                    message,
+                    file: Some(script_path.clone()),
                     line: None,
                 });
-                continue;
             }
-            let scene = std::mem::take(&mut self.scene);
-            self.rhai_script_backend.0.set_scene(scene);
-            match self
-                .rhai_script_backend
-                .0
-                .run_start(entity_id, &script_path)
-            {
-                Ok(Some(entry)) => {
-                    self.diagnostics.push(console_to_runtime_diagnostic(entry));
-                }
-                Err(error) => {
-                    self.diagnostics.push(RuntimeDiagnostic {
-                        source: "script".to_string(),
-                        level: "error".to_string(),
-                        message: format!("rhai start error: {error}"),
-                        file: Some(script_path),
-                        line: None,
-                    });
-                }
-                _ => {}
-            }
-            self.scene = self.rhai_script_backend.0.take_scene().unwrap_or_default();
         }
     }
 
-    #[cfg(feature = "script-rhai")]
-    fn run_rhai_scripts_fixed_update(&mut self, fixed_dt: f32) {
-        self.run_rhai_lifecycle("on_fixed_update", fixed_dt);
-    }
-
-    #[cfg(feature = "script-rhai")]
-    fn run_rhai_scripts_update(&mut self, dt: f32) {
-        self.run_rhai_lifecycle("on_update", dt);
-    }
-
-    #[cfg(feature = "script-rhai")]
-    fn run_rhai_lifecycle(&mut self, stage: &str, dt: f32) {
-        let invocations: Vec<(String, PathBuf)> = self
-            .scene
-            .iter_objects()
-            .flat_map(|(entity, object)| {
-                let entity_id = format_entity_id(entity);
-                object
-                    .scripts
+    fn load_varg_script(&mut self, path: &Path) -> EngineResult<&VargScript> {
+        if !self.varg_script_cache.contains_key(path) {
+            let source = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let (script, diagnostics) = compile_script_source(path, &source);
+            if !diagnostics.is_empty() {
+                let details = diagnostics
                     .iter()
-                    .chain(object.components.iter().filter_map(|c| match c {
-                        engine_ecs::ComponentData::Script(s) => Some(s),
-                        _ => None,
-                    }))
-                    .filter(|s| s.legacy_backend.as_deref().unwrap_or("varg") == "rhai")
-                    .map(move |s| (entity_id.clone(), PathBuf::from(&s.source)))
+                    .map(|diagnostic| {
+                        format!(
+                            "{} at {}:{}: {}",
+                            diagnostic.code,
+                            diagnostic.line.unwrap_or(1),
+                            diagnostic.column.unwrap_or(1),
+                            diagnostic.message
+                        )
+                    })
                     .collect::<Vec<_>>()
-            })
-            .collect();
-
-        if invocations.is_empty() {
-            return;
+                    .join("; ");
+                return Err(EngineError::other(details));
+            }
+            let Some(script) = script else {
+                return Err(EngineError::other("Varg script did not compile"));
+            };
+            self.varg_script_cache.insert(path.to_path_buf(), script);
         }
+        Ok(self.varg_script_cache.get(path).expect("script inserted"))
+    }
 
-        let scene = std::mem::take(&mut self.scene);
-        self.rhai_script_backend.0.set_scene(scene);
-
-        for (entity_id, script_ref) in &invocations {
-            let Ok(script_path) =
-                resolve_rhai_script_path(script_ref.as_path(), self.project_root.as_deref())
-            else {
-                continue;
-            };
-            let result = match stage {
-                "on_fixed_update" => {
-                    self.rhai_script_backend
-                        .0
-                        .run_fixed_update(entity_id, &script_path, dt)
+    fn apply_varg_script_state(
+        &mut self,
+        entity: engine_ecs::Entity,
+        source: &str,
+        state: HashMap<String, serde_json::Value>,
+    ) {
+        if let Some(object) = self.scene.object_mut(entity) {
+            for candidate in &mut object.scripts {
+                if candidate.source == source
+                    && candidate
+                        .legacy_backend
+                        .as_deref()
+                        .is_none_or(|backend| backend == "varg")
+                {
+                    candidate.state = state.clone();
+                    candidate.pending_recovery = false;
                 }
-                _ => self
-                    .rhai_script_backend
-                    .0
-                    .run_update(entity_id, &script_path, dt),
-            };
-            match result {
-                Ok(Some(entry)) => {
-                    self.diagnostics.push(console_to_runtime_diagnostic(entry));
+            }
+            for component in &mut object.components {
+                if let ComponentData::Script(candidate) = component {
+                    if candidate.source == source
+                        && candidate
+                            .legacy_backend
+                            .as_deref()
+                            .is_none_or(|backend| backend == "varg")
+                    {
+                        candidate.state = state.clone();
+                        candidate.pending_recovery = false;
+                    }
                 }
-                Err(error) => {
-                    self.diagnostics.push(RuntimeDiagnostic {
-                        source: "script".to_string(),
-                        level: "error".to_string(),
-                        message: format!("rhai {stage} error: {error}"),
-                        file: Some(script_path),
-                        line: None,
-                    });
-                }
-                _ => {}
             }
         }
+    }
 
-        self.scene = self.rhai_script_backend.0.take_scene().unwrap_or_default();
+    fn resolve_project_path(&self, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            self.project_root
+                .as_ref()
+                .map(|root| root.join(&path))
+                .unwrap_or(path)
+        }
     }
 
     /// Returns true if any key bound to `action_name` was pressed this frame.
@@ -1146,6 +1154,9 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     continue;
                 }
                 let backend = script.legacy_backend.as_deref().unwrap_or("varg");
+                if backend == "varg" {
+                    continue;
+                }
                 let key = format!("{}:{}", backend, script.source);
                 if script.pending_recovery && self.reported_script_errors.insert(key) {
                     self.diagnostics.push(RuntimeDiagnostic {
@@ -2030,18 +2041,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
         }
         Ok(())
     }
-
-    fn resolve_project_path(&self, path: &str) -> PathBuf {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            path
-        } else {
-            self.project_root
-                .as_ref()
-                .map(|root| root.join(&path))
-                .unwrap_or(path)
-        }
-    }
 }
 
 #[cfg(feature = "script-python")]
@@ -2315,7 +2314,7 @@ pub fn runtime_performance_config_from_env() -> RenderPerformanceConfig {
 /// Supported variables are `ASTER_UPSCALER`, `ASTER_RENDER_QUALITY`,
 /// `ASTER_RENDER_SCALE_MIN`, `ASTER_RENDER_SCALE_MAX`, `ASTER_UPSCALE_SHARPNESS`,
 /// `ASTER_TARGET_FPS`, `ASTER_DYNAMIC_RESOLUTION`, `ASTER_BATTERY_POLICY`,
-/// `ASTER_FRAME_GENERATION`, and `ASTER_UI_COMPOSITION`.
+/// `ASTER_FRAME_GENERATION`, `ASTER_UI_COMPOSITION`, and `ASTER_ANTI_ALIASING`.
 pub fn runtime_scaling_settings_from_env() -> RenderScalingSettings {
     apply_runtime_scaling_env(RenderScalingSettings::default())
 }
@@ -2334,6 +2333,7 @@ pub fn render_scaling_settings_from_build(build: &BuildConfiguration) -> RenderS
         battery_policy: parse_battery_policy(&render.battery_policy),
         frame_generation: parse_frame_generation(&render.frame_generation),
         ui_composition: parse_ui_composition(&render.ui_composition),
+        anti_aliasing: parse_anti_aliasing(&render.anti_aliasing),
         ..RenderScalingSettings::default()
     };
     apply_runtime_scaling_env(settings)
@@ -2377,6 +2377,11 @@ fn apply_runtime_scaling_env(mut settings: RenderScalingSettings) -> RenderScali
     }
     if let Ok(value) = std::env::var("ASTER_UI_COMPOSITION") {
         settings.ui_composition = parse_ui_composition(&value);
+    }
+    if let Ok(value) =
+        std::env::var("ASTER_ANTI_ALIASING").or_else(|_| std::env::var("ASTER_RENDER_AA"))
+    {
+        settings.anti_aliasing = parse_anti_aliasing(&value);
     }
     settings.normalized()
 }
@@ -2431,6 +2436,14 @@ fn parse_ui_composition(value: &str) -> UiCompositionPolicy {
         "before-frame-generation" | "before-fg" => UiCompositionPolicy::BeforeFrameGeneration,
         "separate-texture" | "separate" => UiCompositionPolicy::SeparateTexture,
         _ => UiCompositionPolicy::AfterFrameGeneration,
+    }
+}
+
+fn parse_anti_aliasing(value: &str) -> AntiAliasingMode {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" | "disabled" => AntiAliasingMode::Off,
+        "taa" | "temporal" => AntiAliasingMode::Taa,
+        _ => AntiAliasingMode::Taa,
     }
 }
 
@@ -2836,46 +2849,6 @@ pub fn run_project(_project: impl AsRef<Path>) -> EngineResult<()> {
     })
 }
 
-#[cfg(feature = "script-rhai")]
-fn resolve_rhai_script_path(
-    script_path: &Path,
-    project_root: Option<&Path>,
-) -> EngineResult<PathBuf> {
-    let path = if let Ok(stripped) = script_path.strip_prefix("project:/") {
-        project_root
-            .map(|root| root.join(stripped))
-            .ok_or_else(|| EngineError::config("project root is not set"))?
-    } else if script_path.is_absolute() {
-        script_path.to_path_buf()
-    } else {
-        project_root
-            .map(|root| root.join(script_path))
-            .unwrap_or_else(|| script_path.to_path_buf())
-    };
-    Ok(path)
-}
-
-#[cfg(feature = "script-rhai")]
-fn format_entity_id(entity: engine_ecs::Entity) -> String {
-    let handle = entity.handle();
-    format!("{}:{}", handle.slot(), handle.generation().get())
-}
-
-#[cfg(feature = "script-rhai")]
-fn console_to_runtime_diagnostic(entry: engine_editor::ConsoleEntry) -> RuntimeDiagnostic {
-    RuntimeDiagnostic {
-        source: entry.source.subsystem,
-        level: match entry.level {
-            engine_editor::ConsoleLevel::Error => "error".to_string(),
-            engine_editor::ConsoleLevel::Warn => "warning".to_string(),
-            _ => "info".to_string(),
-        },
-        message: entry.message,
-        file: entry.source.file,
-        line: entry.source.line,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3172,12 +3145,77 @@ mod tests {
 
         assert!(services.stats.entity_count >= 2);
         assert!(services.stats.draw_calls >= 1);
-        assert!(
-            services
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.source == "script")
+        assert!(!services.diagnostics.iter().any(|diagnostic| {
+            diagnostic.source == "script" && diagnostic.message.contains("pending backend recovery")
+        }));
+    }
+
+    #[test]
+    fn varg_script_start_and_update_can_move_transform() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("move.varg"),
+            r#"script Move {
+    @export var speed: Float = 2.0
+    var started: Int = 0
+
+    func start() {
+        entity.translate(Vec3(1.0, 0.0, 0.0))
+        state.started = 1
+    }
+
+    func update(_ dt: Float) {
+        entity.translate(Vec3(0.0, 0.0, Input.actionValue("MoveY") * speed))
+        state.ticks += 1
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Scripted").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/move.varg")),
+            )
+            .unwrap();
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Character('w'),
+            ));
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let transform = services.scene.transforms().local(entity).unwrap();
+        assert_eq!(transform.translation.x, 1.0);
+        assert_eq!(transform.translation.z, 2.0);
+        let object = services.scene.object(entity).unwrap();
+        let script = object
+            .components
+            .iter()
+            .find_map(|component| match component {
+                ComponentData::Script(script) => Some(script),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            script.state.get("started").and_then(|value| value.as_f64()),
+            Some(1.0)
         );
+        assert_eq!(
+            script.state.get("ticks").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(script.pending_recovery, false);
     }
 
     #[cfg(feature = "script-python")]

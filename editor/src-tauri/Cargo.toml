@@ -39,7 +39,6 @@ tracing-appender.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor.workspace = true
-engine-script-rhai.workspace = true
 engine-script-varg.workspace = true
 engine-i18n.workspace = true
 engine-packager.workspace = true
@@ -48,7 +47,7 @@ engine-render-wgpu.workspace = true
 engine-assets.workspace = true
 winit.workspace = true
 wgpu.workspace = true
-runtime-min = { workspace = true, features = ["editor", "wgpu", "physics", "script-rhai"] }
+runtime-min = { workspace = true, features = ["editor", "wgpu", "physics"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

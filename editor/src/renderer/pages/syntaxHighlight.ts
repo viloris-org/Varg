@@ -1,5 +1,5 @@
 // ─── Regex-Based Syntax Highlighting ────────────────────────────────────────
-// Simple tokenizer for Varg, Rhai, Python, and Aster model declarations. Returns HTML with <span class="token-*"> wrappers.
+// Simple tokenizer for Varg, Python, and Aster model declarations. Returns HTML with <span class="token-*"> wrappers.
 
 // ─── Token Types ───────────────────────────────────────────────────────────
 
@@ -7,24 +7,6 @@ interface TokenRule {
   pattern: RegExp;
   className: string;
 }
-
-// ─── Rhai ───────────────────────────────────────────────────────────────────
-
-const RHAI_KEYWORDS = /\b(let|const|fn|function|if|else|while|for|in|loop|return|break|continue|true|false|import|export|as|try|catch|throw|switch|case|default|private|public|static|new|this|global|typeof|is|is_def_var|and|or|not|do|until|module|eval|call|curry|shared|sync|sealed|abstract|unit|super|spawn|thread|go|defer)\b/g;
-const RHAI_STRING = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
-const RHAI_NUMBER = /\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g;
-const RHAI_COMMENT_SINGLE = /\/\/[^\n]*/g;
-const RHAI_COMMENT_BLOCK = /\/\*[\s\S]*?\*\//g;
-const RHAI_OPERATOR = /[+\-*/%=!<>&|^~]+/g;
-
-const RHAI_RULES: TokenRule[] = [
-  { pattern: RHAI_COMMENT_BLOCK, className: 'text-[#546E7A] italic' },
-  { pattern: RHAI_COMMENT_SINGLE, className: 'text-[#546E7A] italic' },
-  { pattern: RHAI_STRING, className: 'text-[#C3E88D]' },
-  { pattern: RHAI_KEYWORDS, className: 'text-[#D4D4D8] font-medium' },
-  { pattern: RHAI_NUMBER, className: 'text-[#F78C6C]' },
-  { pattern: RHAI_OPERATOR, className: 'text-[#A1A1AA]' },
-];
 
 // ─── Varg ───────────────────────────────────────────────────────────────────
 
@@ -145,10 +127,6 @@ function tokenizeLine(line: string, rules: TokenRule[]): string {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-export function highlightRhai(source: string): string {
-  return source.split('\n').map(line => tokenizeLine(line, RHAI_RULES)).join('\n');
-}
-
 export function highlightVarg(source: string): string {
   return source.split('\n').map(line => tokenizeLine(line, VARG_RULES)).join('\n');
 }
@@ -161,12 +139,11 @@ export function highlightAmdl(source: string): string {
   return source.split('\n').map(line => tokenizeLine(line, AMDL_RULES)).join('\n');
 }
 
-export type EditorLanguage = 'varg' | 'rhai' | 'python' | 'amdl';
+export type EditorLanguage = 'varg' | 'python' | 'amdl';
 
 export function highlightCode(source: string, language: EditorLanguage): string {
   switch (language) {
     case 'varg': return highlightVarg(source);
-    case 'rhai': return highlightRhai(source);
     case 'python': return highlightPython(source);
     case 'amdl': return highlightAmdl(source);
   }
@@ -174,9 +151,6 @@ export function highlightCode(source: string, language: EditorLanguage): string 
 
 export function detectLanguage(filePath: string): EditorLanguage | null {
   if (filePath.endsWith('.varg') || filePath.endsWith('.vscene') || filePath.endsWith('.vasset')) return 'varg';
-  if (filePath.endsWith('.aster')) return 'rhai';
-  // Keep legacy .rhai projects editable during migration.
-  if (filePath.endsWith('.rhai')) return 'rhai';
   if (filePath.endsWith('.py')) return 'python';
   if (filePath.endsWith('.amdl')) return 'amdl';
   return null;

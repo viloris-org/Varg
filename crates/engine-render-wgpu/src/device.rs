@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use crate::meshes::{MeshBuffers, SkinnedMeshBuffers};
 use engine_core::{Handle, HandleAllocator};
 use engine_render::{
-    ImageDesc, RenderGraph, RenderPerformanceConfig, RenderPerformanceMetrics, RenderStage,
-    RenderTarget, RenderTargetDesc, TemporalCameraData, TemporalFrameState,
+    AntiAliasingMode, ImageDesc, RenderGraph, RenderPerformanceConfig, RenderPerformanceMetrics,
+    RenderStage, RenderTarget, RenderTargetDesc, TemporalCameraData, TemporalFrameState,
 };
 
 /// Native output capabilities exposed by the selected graphics adapter.
@@ -314,6 +314,8 @@ pub struct WgpuRenderDevice {
     pub(crate) taa_bind_group: Option<Arc<wgpu::BindGroup>>,
     /// Frame-level post bind group, cached per output resolution.
     pub(crate) post_cached_bg: Option<Arc<wgpu::BindGroup>>,
+    /// Whether the cached post bind group samples the TAA-resolved HDR target.
+    pub(crate) post_cached_uses_taa: bool,
     pub(crate) post_cached_dims: (u32, u32),
     pub(crate) post_uniform: wgpu::Buffer,
     // Bloom resources
@@ -381,6 +383,7 @@ pub struct WgpuRenderDevice {
     pub(crate) dynamic_resolution: engine_render::DynamicResolutionController,
     pub(crate) performance_metrics: RenderPerformanceMetrics,
     pub(crate) active_upscaler: engine_render::UpscalerKind,
+    pub(crate) anti_aliasing: AntiAliasingMode,
     pub(crate) upscale_sharpness: f32,
     pub(crate) temporal_state: TemporalFrameState,
     pub(crate) latest_temporal_camera: TemporalCameraData,
@@ -410,6 +413,12 @@ pub(crate) struct FrameResources {
     pub(crate) bloom_up_bgs: Vec<Arc<wgpu::BindGroup>>,
     pub(crate) taa_bg: Option<Arc<wgpu::BindGroup>>,
     pub(crate) post_bg: Option<Arc<wgpu::BindGroup>>,
+}
+
+impl FrameResources {
+    pub(crate) fn taa_enabled(&self) -> bool {
+        self.taa_bg.is_some()
+    }
 }
 
 /// A GPU resource pending deferred destruction.

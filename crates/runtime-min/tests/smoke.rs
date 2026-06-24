@@ -1,8 +1,9 @@
 use engine_core::EngineConfig;
 use engine_ecs::{BuildConfiguration, BuildRenderSettings};
 use engine_render::{
-    FrameGenerationKind, RenderFrame, RenderGraphBuilder, RenderPlatformClass, RenderQualityMode,
-    RenderScalingContext, RenderScalingSettings, UiCompositionPolicy, UpscalerKind,
+    AntiAliasingMode, FrameGenerationKind, RenderFrame, RenderGraphBuilder, RenderPlatformClass,
+    RenderQualityMode, RenderScalingContext, RenderScalingSettings, UiCompositionPolicy,
+    UpscalerKind,
 };
 use runtime_min::{
     RuntimeServices, build_default_render_graph, render_scaling_settings_from_build,
@@ -67,6 +68,7 @@ fn build_render_settings_map_frame_generation_and_ui_policy() {
         upscaler: "dlss".to_string(),
         frame_generation: "dlss".to_string(),
         ui_composition: "separate-texture".to_string(),
+        anti_aliasing: "off".to_string(),
         ..BuildRenderSettings::default()
     };
 
@@ -78,6 +80,7 @@ fn build_render_settings_map_frame_generation_and_ui_policy() {
         settings.ui_composition,
         UiCompositionPolicy::SeparateTexture
     );
+    assert_eq!(settings.anti_aliasing, AntiAliasingMode::Off);
 
     let mut services = RuntimeServices::minimal(EngineConfig::default());
     let selection = services.set_render_scaling(settings, RenderScalingContext::default());

@@ -881,27 +881,23 @@ pub struct ViewportTexture {
 /// Script template backend used when creating new script assets.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ScriptTemplateBackend {
-    /// Python script using the runtime-min subprocess context API.
+    /// Varg script using the runtime script component API.
     #[default]
-    Python,
-    /// Aster Script using the engine-script-rhai lifecycle API.
-    Rhai,
+    Varg,
 }
 
 impl ScriptTemplateBackend {
     /// Returns the file extension for this backend.
     pub const fn extension(self) -> &'static str {
         match self {
-            Self::Python => "py",
-            Self::Rhai => "aster",
+            Self::Varg => "varg",
         }
     }
 
     /// Returns the Script component backend identifier.
     pub const fn component_backend(self) -> &'static str {
         match self {
-            Self::Python => "python",
-            Self::Rhai => "rhai",
+            Self::Varg => "",
         }
     }
 }

@@ -29,11 +29,11 @@ pub use resource::{
     SamplerDesc, SamplerHandle, TextureCache,
 };
 pub use scaling::{
-    BatteryPolicy, FrameGenerationCapability, FrameGenerationKind, MobileVendorAdapter,
-    RenderPlatformClass, RenderQualityMode, RenderScalingCapabilities, RenderScalingContext,
-    RenderScalingSelection, RenderScalingSettings, TemporalCameraData, TemporalFrameState,
-    ThermalState, UiCompositionPolicy, UpscalerBackend, UpscalerCapability, UpscalerFrameData,
-    UpscalerKind, negotiate_render_scaling,
+    AntiAliasingMode, BatteryPolicy, FrameGenerationCapability, FrameGenerationKind,
+    MobileVendorAdapter, RenderPlatformClass, RenderQualityMode, RenderScalingCapabilities,
+    RenderScalingContext, RenderScalingSelection, RenderScalingSettings, TemporalCameraData,
+    TemporalFrameState, ThermalState, UiCompositionPolicy, UpscalerBackend, UpscalerCapability,
+    UpscalerFrameData, UpscalerKind, negotiate_render_scaling,
 };
 pub use target::{RenderTarget, RenderTargetDesc, ViewKind};
 pub use visibility::{RenderBounds, RenderLod, VisibilityResult, select_visibility};

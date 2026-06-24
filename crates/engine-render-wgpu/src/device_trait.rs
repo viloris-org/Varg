@@ -207,6 +207,24 @@ impl RenderDevice for WgpuRenderDevice {
         let enable_ssao = false;
         let enable_ssgi = self.screen_space_gi_enabled(world);
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+        if plan.temporal_inputs {
+            let (temporal_camera, reset_history) =
+                temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
+            self.latest_temporal_camera = temporal_camera;
+            self.reset_temporal_history = reset_history || frame.frame_index == 0;
+        }
+        self.upload_temporal_uniform();
+        let uniform = if plan.temporal_inputs {
+            camera_uniform_with_view_projection(
+                world,
+                aspect,
+                crate::render::mat4_from_flat(self.latest_temporal_camera.view_projection),
+            )
+        } else {
+            camera_uniform_from_world(world, aspect)
+        };
+        self.queue
+            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
         let frame_res = self.encode_frame_passes(
             &batches,
             &csm,
@@ -226,24 +244,6 @@ impl RenderDevice for WgpuRenderDevice {
             enable_ssgi,
             enable_bloom,
         );
-        if plan.temporal_inputs {
-            let (temporal_camera, reset_history) =
-                temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
-            self.latest_temporal_camera = temporal_camera;
-            self.reset_temporal_history = reset_history || frame.frame_index == 0;
-        }
-        self.upload_temporal_uniform();
-        let uniform = if plan.temporal_inputs {
-            camera_uniform_with_view_projection(
-                world,
-                aspect,
-                crate::render::mat4_from_flat(self.latest_temporal_camera.view_projection),
-            )
-        } else {
-            camera_uniform_from_world(world, aspect)
-        };
-        self.queue
-            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
 
         let target = self
             .targets
@@ -360,6 +360,13 @@ impl RenderDevice for WgpuRenderDevice {
             selection.render_scale,
         );
         self.active_upscaler = selection.upscaler;
+        if self.anti_aliasing != settings.anti_aliasing {
+            self.temporal_state.reset();
+            self.reset_temporal_history = true;
+            self.taa_bind_group = None;
+            self.post_cached_bg = None;
+        }
+        self.anti_aliasing = settings.anti_aliasing;
         self.upscale_sharpness = settings.sharpness;
         self.performance_metrics.render_scale = self.dynamic_resolution.scale();
         self.performance_metrics.upscaler = self.active_upscaler;

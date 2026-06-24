@@ -517,7 +517,7 @@ mod tests {
         let journal = RollbackJournal {
             file_operations: vec![
                 FileRollbackEntry {
-                    path: "scripts/player.aster".into(),
+                    path: "scripts/player.varg".into(),
                     operation: FileOperation::Create,
                     before_content: None,
                     after_content: Some("fn on_start() {}".into()),

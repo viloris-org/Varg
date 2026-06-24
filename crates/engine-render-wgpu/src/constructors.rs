@@ -2797,6 +2797,7 @@ impl WgpuRenderDevice {
             taa_bind_group_layout,
             taa_bind_group: None,
             post_cached_bg: None,
+            post_cached_uses_taa: false,
             post_cached_dims: (0, 0),
             post_uniform,
             bloom_pipeline_downsample: None,
@@ -2864,6 +2865,7 @@ impl WgpuRenderDevice {
                 ..RenderPerformanceMetrics::default()
             },
             active_upscaler: engine_render::UpscalerKind::Native,
+            anti_aliasing: engine_render::AntiAliasingMode::Taa,
             upscale_sharpness: 0.35,
             temporal_state: engine_render::TemporalFrameState::default(),
             latest_temporal_camera: engine_render::TemporalCameraData::default(),

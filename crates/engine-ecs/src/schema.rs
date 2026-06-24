@@ -589,6 +589,8 @@ pub struct BuildRenderSettings {
     pub frame_generation: String,
     /// UI composition policy name.
     pub ui_composition: String,
+    /// Anti-aliasing algorithm name.
+    pub anti_aliasing: String,
 }
 
 impl Default for BuildRenderSettings {
@@ -604,6 +606,7 @@ impl Default for BuildRenderSettings {
             battery_policy: "balanced".to_owned(),
             frame_generation: "disabled".to_owned(),
             ui_composition: "after-frame-generation".to_owned(),
+            anti_aliasing: "taa".to_owned(),
         }
     }
 }

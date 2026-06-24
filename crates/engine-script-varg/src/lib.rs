@@ -3,10 +3,13 @@
 
 //! Varg language parser and diagnostics.
 //!
-//! This crate owns the public Varg authoring surface. Execution backends such as
-//! Rhai remain implementation details behind this language service.
+//! This crate owns the public Varg authoring surface and the MVP runtime
+//! interpreter used by the engine while the full compiler is built out.
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use engine_core::math::{Transform, Vec3};
 
 /// Varg source role inferred from extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,6 +114,108 @@ pub struct VargExport {
     pub line: usize,
 }
 
+/// Compiled Varg script summary used by the MVP runtime.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VargScript {
+    /// Script declaration name.
+    pub name: String,
+    /// Editor-exposed properties.
+    pub exports: Vec<VargExport>,
+    /// Mutable script state variable defaults.
+    pub state_defaults: HashMap<String, serde_json::Value>,
+    /// Lifecycle hook bodies keyed by reserved hook name.
+    hooks: HashMap<String, Vec<RuntimeStatement>>,
+}
+
+/// Per-invocation context passed to the Varg script runtime.
+#[derive(Clone, Debug)]
+pub struct VargRuntimeContext {
+    /// Local transform for the entity this script is attached to.
+    pub transform: Transform,
+    /// Frame input state.
+    pub input: engine_platform::InputState,
+    /// Delta time for the lifecycle call.
+    pub delta_time: f32,
+    /// Editor-exposed overrides keyed by exported property name.
+    pub exported_values: HashMap<String, serde_json::Value>,
+    /// Persistent script state keyed by state variable name.
+    pub state: HashMap<String, serde_json::Value>,
+}
+
+/// Result of executing one lifecycle hook.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VargRuntimeOutput {
+    /// Updated local transform.
+    pub transform: Transform,
+    /// Updated persistent state.
+    pub state: HashMap<String, serde_json::Value>,
+    /// Log entries emitted by `log(...)`.
+    pub logs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RuntimeStatement {
+    Log(String),
+    Translate(Expression),
+    AddToPosition {
+        axis: Axis,
+        value: Expression,
+    },
+    AssignState {
+        name: String,
+        value: Expression,
+    },
+    AddToState {
+        name: String,
+        value: Expression,
+    },
+    SubFromState {
+        name: String,
+        value: Expression,
+    },
+    If {
+        condition: ConditionExpression,
+        statements: Vec<RuntimeStatement>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ConditionExpression {
+    InputPressed(String),
+    ActionDown(String),
+    StateGreaterThan { name: String, value: Expression },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Expression {
+    Number(f32),
+    String(String),
+    Bool(bool),
+    Variable(String),
+    Member(String, String),
+    Vec3(Box<Expression>, Box<Expression>, Box<Expression>),
+    Binary {
+        op: BinaryOp,
+        lhs: Box<Expression>,
+        rhs: Box<Expression>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
 /// Parses and validates Varg source for the path role.
 pub fn diagnose_source(path: impl AsRef<Path>, source: &str) -> Vec<VargDiagnostic> {
     let role = VargFileRole::from_path(path);
@@ -142,6 +247,80 @@ pub fn parse_source_lossy(
     let ast = parser.parse();
     let diagnostics = parser.diagnostics;
     (ast, diagnostics)
+}
+
+/// Compiles a `.varg` script into the MVP executable runtime summary.
+pub fn compile_script_source(
+    path: impl AsRef<Path>,
+    source: &str,
+) -> (Option<VargScript>, Vec<VargDiagnostic>) {
+    let (ast, mut diagnostics) = parse_source(path, source);
+    let Some(ast) = ast else {
+        return (None, diagnostics);
+    };
+    let Some(declaration) = ast
+        .declarations
+        .iter()
+        .find(|declaration| declaration.kind == "script")
+    else {
+        diagnostics.push(VargDiagnostic {
+            code: "VARG3003".to_string(),
+            severity: VargDiagnosticSeverity::Error,
+            line: Some(1),
+            column: Some(1),
+            message: "logic file does not contain a script declaration".to_string(),
+            expected: "`script Name { ... }`".to_string(),
+            suggestion: "Add a script declaration or attach a file that contains one.".to_string(),
+            blocking: true,
+            source_line: source.lines().next().map(str::to_string),
+        });
+        return (None, diagnostics);
+    };
+    let mut script = VargScript {
+        name: declaration
+            .name
+            .clone()
+            .unwrap_or_else(|| "UnnamedScript".to_string()),
+        exports: declaration.exports.clone(),
+        state_defaults: HashMap::new(),
+        hooks: HashMap::new(),
+    };
+    compile_runtime_blocks(source, &mut script);
+    (Some(script), diagnostics)
+}
+
+impl VargScript {
+    /// Executes a lifecycle hook if the script defines it.
+    pub fn run_hook(&self, hook: &str, mut context: VargRuntimeContext) -> VargRuntimeOutput {
+        for (name, value) in &self.state_defaults {
+            context
+                .state
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+
+        let mut output = VargRuntimeOutput {
+            transform: context.transform,
+            state: context.state,
+            logs: Vec::new(),
+        };
+        let Some(statements) = self.hooks.get(hook) else {
+            return output;
+        };
+        let mut env = RuntimeEnvironment {
+            script: self,
+            input: &context.input,
+            delta_time: context.delta_time,
+            exported_values: &context.exported_values,
+            transform: &mut output.transform,
+            state: &mut output.state,
+            logs: &mut output.logs,
+        };
+        for statement in statements {
+            env.execute(statement);
+        }
+        output
+    }
 }
 
 struct Parser<'a> {
@@ -525,6 +704,499 @@ fn looks_like_top_level_declaration(line: &str) -> bool {
 
 fn normalize_params(params: &str) -> String {
     params.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+struct RuntimeEnvironment<'a> {
+    script: &'a VargScript,
+    input: &'a engine_platform::InputState,
+    delta_time: f32,
+    exported_values: &'a HashMap<String, serde_json::Value>,
+    transform: &'a mut Transform,
+    state: &'a mut HashMap<String, serde_json::Value>,
+    logs: &'a mut Vec<String>,
+}
+
+impl RuntimeEnvironment<'_> {
+    fn execute(&mut self, statement: &RuntimeStatement) {
+        match statement {
+            RuntimeStatement::Log(message) => self.logs.push(message.clone()),
+            RuntimeStatement::Translate(expression) => {
+                let delta = self.eval_vec3(expression);
+                self.transform.translation += delta;
+            }
+            RuntimeStatement::AddToPosition { axis, value } => {
+                let value = self.eval_number(value);
+                match axis {
+                    Axis::X => self.transform.translation.x += value,
+                    Axis::Y => self.transform.translation.y += value,
+                    Axis::Z => self.transform.translation.z += value,
+                }
+            }
+            RuntimeStatement::AssignState { name, value } => {
+                let value = self.eval_json(value);
+                self.state.insert(name.clone(), value);
+            }
+            RuntimeStatement::AddToState { name, value } => {
+                let current = self.state_number(name);
+                let next = current + self.eval_number(value);
+                self.state
+                    .insert(name.clone(), serde_json::Value::from(next as f64));
+            }
+            RuntimeStatement::SubFromState { name, value } => {
+                let current = self.state_number(name);
+                let next = current - self.eval_number(value);
+                self.state
+                    .insert(name.clone(), serde_json::Value::from(next as f64));
+            }
+            RuntimeStatement::If {
+                condition,
+                statements,
+            } => {
+                if self.eval_condition(condition) {
+                    for statement in statements {
+                        self.execute(statement);
+                    }
+                }
+            }
+        }
+    }
+
+    fn eval_condition(&self, condition: &ConditionExpression) -> bool {
+        match condition {
+            ConditionExpression::InputPressed(action) | ConditionExpression::ActionDown(action) => {
+                action_pressed(self.input, action)
+            }
+            ConditionExpression::StateGreaterThan { name, value } => {
+                self.state_number(name) > self.eval_number(value)
+            }
+        }
+    }
+
+    fn eval_vec3(&self, expression: &Expression) -> Vec3 {
+        match expression {
+            Expression::Vec3(x, y, z) => Vec3::new(
+                self.eval_number(x),
+                self.eval_number(y),
+                self.eval_number(z),
+            ),
+            _ => Vec3::new(self.eval_number(expression), 0.0, 0.0),
+        }
+    }
+
+    fn eval_json(&self, expression: &Expression) -> serde_json::Value {
+        match expression {
+            Expression::String(value) => serde_json::Value::String(value.clone()),
+            Expression::Bool(value) => serde_json::Value::Bool(*value),
+            _ => serde_json::Value::from(self.eval_number(expression) as f64),
+        }
+    }
+
+    fn eval_number(&self, expression: &Expression) -> f32 {
+        match expression {
+            Expression::Number(value) => *value,
+            Expression::String(_) => 0.0,
+            Expression::Bool(value) => {
+                if *value {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Expression::Variable(name) => self.variable_number(name),
+            Expression::Member(owner, field) => self.member_number(owner, field),
+            Expression::Vec3(_, _, _) => 0.0,
+            Expression::Binary { op, lhs, rhs } => {
+                let lhs = self.eval_number(lhs);
+                let rhs = self.eval_number(rhs);
+                match op {
+                    BinaryOp::Add => lhs + rhs,
+                    BinaryOp::Sub => lhs - rhs,
+                    BinaryOp::Mul => lhs * rhs,
+                    BinaryOp::Div => {
+                        if rhs.abs() <= f32::EPSILON {
+                            0.0
+                        } else {
+                            lhs / rhs
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn variable_number(&self, name: &str) -> f32 {
+        if name == "dt" {
+            return self.delta_time;
+        }
+        if let Some(value) = self
+            .exported_values
+            .get(name)
+            .or_else(|| self.state.get(name))
+            .and_then(json_number)
+        {
+            return value;
+        }
+        self.script
+            .exports
+            .iter()
+            .find(|export| export.name == name)
+            .and_then(|export| export.default_value.as_ref())
+            .and_then(|value| parse_default_literal(value))
+            .and_then(|value| json_number(&value))
+            .unwrap_or(0.0)
+    }
+
+    fn member_number(&self, owner: &str, field: &str) -> f32 {
+        match (owner, field) {
+            ("entity.position", "x") | ("position", "x") => self.transform.translation.x,
+            ("entity.position", "y") | ("position", "y") => self.transform.translation.y,
+            ("entity.position", "z") | ("position", "z") => self.transform.translation.z,
+            ("Input", "moveX") => self.input.action_value("MoveX"),
+            ("Input", "moveY") => self.input.action_value("MoveY"),
+            ("InputAction", action) => self.input.action_value(action),
+            _ => self
+                .state
+                .get(owner)
+                .and_then(|value| value.get(field))
+                .and_then(json_number)
+                .unwrap_or(0.0),
+        }
+    }
+
+    fn state_number(&self, name: &str) -> f32 {
+        self.state.get(name).and_then(json_number).unwrap_or(0.0)
+    }
+}
+
+fn compile_runtime_blocks(source: &str, script: &mut VargScript) {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let trimmed = strip_line_comment(lines[index]).trim();
+        if trimmed.starts_with("var ") {
+            if let Some((name, value)) = parse_state_default(trimmed) {
+                script.state_defaults.insert(name, value);
+            }
+        }
+        if let Some(signature) = parse_function_signature(trimmed) {
+            let (body, next) = collect_block(&lines, index);
+            let mut body_index = 0usize;
+            let statements = parse_runtime_statements(&body, &mut body_index);
+            script.hooks.insert(signature.name, statements);
+            index = next;
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn parse_runtime_statements(lines: &[String], index: &mut usize) -> Vec<RuntimeStatement> {
+    let mut statements = Vec::new();
+    while *index < lines.len() {
+        let trimmed = strip_line_comment(&lines[*index]).trim();
+        *index += 1;
+        if trimmed.is_empty() || trimmed == "}" {
+            continue;
+        }
+        if let Some(condition) = parse_if_condition(trimmed) {
+            let nested = collect_inline_or_block(lines, index);
+            let mut nested_index = 0usize;
+            statements.push(RuntimeStatement::If {
+                condition,
+                statements: parse_runtime_statements(&nested, &mut nested_index),
+            });
+            continue;
+        }
+        if let Some(statement) = parse_runtime_statement(trimmed) {
+            statements.push(statement);
+        }
+    }
+    statements
+}
+
+fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
+    if let Some(content) = function_args(line, "log") {
+        return parse_string_literal(content).map(RuntimeStatement::Log);
+    }
+    if let Some(content) = method_args(line, "entity.translate") {
+        return parse_expression(content).map(RuntimeStatement::Translate);
+    }
+    if let Some((axis, value)) = parse_position_add(line) {
+        return Some(RuntimeStatement::AddToPosition {
+            axis,
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some((name, value)) = parse_state_add(line) {
+        return Some(RuntimeStatement::AddToState {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some((name, value)) = parse_state_sub(line) {
+        return Some(RuntimeStatement::SubFromState {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some((name, value)) = parse_state_assignment(line) {
+        return Some(RuntimeStatement::AssignState {
+            name: name.to_string(),
+            value: parse_expression(value)?,
+        });
+    }
+    None
+}
+
+fn parse_if_condition(line: &str) -> Option<ConditionExpression> {
+    let rest = line.strip_prefix("if ")?.trim();
+    let condition = rest.strip_suffix('{').unwrap_or(rest).trim();
+    if let Some(action) = function_args(condition, "Input.pressed") {
+        return parse_string_literal(action).map(ConditionExpression::InputPressed);
+    }
+    if let Some(action) = function_args(condition, "Input.actionDown") {
+        return parse_string_literal(action).map(ConditionExpression::ActionDown);
+    }
+    if let Some((lhs, rhs)) = condition.split_once('>') {
+        let lhs = lhs.trim();
+        let rhs = rhs.trim();
+        let name = lhs.strip_prefix("state.").unwrap_or(lhs).trim();
+        return Some(ConditionExpression::StateGreaterThan {
+            name: name.to_string(),
+            value: parse_expression(rhs)?,
+        });
+    }
+    None
+}
+
+fn parse_expression(source: &str) -> Option<Expression> {
+    let source = source.trim().trim_end_matches(';').trim();
+    parse_binary_expression(source, &[('+', BinaryOp::Add), ('-', BinaryOp::Sub)])
+        .or_else(|| parse_binary_expression(source, &[('*', BinaryOp::Mul), ('/', BinaryOp::Div)]))
+        .or_else(|| parse_atom(source))
+}
+
+fn parse_binary_expression(source: &str, ops: &[(char, BinaryOp)]) -> Option<Expression> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let chars = source.char_indices().collect::<Vec<_>>();
+    for (index, ch) in chars.into_iter().rev() {
+        match ch {
+            '"' => in_string = !in_string,
+            ')' if !in_string => depth += 1,
+            '(' if !in_string => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if in_string || depth != 0 {
+            continue;
+        }
+        if let Some((_, op)) = ops.iter().find(|(candidate, _)| *candidate == ch) {
+            if index == 0 {
+                continue;
+            }
+            let lhs = parse_expression(&source[..index])?;
+            let rhs = parse_expression(&source[index + ch.len_utf8()..])?;
+            return Some(Expression::Binary {
+                op: *op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            });
+        }
+    }
+    None
+}
+
+fn parse_atom(source: &str) -> Option<Expression> {
+    if let Ok(number) = source.parse::<f32>() {
+        return Some(Expression::Number(number));
+    }
+    if source == "true" {
+        return Some(Expression::Bool(true));
+    }
+    if source == "false" {
+        return Some(Expression::Bool(false));
+    }
+    if let Some(value) = parse_string_literal(source) {
+        return Some(Expression::String(value));
+    }
+    if let Some(content) = function_args(source, "Vec3") {
+        let parts = split_top_level_commas(content);
+        if parts.len() == 3 {
+            return Some(Expression::Vec3(
+                Box::new(parse_expression(parts[0])?),
+                Box::new(parse_expression(parts[1])?),
+                Box::new(parse_expression(parts[2])?),
+            ));
+        }
+    }
+    if let Some(action) = function_args(source, "Input.axis") {
+        let action = parse_string_literal(action)?;
+        return Some(match action.as_str() {
+            "move" => Expression::Member("Input".to_string(), "moveY".to_string()),
+            "moveX" => Expression::Member("Input".to_string(), "moveX".to_string()),
+            "moveY" => Expression::Member("Input".to_string(), "moveY".to_string()),
+            _ => Expression::Variable(action),
+        });
+    }
+    if let Some(action) = function_args(source, "Input.actionValue") {
+        return parse_string_literal(action)
+            .map(|action| Expression::Member("InputAction".to_string(), action));
+    }
+    if let Some((owner, field)) = source.rsplit_once('.') {
+        return Some(Expression::Member(
+            owner.trim().to_string(),
+            field.trim().to_string(),
+        ));
+    }
+    Some(Expression::Variable(source.to_string()))
+}
+
+fn parse_state_default(line: &str) -> Option<(String, serde_json::Value)> {
+    let rest = line.strip_prefix("var ")?.trim();
+    let (name, after_name) = rest.split_once(':')?;
+    let (_, value) = after_name.split_once('=')?;
+    Some((
+        name.trim().to_string(),
+        parse_default_literal(value.trim())?,
+    ))
+}
+
+fn parse_default_literal(value: &str) -> Option<serde_json::Value> {
+    let value = value.trim().trim_end_matches(';').trim();
+    if let Ok(number) = value.parse::<f64>() {
+        return Some(serde_json::Value::from(number));
+    }
+    if value == "true" {
+        return Some(serde_json::Value::Bool(true));
+    }
+    if value == "false" {
+        return Some(serde_json::Value::Bool(false));
+    }
+    parse_string_literal(value).map(serde_json::Value::String)
+}
+
+fn parse_position_add(line: &str) -> Option<(Axis, &str)> {
+    let (lhs, rhs) = line.split_once("+=")?;
+    let axis = match lhs.trim() {
+        "entity.position.x" | "position.x" => Axis::X,
+        "entity.position.y" | "position.y" => Axis::Y,
+        "entity.position.z" | "position.z" => Axis::Z,
+        _ => return None,
+    };
+    Some((axis, rhs.trim()))
+}
+
+fn parse_state_add(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once("+=")?;
+    lhs.trim()
+        .strip_prefix("state.")
+        .map(|name| (name, rhs.trim()))
+        .or_else(|| Some((lhs.trim(), rhs.trim())))
+}
+
+fn parse_state_sub(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once("-=")?;
+    lhs.trim()
+        .strip_prefix("state.")
+        .map(|name| (name, rhs.trim()))
+        .or_else(|| Some((lhs.trim(), rhs.trim())))
+}
+
+fn parse_state_assignment(line: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    lhs.trim()
+        .strip_prefix("state.")
+        .map(|name| (name, rhs.trim()))
+}
+
+fn collect_inline_or_block(lines: &[String], index: &mut usize) -> Vec<String> {
+    let mut collected = Vec::new();
+    let mut depth = 1isize;
+    while *index < lines.len() {
+        let line = lines[*index].clone();
+        *index += 1;
+        let trimmed = strip_line_comment(&line).trim();
+        depth += trimmed.matches('{').count() as isize;
+        depth -= trimmed.matches('}').count() as isize;
+        if depth <= 0 {
+            break;
+        }
+        collected.push(line);
+    }
+    collected
+}
+
+fn collect_block(lines: &[&str], start: usize) -> (Vec<String>, usize) {
+    let mut body = Vec::new();
+    let mut depth =
+        lines[start].matches('{').count() as isize - lines[start].matches('}').count() as isize;
+    let mut index = start + 1;
+    while index < lines.len() {
+        let line = lines[index];
+        depth += line.matches('{').count() as isize;
+        depth -= line.matches('}').count() as isize;
+        if depth <= 0 {
+            return (body, index + 1);
+        }
+        body.push(line.to_string());
+        index += 1;
+    }
+    (body, index)
+}
+
+fn function_args<'a>(line: &'a str, function: &str) -> Option<&'a str> {
+    let rest = line.trim().strip_prefix(function)?.trim();
+    Some(rest.strip_prefix('(')?.strip_suffix(')')?.trim())
+}
+
+fn method_args<'a>(line: &'a str, method: &str) -> Option<&'a str> {
+    function_args(line.trim_end_matches(';'), method)
+}
+
+fn parse_string_literal(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value.strip_prefix('"')?;
+    let end = value.rfind('"')?;
+    Some(value[..end].to_string())
+}
+
+fn split_top_level_commas(source: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => depth = depth.saturating_sub(1),
+            ',' if !in_string && depth == 0 => {
+                parts.push(source[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(source[start..].trim());
+    parts
+}
+
+fn json_number(value: &serde_json::Value) -> Option<f32> {
+    value.as_f64().map(|number| number as f32)
+}
+
+fn action_pressed(input: &engine_platform::InputState, action: &str) -> bool {
+    match action {
+        "jump" => input.key_down(engine_platform::KeyCode::Space),
+        "moveForward" | "MoveForward" => input.action_down("MoveForward"),
+        "moveBackward" | "MoveBackward" => input.action_down("MoveBackward"),
+        "moveLeft" | "MoveLeft" => input.action_down("MoveLeft"),
+        "moveRight" | "MoveRight" => input.action_down("MoveRight"),
+        other => input.action_down(other),
+    }
 }
 
 #[cfg(test)]

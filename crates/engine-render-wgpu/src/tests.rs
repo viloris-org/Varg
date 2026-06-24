@@ -71,6 +71,22 @@ fn frame_pipeline_plan_recognizes_hybrid_deferred_boundaries() {
 }
 
 #[test]
+fn frame_resources_report_taa_only_when_resolve_bind_group_exists() {
+    let resources = FrameResources {
+        ssao_bg: None,
+        ssao_view: None,
+        ssgi_bg: None,
+        ssgi_view: None,
+        bloom_down_bgs: Vec::new(),
+        bloom_up_bgs: Vec::new(),
+        taa_bg: None,
+        post_bg: None,
+    };
+
+    assert!(!resources.taa_enabled());
+}
+
+#[test]
 fn dynamic_resolution_preserves_4k_output_with_scaled_internal_target() {
     assert_eq!(scaled_render_size(3840, 2160, 1.0), (3840, 2160));
     assert_eq!(scaled_render_size(3840, 2160, 0.75), (2880, 1620));
@@ -210,6 +226,7 @@ fn taa_shader_reprojects_and_clamps_history_for_antialiasing() {
     assert!(TAA_SHADER.contains("var history_tex: texture_2d<f32>"));
     assert!(TAA_SHADER.contains("var motion_tex: texture_2d<f32>"));
     assert!(TAA_SHADER.contains("history_uv = uv - motion"));
+    assert!(TAA_SHADER.contains("post.taa_enabled < 0.5"));
     assert!(TAA_SHADER.contains("clamp(history, neighborhood_min, neighborhood_max)"));
     assert!(TAA_SHADER.contains("post.taa_history_weight"));
     assert!(POST_SHADER.contains("let hdr = resolve_hdr(input.uv)"));

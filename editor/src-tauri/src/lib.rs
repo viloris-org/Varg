@@ -281,31 +281,6 @@ fn validate_file_name(name: &str) -> EngineResult<()> {
     }
 }
 
-fn format_script_diagnostics(
-    path: &str,
-    diagnostics: &[engine_script_rhai::AsterScriptDiagnostic],
-) -> String {
-    let details = diagnostics
-        .iter()
-        .map(|diagnostic| {
-            let location = match (diagnostic.line, diagnostic.column) {
-                (Some(line), Some(column)) => format!("{path}:{line}:{column}"),
-                (Some(line), None) => format!("{path}:{line}"),
-                _ => path.to_owned(),
-            };
-            format!(
-                "{} {}: {} Suggestion: {}",
-                diagnostic.code, location, diagnostic.message, diagnostic.suggestion
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Rhai script validation failed with {} diagnostic(s):\n{details}",
-        diagnostics.len()
-    )
-}
-
 fn format_varg_diagnostics(
     path: &str,
     diagnostics: &[engine_script_varg::VargDiagnostic],
@@ -3642,15 +3617,6 @@ impl EditorHost {
                     &diagnostics,
                 )));
             }
-        } else if matches!(extension, Some("aster" | "rhai")) {
-            let backend = engine_script_rhai::RhaiScriptBackend::new();
-            let diagnostics = backend.diagnose_source(&full_path, content);
-            if !diagnostics.is_empty() {
-                return Err(EngineError::config(format_script_diagnostics(
-                    path_str,
-                    &diagnostics,
-                )));
-            }
         }
 
         // Ensure parent directory exists
@@ -3711,26 +3677,18 @@ impl EditorHost {
                 .unwrap_or(serde_json::Value::Null);
             (diagnostics, ast)
         } else {
-            let backend = engine_script_rhai::RhaiScriptBackend::new();
-            let diagnostics = backend
-                .diagnose_source(&full_path, source)
-                .into_iter()
-                .map(|diagnostic| {
-                    serde_json::json!({
-                        "code": diagnostic.code,
-                        "severity": match diagnostic.severity {
-                            engine_script_rhai::AsterDiagnosticSeverity::Error => "error",
-                            engine_script_rhai::AsterDiagnosticSeverity::Warning => "warning",
-                        },
-                        "line": diagnostic.line,
-                        "column": diagnostic.column,
-                        "message": diagnostic.message,
-                        "suggestion": diagnostic.suggestion,
-                        "source_line": diagnostic.source_line,
-                    })
-                })
-                .collect::<Vec<_>>();
-            (diagnostics, serde_json::Value::Null)
+            (
+                vec![serde_json::json!({
+                    "code": "VARG0000",
+                    "severity": "error",
+                    "line": null,
+                    "column": null,
+                    "message": "unsupported script file extension",
+                    "suggestion": "Use .varg for runtime scripts, .vscene for scenes, or .vasset for assets.",
+                    "source_line": null,
+                })],
+                serde_json::Value::Null,
+            )
         };
         Ok(serde_json::json!({
             "valid": diagnostics.is_empty(),
@@ -4628,17 +4586,27 @@ impl EditorHost {
             .unwrap_or_default();
         let attached_knowledge = self.selected_approved_knowledge(&selected_knowledge_ids)?;
         let knowledge_context = format_editor_knowledge_context(&attached_knowledge);
+        let editor_context = params
+            .get("editor_context")
+            .map(|context| {
+                format!(
+                    "\n\n[Editor Context]\n{}",
+                    serde_json::to_string_pretty(context).unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
 
-        // Build enriched prompt with selected entity and explicit Knowledge context.
+        // Build enriched prompt with explicit editor, entity, and Knowledge context.
         let enriched_prompt = if let Some(entity) = params.get("selected_entity") {
             format!(
-                "{}{}\n\n[Selected Entity Context]\n{}",
+                "{}{}{}\n\n[Selected Entity Context]\n{}",
                 prompt,
+                editor_context,
                 knowledge_context,
                 serde_json::to_string_pretty(entity).unwrap_or_default()
             )
         } else {
-            format!("{prompt}{knowledge_context}")
+            format!("{prompt}{editor_context}{knowledge_context}")
         };
 
         let scene = self.scene_clone_for_agent()?;
@@ -7265,8 +7233,8 @@ fn copilot_execution_summary(
 
 /// Thread-safe wrapper for `EditorHost`.
 ///
-/// `EditorHost` transitively contains `rhai::Engine` (`!Send`) via
-/// `RuntimeServices`, so it cannot be made `Send`. This wrapper uses
+/// `EditorHost` is accessed from synchronous Tauri commands and may hold
+/// platform-bound runtime state. This wrapper uses
 /// `UnsafeCell` + `Mutex<()>` to provide exclusive access while
 /// recording the creating thread ID at construction.
 ///
@@ -8736,11 +8704,11 @@ mod tests {
     fn existing_asset_paths_resolve_under_asset_root() {
         let temp = tempfile::tempdir().unwrap();
         let asset_root = temp.path().join("assets");
-        let script_path = asset_root.join("scripts/player.aster");
+        let script_path = asset_root.join("scripts/player.varg");
         fs::create_dir_all(script_path.parent().unwrap()).unwrap();
-        fs::write(&script_path, "fn on_start() {}").unwrap();
+        fs::write(&script_path, "script Player { func start() {} }").unwrap();
 
-        let resolved = resolve_existing_relative_path(&asset_root, "scripts/player.aster").unwrap();
+        let resolved = resolve_existing_relative_path(&asset_root, "scripts/player.varg").unwrap();
 
         assert_eq!(resolved, script_path.canonicalize().unwrap());
     }
@@ -8761,14 +8729,14 @@ mod tests {
         fs::create_dir_all(&asset_root).unwrap();
 
         let resolved =
-            resolve_writable_relative_path(&asset_root, "scripts/new_script.aster").unwrap();
+            resolve_writable_relative_path(&asset_root, "scripts/new_script.varg").unwrap();
 
         assert_eq!(
             resolved,
             asset_root
                 .canonicalize()
                 .unwrap()
-                .join("scripts/new_script.aster")
+                .join("scripts/new_script.varg")
         );
     }
 
