@@ -1318,12 +1318,10 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
             ));
             ctx.project.scene.upsert_component(
                 entity,
-                engine_ecs::ComponentData::Script(engine_ecs::ScriptComponentProxy {
+                engine_ecs::ComponentData::Script(engine_ecs::ScriptComponent {
                     source: String::new(),
                     exported_values: Default::default(),
                     state: Default::default(),
-                    legacy_backend: None,
-                    pending_recovery: false,
                 }),
             )?;
             Ok(UndoCommand::new(

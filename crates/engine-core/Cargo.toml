@@ -13,8 +13,7 @@ runtime-min = []
 runtime-game = ["runtime-min"]
 editor = []
 agent-tools = []
-script-python = []
-dev-full = ["runtime-game", "editor", "agent-tools", "script-python"]
+dev-full = ["runtime-game", "editor", "agent-tools"]
 
 [dependencies]
 serde.workspace = true

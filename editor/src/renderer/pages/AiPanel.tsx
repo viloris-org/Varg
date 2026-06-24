@@ -16,7 +16,7 @@ import {
   IconSend, IconBot, IconCheck, IconX, IconAlertCircle,
   IconChevronDown, IconChevronRight, IconInfo, IconLoader,
   IconSave, IconUndo, IconPlay, IconSettings, IconSparkles, IconRefresh,
-  IconBrain,
+  IconBrain, IconFile,
 } from '../icons';
 
 const cls = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ');
@@ -203,8 +203,7 @@ interface CopilotSettingsFull {
   allowed_commands?: string[];
 }
 
-function ModelSelector() {
-  const { t } = useTranslation();
+function useModelOptions() {
   const [currentModel, setCurrentModel] = useState<string>('');
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -245,7 +244,7 @@ function ModelSelector() {
 
   useEffect(() => { loadModels(); }, [loadModels]);
 
-  const handleChange = useCallback(async (modelId: string) => {
+  const selectModel = useCallback(async (modelId: string) => {
     setCurrentModel(modelId);
     const settings = await rpc<CopilotSettingsFull>('app/get_copilot_settings').catch(() => null);
     if (settings) {
@@ -253,6 +252,27 @@ function ModelSelector() {
       await rpc('app/update_copilot_settings', { ...payload, model: modelId });
     }
   }, []);
+
+  return {
+    currentModel,
+    models,
+    loading,
+    discoveryError,
+    loadModels,
+    selectModel,
+  };
+}
+
+function ModelSelector() {
+  const { t } = useTranslation();
+  const {
+    currentModel,
+    models,
+    loading,
+    discoveryError,
+    loadModels,
+    selectModel,
+  } = useModelOptions();
 
   if (loading) return <span className="text-[var(--text-secondary)] [&_svg]:h-3 [&_svg]:w-3"><IconLoader className={commonSpinnerClass} /></span>;
 
@@ -267,7 +287,7 @@ function ModelSelector() {
         onChange={(e) => {
           const val = e.target.value;
           if (val === '__refresh__') { loadModels(); return; }
-          handleChange(val === '__custom__' ? currentModel : val);
+          selectModel(val === '__custom__' ? currentModel : val);
         }}
       >
         {models.length === 0 && !currentModel && <option value="">{t('model_none')}</option>}
@@ -278,6 +298,137 @@ function ModelSelector() {
         {discoveryError && <option value="__discovery_error__" disabled>{t('model_discovery_failed')}</option>}
         <option value="__refresh__">↻ {t('model_refresh')}</option>
       </select>
+    </div>
+  );
+}
+
+function CompactModelMenuItem({
+  active,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  title: string;
+  description?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cls(
+        'grid w-full cursor-pointer grid-cols-[16px_minmax(0,1fr)] items-start gap-2 border-0 bg-transparent px-2.5 py-2 text-left font-[var(--font-sans)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+        active && 'bg-[var(--accent-dim)] text-[var(--text-primary)]',
+      )}
+      onClick={onClick}
+    >
+      <span className="mt-0.5 grid h-4 w-4 place-items-center text-[var(--accent)]">
+        {active && <IconCheck size={12} />}
+      </span>
+      <span className="grid min-w-0 gap-0.5">
+        <span className="truncate font-medium">{title}</span>
+        {description && <span className="line-clamp-2 text-[10px] leading-[1.35] text-[var(--text-muted)]">{description}</span>}
+      </span>
+    </button>
+  );
+}
+
+function CompactModelMenu() {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const {
+    currentModel,
+    models,
+    loading,
+    discoveryError,
+    loadModels,
+    selectModel,
+  } = useModelOptions();
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
+  const currentModelInfo = models.find(model => model.id === currentModel);
+  const modelLabel = currentModelInfo?.display_name ?? currentModel ?? t('model_none');
+  const known = models.some(model => model.id === currentModel);
+
+  return (
+    <div ref={menuRef} className="relative min-w-0">
+      <button
+        type="button"
+        className="flex h-7 max-w-[190px] cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border)] bg-[rgba(255,255,255,0.04)] px-2 text-[11px] text-[var(--text-primary)] transition-colors hover:border-[var(--border-light)] hover:bg-[var(--bg-hover)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-dim)]"
+        onClick={() => setOpen(value => !value)}
+        title={modelLabel || t('model_none')}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <IconBrain size={12} />
+        <span className="min-w-0 truncate">{modelLabel || t('model_none')}</span>
+        <IconChevronDown size={12} />
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 z-[120] mb-2 w-[260px] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] shadow-[0_18px_48px_rgba(0,0,0,0.42)]" role="menu">
+          <div className="px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--text-muted)]">{t('model_available_title')}</div>
+              <button
+                type="button"
+                className="flex cursor-pointer items-center gap-1 rounded border-0 bg-transparent px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                onClick={loadModels}
+              >
+                <IconRefresh size={10} />
+                <span>{t('model_refresh_short')}</span>
+              </button>
+            </div>
+            <div className="mt-1 max-h-[168px] overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--bg-base)]">
+              {loading && (
+                <div className="flex items-center gap-1.5 px-2.5 py-2 text-[11px] text-[var(--text-muted)]">
+                  <IconLoader className={commonSpinnerClass} size={12} />
+                  <span>{t('model_loading')}</span>
+                </div>
+              )}
+              {!loading && models.length === 0 && !currentModel && (
+                <div className="px-2.5 py-2 text-[11px] text-[var(--text-muted)]">{t('model_none')}</div>
+              )}
+              {!loading && models.map(model => (
+                <CompactModelMenuItem
+                  key={model.id}
+                  active={model.id === currentModel}
+                  title={model.display_name}
+                  description={model.provider}
+                  onClick={() => {
+                    selectModel(model.id);
+                    setOpen(false);
+                  }}
+                />
+              ))}
+              {!loading && !known && currentModel && (
+                <CompactModelMenuItem
+                  active
+                  title={currentModel}
+                  description={t('model_custom')}
+                  onClick={() => undefined}
+                />
+              )}
+              {discoveryError && (
+                <div className="border-t border-[var(--border)] px-2.5 py-2 text-[10px] leading-[1.35] text-[var(--warning)]" title={discoveryError}>
+                  {t('model_discovery_failed')}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -654,6 +805,7 @@ export interface AiPanelProps {
   onContextualRequestConsumed?: (id: number) => void;
   onOpenSettings?: () => void;
   onOpenQuest?: (questId?: string | null) => void;
+  compact?: boolean;
 }
 
 export interface AiWorkspaceState {
@@ -681,6 +833,7 @@ export default function AiPanel({
   onContextualRequestConsumed,
   onOpenSettings,
   onOpenQuest,
+  compact = false,
 }: AiPanelProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
@@ -1236,6 +1389,11 @@ export default function AiPanel({
     setWorkspaceView('chat');
   }, []);
 
+  const attachedKnowledge = useMemo(
+    () => knowledgeEntries.filter(entry => selectedKnowledgeIds.has(entry.id)),
+    [knowledgeEntries, selectedKnowledgeIds],
+  );
+
   const buildQuestPromotionContext = useCallback(() => {
     const recentMessages = messages
       .slice(-8)
@@ -1358,10 +1516,6 @@ export default function AiPanel({
   const approvedWriteCount = plan?.operations.filter(operation => (
     operation.requires_write && approved.has(operation.index)
   )).length ?? 0;
-  const attachedKnowledge = useMemo(
-    () => knowledgeEntries.filter(entry => selectedKnowledgeIds.has(entry.id)),
-    [knowledgeEntries, selectedKnowledgeIds],
-  );
   const toggleKnowledge = useCallback((id: string) => {
     setSelectedKnowledgeIds(current => {
       const next = new Set(current);
@@ -1403,16 +1557,33 @@ export default function AiPanel({
   }, [approved, completedBundle, denied, discardProposal, executeApproved, onWorkspaceStateChange, plan, status]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <ContextBar
-        projectName={projectName}
-        selectedEntity={selectedEntityName}
-        sceneObjectCount={sceneObjectCount}
-        onSettingsClick={onOpenSettings}
-        onNewChat={handleNewChat}
-        conversationTurns={conversationTurns}
-        attachedKnowledgeCount={attachedKnowledge.length}
-      />
+    <div className={cls('flex h-full flex-col overflow-hidden', compact && 'bg-[#171716]')}>
+      {compact ? (
+        <div className="flex h-11 shrink-0 items-center gap-2 px-2 text-[12px] text-[var(--text-muted)]">
+          <span className="mr-auto">Tasks</span>
+          <button className={panelIconButtonClass} onClick={handleNewChat} title={t('ai_new_chat')} aria-label={t('ai_new_chat')}>
+            <IconRefresh />
+          </button>
+          <button className={panelIconButtonClass} onClick={onOpenSettings} title={t('ai_settings')} aria-label={t('ai_settings')}>
+            <IconSettings />
+          </button>
+          {onOpenQuest && (
+            <button className={panelIconButtonClass} onClick={() => onOpenQuest()} title={t('quest_title')} aria-label={t('quest_title')}>
+              <IconSparkles />
+            </button>
+          )}
+        </div>
+      ) : (
+        <ContextBar
+          projectName={projectName}
+          selectedEntity={selectedEntityName}
+          sceneObjectCount={sceneObjectCount}
+          onSettingsClick={onOpenSettings}
+          onNewChat={handleNewChat}
+          conversationTurns={conversationTurns}
+          attachedKnowledgeCount={attachedKnowledge.length}
+        />
+      )}
 
       {!chatOnly && (plan || completedBundle) && <div className="flex min-h-9 gap-1 border-b border-[var(--border)] bg-[var(--bg-surface)] px-2 py-1 [&_span]:min-w-4 [&_span]:rounded-lg [&_span]:bg-[var(--accent-dim)] [&_span]:px-[5px] [&_span]:py-px [&_span]:text-[9px] [&_span]:text-[var(--text-secondary)]" role="tablist" aria-label="AI workspace">
         {(['chat', 'changes'] as AiWorkspaceView[]).map(view => (
@@ -1432,13 +1603,13 @@ export default function AiPanel({
       </div>}
 
       {/* Entity context card — shown when an entity is selected */}
-      {entityDetails && <EntityContextCard entity={entityDetails} />}
+      {!compact && entityDetails && <EntityContextCard entity={entityDetails} />}
 
       {/* Messages */}
       <PlanApprovalContext.Provider value={planApprovalCtx}>
       <div
         ref={scrollRef}
-        className={cls("flex flex-1 flex-col gap-3 overflow-y-auto p-4", !chatOnly && workspaceView !== 'chat' && "bg-[var(--bg-base)] p-3")}
+        className={cls("flex flex-1 flex-col gap-3 overflow-y-auto p-4", compact && "gap-2 px-2 py-0", !chatOnly && workspaceView !== 'chat' && "bg-[var(--bg-base)] p-3")}
         aria-live="polite"
       >
         {!chatOnly && workspaceView === 'changes' && (
@@ -1521,39 +1692,47 @@ export default function AiPanel({
         )}
         {(chatOnly || workspaceView === 'chat') && <>
         {messages.length === 0 && (
-          <div className="m-auto flex h-full max-w-[440px] flex-col items-center justify-start gap-2.5 px-5 pt-7 pb-5 text-center text-[var(--text-secondary)]">
-            <div className="mb-0.5 flex h-[46px] w-[46px] items-center justify-center rounded-[14px] border border-[var(--border-light)] bg-[linear-gradient(145deg,var(--bg-elevated),var(--bg-surface))] text-[var(--accent)] shadow-[0_8px_24px_rgba(0,0,0,0.2)] [&_svg]:opacity-90"><IconSparkles size={24} /></div>
-            <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--accent)]">{t('ai_workspace_eyebrow')}</span>
-            <p className="text-xl font-semibold text-[var(--text-primary)]">{t('ai_empty_title')}</p>
-            <p className="max-w-[340px] text-[13px] leading-[1.55] text-[var(--text-secondary)]">
-              {t('ai_empty_desc')}
-            </p>
-            <div className="my-2 mb-1 grid w-full grid-cols-4 rounded-lg border border-[var(--border)] bg-[rgba(0,0,0,0.12)] p-1" aria-label="AI editing workflow">
-              <span className={workflowStepClass(true)}>{t('workflow_step_describe')}</span>
-              <span className={workflowStepClass()}>{t('workflow_step_review')}</span>
-              <span className={workflowStepClass()}>{t('workflow_step_apply')}</span>
-              <span className={workflowStepClass()}>{t('workflow_step_verify')}</span>
+          compact ? (
+            <div className="flex flex-1 items-center justify-center text-[var(--text-muted)]">
+              <div className="grid size-10 place-items-center rounded-full border border-[var(--border)] text-[var(--text-muted)] opacity-70">
+                <IconBot size={22} />
+              </div>
             </div>
-            <div className="mt-1 grid w-full gap-[7px]">
-              <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Create a playable third-person character with a following camera and basic movement controls')}>
-                <strong>{t('prompt_playable_char')}</strong>
-                <span>{t('prompt_playable_char_desc')}</span>
-              </button>
-              <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Improve the lighting and atmosphere of this scene while preserving the current composition')}>
-                <strong>{t('prompt_improve_scene')}</strong>
-                <span>{t('prompt_improve_scene_desc')}</span>
-              </button>
-              <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Inspect the current project and recommend the highest-impact next improvement')}>
-                <strong>{t('prompt_inspect')}</strong>
-                <span>{t('prompt_inspect_desc')}</span>
+          ) : (
+            <div className="m-auto flex h-full max-w-[440px] flex-col items-center justify-start gap-2.5 px-5 pt-7 pb-5 text-center text-[var(--text-secondary)]">
+              <div className="mb-0.5 flex h-[46px] w-[46px] items-center justify-center rounded-[14px] border border-[var(--border-light)] bg-[linear-gradient(145deg,var(--bg-elevated),var(--bg-surface))] text-[var(--accent)] shadow-[0_8px_24px_rgba(0,0,0,0.2)] [&_svg]:opacity-90"><IconSparkles size={24} /></div>
+              <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--accent)]">{t('ai_workspace_eyebrow')}</span>
+              <p className="text-xl font-semibold text-[var(--text-primary)]">{t('ai_empty_title')}</p>
+              <p className="max-w-[340px] text-[13px] leading-[1.55] text-[var(--text-secondary)]">
+                {t('ai_empty_desc')}
+              </p>
+              <div className="my-2 mb-1 grid w-full grid-cols-4 rounded-lg border border-[var(--border)] bg-[rgba(0,0,0,0.12)] p-1" aria-label="AI editing workflow">
+                <span className={workflowStepClass(true)}>{t('workflow_step_describe')}</span>
+                <span className={workflowStepClass()}>{t('workflow_step_review')}</span>
+                <span className={workflowStepClass()}>{t('workflow_step_apply')}</span>
+                <span className={workflowStepClass()}>{t('workflow_step_verify')}</span>
+              </div>
+              <div className="mt-1 grid w-full gap-[7px]">
+                <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Create a playable third-person character with a following camera and basic movement controls')}>
+                  <strong>{t('prompt_playable_char')}</strong>
+                  <span>{t('prompt_playable_char_desc')}</span>
+                </button>
+                <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Improve the lighting and atmosphere of this scene while preserving the current composition')}>
+                  <strong>{t('prompt_improve_scene')}</strong>
+                  <span>{t('prompt_improve_scene_desc')}</span>
+                </button>
+                <button className="flex cursor-pointer flex-col gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-left font-[inherit] text-[var(--text-secondary)] transition-[background,border-color,transform] duration-[var(--transition-fast)] hover:-translate-y-px hover:border-[var(--accent)] hover:bg-[var(--accent-dim)] [&_strong]:text-xs [&_strong]:font-semibold [&_strong]:text-[var(--text-primary)] [&_span]:text-[11px] [&_span]:text-[var(--text-muted)]" onClick={() => submitPrompt('Inspect the current project and recommend the highest-impact next improvement')}>
+                  <strong>{t('prompt_inspect')}</strong>
+                  <span>{t('prompt_inspect_desc')}</span>
+                </button>
+              </div>
+              <button className="mt-1 flex cursor-pointer items-center gap-[5px] rounded-md border-0 bg-transparent px-3 py-1.5 font-[inherit] text-[11px] text-[var(--text-muted)] hover:text-[var(--accent)]" onClick={onOpenSettings}>
+                <IconSettings size={12} />
+                <span>{t('ai_model_settings')}</span>
+                <IconChevronRight size={12} />
               </button>
             </div>
-            <button className="mt-1 flex cursor-pointer items-center gap-[5px] rounded-md border-0 bg-transparent px-3 py-1.5 font-[inherit] text-[11px] text-[var(--text-muted)] hover:text-[var(--accent)]" onClick={onOpenSettings}>
-              <IconSettings size={12} />
-              <span>{t('ai_model_settings')}</span>
-              <IconChevronRight size={12} />
-            </button>
-          </div>
+          )
         )}
         {messages.map((msg) => (
           <MessageBubble key={msg.id} msg={msg} />
@@ -1651,10 +1830,13 @@ export default function AiPanel({
       })()}
 
       {/* Quick Actions + Input */}
-      <div className="relative border-t border-[var(--border)] bg-[var(--bg-surface)] px-3 pt-2.5 pb-3 shadow-[0_-8px_24px_rgba(0,0,0,0.12)]">
-        <QuickActions onAction={onQuickAction} />
+      <div className={cls(
+        "relative border-t border-[var(--border)] bg-[var(--bg-surface)] px-3 pt-2.5 pb-3 shadow-[0_-8px_24px_rgba(0,0,0,0.12)]",
+        compact && "border-t-0 bg-transparent px-2 pb-2 pt-2 shadow-none",
+      )}>
+        {!compact && <QuickActions onAction={onQuickAction} />}
 
-        {knowledgeEntries.length > 0 && (
+        {!compact && knowledgeEntries.length > 0 && (
           <div className="mb-2 overflow-hidden rounded-[7px] border border-[var(--border)] bg-[var(--bg-base)]">
             <button
               className="flex h-[30px] w-full cursor-pointer items-center gap-1.5 border-0 bg-transparent px-2 text-left font-[var(--font-sans)] text-[11px] font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_b]:ml-auto [&_b]:inline-flex [&_b]:h-[18px] [&_b]:min-w-[18px] [&_b]:items-center [&_b]:justify-center [&_b]:rounded-[9px] [&_b]:bg-[rgba(34,197,94,0.12)] [&_b]:text-[10px] [&_b]:text-[#86efac]"
@@ -1726,14 +1908,17 @@ export default function AiPanel({
           </div>
         )}
 
-        <div className="mb-1.5 flex items-center justify-between gap-3 text-[11px] font-semibold text-[var(--text-primary)] [&_span:last-child]:text-[9px] [&_span:last-child]:font-normal [&_span:last-child]:text-[var(--text-muted)] max-[1050px]:[&_span:last-child]:hidden">
+        {!compact && <div className="mb-1.5 flex items-center justify-between gap-3 text-[11px] font-semibold text-[var(--text-primary)] [&_span:last-child]:text-[9px] [&_span:last-child]:font-normal [&_span:last-child]:text-[var(--text-muted)] max-[1050px]:[&_span:last-child]:hidden">
           <span>{requestActive || status === 'executing' ? t('input_queue_next') : t('input_describe')}</span>
           <span>{requestActive || status === 'executing' ? t('input_queue_hint') : t('input_send_hint')}</span>
-        </div>
-        <div className="flex items-end gap-1.5">
+        </div>}
+        <div className={cls("flex items-end gap-1.5", compact && "rounded-[18px] bg-[#302f2c] p-2 shadow-[0_8px_24px_rgba(0,0,0,0.32)]")}>
           <textarea
             ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-            className="max-h-[200px] min-h-[42px] flex-1 resize-none rounded-[9px] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-[9px] font-[inherit] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] focus:shadow-[0_0_0_2px_var(--accent-dim)]"
+            className={cls(
+              "max-h-[200px] min-h-[42px] flex-1 resize-none rounded-[9px] border border-[var(--border)] bg-[var(--bg-base)] px-3 py-[9px] font-[inherit] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] focus:shadow-[0_0_0_2px_var(--accent-dim)]",
+              compact && "min-h-[44px] border-0 bg-transparent px-1 py-1 text-[13px] focus:shadow-none",
+            )}
             placeholder={t('ai_input_placeholder')}
             value={input}
             onChange={handleInputChange}
@@ -1741,7 +1926,10 @@ export default function AiPanel({
             rows={2}
           />
           <button
-            className="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg border-0 bg-[var(--brand)] text-white transition-[background,opacity] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+            className={cls(
+              "flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg border-0 bg-[var(--brand)] text-white transition-[background,opacity] duration-[var(--transition-fast)] hover:not-disabled:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-40",
+              compact && "h-8 w-8 shrink-0 rounded-full bg-[#9a9a9a] text-[#202020] hover:not-disabled:bg-white",
+            )}
             onClick={() => queueOrSubmitPrompt(input)}
             disabled={!input.trim()}
             aria-label={t('btn_send')}
@@ -1749,23 +1937,41 @@ export default function AiPanel({
             <IconSend />
           </button>
         </div>
-        <div className="mt-2 flex items-center gap-2">
-          <ModelSelector />
-          <div className="flex items-center gap-1 text-[var(--text-secondary)] [&_svg]:shrink-0">
-            <IconBrain size={12} />
-            <select
-              className="cursor-pointer whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--bg-base)] px-2 py-[3px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none hover:border-[var(--accent)] focus:border-[var(--accent)]"
-              value={thinkingEffort}
-              onChange={(e) => setThinkingEffort(e.target.value as ThinkingEffort)}
-              title={t('thinking_effort_title')}
-            >
-              <option value="off">{t('thinking_off')}</option>
-              <option value="low">{t('thinking_low')}</option>
-              <option value="medium">{t('thinking_medium')}</option>
-              <option value="high">{t('thinking_high')}</option>
-            </select>
-          </div>
+        <div className={cls("mt-2 flex items-center gap-2", compact && "px-1 text-[11px]")}>
+          {compact && (
+            <span className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-[var(--warning)]" title={t('policy_ask_write')}>
+              <IconAlertCircle size={12} />
+              <span>{t('policy_ask_write')}</span>
+            </span>
+          )}
+          {compact ? (
+            <CompactModelMenu />
+          ) : (
+            <>
+              <ModelSelector />
+              <div className="flex items-center gap-1 text-[var(--text-secondary)] [&_svg]:shrink-0">
+                <IconBrain size={12} />
+                <select
+                  className="cursor-pointer whitespace-nowrap rounded-md border border-[var(--border)] bg-[var(--bg-base)] px-2 py-[3px] font-[var(--font-sans)] text-[11px] text-[var(--text-primary)] outline-none hover:border-[var(--accent)] focus:border-[var(--accent)]"
+                  value={thinkingEffort}
+                  onChange={(e) => setThinkingEffort(e.target.value as ThinkingEffort)}
+                  title={t('thinking_effort_title')}
+                >
+                  <option value="off">{t('thinking_off')}</option>
+                  <option value="low">{t('thinking_low')}</option>
+                  <option value="medium">{t('thinking_medium')}</option>
+                  <option value="high">{t('thinking_high')}</option>
+                </select>
+              </div>
+            </>
+          )}
         </div>
+        {compact && (
+          <div className="mt-1 flex items-center gap-1.5 px-1 text-[11px] text-[var(--text-muted)]">
+            <IconFile size={12} />
+            <span>{t('ai_scope_local_project')}</span>
+          </div>
+        )}
       </div>
     </div>
   );

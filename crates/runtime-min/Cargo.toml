@@ -58,19 +58,12 @@ agent-tools = [
     "engine-platform/agent-tools",
     "engine-render/agent-tools",
 ]
-script-python = [
-    "engine-assets/script-python",
-    "engine-core/script-python",
-    "engine-ecs/script-python",
-    "engine-platform/script-python",
-    "engine-render/script-python",
-]
 shader = ["dep:engine-shader", "engine-shader/runtime-game"]
 render-2d = ["dep:engine-render-2d", "engine-render-2d/runtime-game"]
 ui = ["dep:engine-ui", "engine-ui/runtime-game"]
 animation = ["dep:engine-animation", "engine-animation/runtime-game"]
 skeleton = ["dep:engine-skeleton", "engine-skeleton/runtime-game"]
-dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "physics", "audio", "shader", "render-2d", "ui", "animation", "skeleton"]
+dev-full = ["runtime-game", "editor", "agent-tools", "physics", "audio", "shader", "render-2d", "ui", "animation", "skeleton"]
 
 [dependencies]
 engine-assets.workspace = true

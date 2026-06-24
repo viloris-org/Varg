@@ -83,7 +83,6 @@ runtime-min = ["runtime-min/runtime-min"]
 runtime-game = ["runtime-min/runtime-game"]
 editor = ["runtime-min/editor"]
 agent-tools = ["runtime-min/agent-tools"]
-script-python = ["runtime-min/script-python"]
 dev-full = ["runtime-min/dev-full"]
 
 [profile.release]

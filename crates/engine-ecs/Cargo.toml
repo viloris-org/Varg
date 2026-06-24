@@ -15,8 +15,7 @@ physics = ["dep:engine-physics"]
 audio = ["dep:engine-audio"]
 editor = ["engine-core/editor"]
 agent-tools = ["engine-core/agent-tools"]
-script-python = ["engine-core/script-python"]
-dev-full = ["runtime-game", "editor", "agent-tools", "script-python", "engine-core/dev-full", "physics", "audio"]
+dev-full = ["runtime-game", "editor", "agent-tools", "engine-core/dev-full", "physics", "audio"]
 
 [dependencies]
 engine-core.workspace = true

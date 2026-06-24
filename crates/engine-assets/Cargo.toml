@@ -13,7 +13,6 @@ runtime-min = ["engine-core/runtime-min"]
 runtime-game = ["runtime-min"]
 editor = ["engine-core/editor"]
 agent-tools = ["engine-core/agent-tools"]
-script-python = ["engine-core/script-python"]
 fbx-importer = []
 assimp-importer = []
 heavy-importers = ["fbx-importer", "assimp-importer"]
@@ -21,7 +20,6 @@ dev-full = [
     "runtime-game",
     "editor",
     "agent-tools",
-    "script-python",
     "engine-core/dev-full",
     "heavy-importers",
 ]

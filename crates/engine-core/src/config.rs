@@ -39,8 +39,6 @@ pub enum RuntimeProfile {
     Editor,
     /// Agent tooling profile.
     AgentTools,
-    /// Optional Python scripting profile.
-    ScriptPython,
     /// Developer convenience profile.
     DevFull,
 }
@@ -53,7 +51,6 @@ impl RuntimeProfile {
             Self::RuntimeGame => "runtime-game",
             Self::Editor => "editor",
             Self::AgentTools => "agent-tools",
-            Self::ScriptPython => "script-python",
             Self::DevFull => "dev-full",
         }
     }

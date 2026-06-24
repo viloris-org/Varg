@@ -345,7 +345,6 @@ impl ComponentSchemaRegistry {
                 field("source", ComponentFieldKind::String, ""),
                 field("exported_values", ComponentFieldKind::Object, "{}"),
                 field("state", ComponentFieldKind::Object, "{}"),
-                field("pending_recovery", ComponentFieldKind::Bool, "false"),
             ],
             evolution: SchemaEvolution::default(),
         });

@@ -4,14 +4,11 @@
 //! Minimal Aster runtime and first playable game runner.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     time::Duration,
 };
-
-#[cfg(feature = "script-python")]
-use std::time::Instant;
 
 use engine_assets::{
     AssetDatabase, AssetGuid, AssetRegistry, DecodedCubemapResource, DecodedTextureResource,
@@ -30,8 +27,6 @@ use engine_core::math::Vec3;
 use engine_core::{EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging};
 #[cfg(feature = "audio")]
 use engine_ecs::AudioSourceComponentData;
-#[cfg(feature = "script-python")]
-use engine_ecs::ScriptComponentProxy;
 use engine_ecs::{BuildConfiguration, ComponentData, ProjectManifest, Scene};
 #[cfg(feature = "physics")]
 use engine_physics::{
@@ -105,14 +100,7 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     /// Material resources resolved from project asset GUIDs.
     pub material_resources: HashMap<engine_core::AssetId, MaterialFormat>,
     frame_counter: FrameCounter,
-    reported_script_errors: HashSet<String>,
     hot_reload: HotReloadTracker,
-    #[cfg(feature = "script-python")]
-    script_instances: HashSet<ScriptInstanceKey>,
-    #[cfg(feature = "script-python")]
-    python_script_runtime: PythonScriptRuntimeConfig,
-    #[cfg(feature = "script-python")]
-    script_diagnostics_this_frame: usize,
     varg_script_cache: HashMap<PathBuf, VargScript>,
     #[cfg(feature = "audio")]
     audio_bindings: Vec<AudioBinding>,
@@ -206,37 +194,6 @@ struct AudioBinding {
     last_position: engine_core::math::Vec3,
 }
 
-#[cfg(feature = "script-python")]
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ScriptInstanceKey {
-    object: engine_core::EntityId,
-    backend: String,
-    script: String,
-}
-
-/// Configuration for the Python script subprocess backend.
-#[cfg(feature = "script-python")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PythonScriptRuntimeConfig {
-    /// Python interpreter executable.
-    pub interpreter: PathBuf,
-    /// Maximum time a single script invocation may block the frame.
-    pub invocation_timeout: Duration,
-    /// Maximum script diagnostics emitted per frame.
-    pub diagnostics_per_frame: usize,
-}
-
-#[cfg(feature = "script-python")]
-impl Default for PythonScriptRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            interpreter: PathBuf::from("python3"),
-            invocation_timeout: Duration::from_millis(100),
-            diagnostics_per_frame: 8,
-        }
-    }
-}
-
 impl RuntimeServices<HeadlessRenderDevice> {
     /// Creates minimal runtime services with a headless renderer.
     pub fn minimal(config: EngineConfig) -> Self {
@@ -305,14 +262,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             mesh_resources: HashMap::new(),
             material_resources: HashMap::new(),
             frame_counter: FrameCounter::default(),
-            reported_script_errors: HashSet::new(),
             hot_reload: HotReloadTracker::default(),
-            #[cfg(feature = "script-python")]
-            script_instances: HashSet::new(),
-            #[cfg(feature = "script-python")]
-            python_script_runtime: PythonScriptRuntimeConfig::default(),
-            #[cfg(feature = "script-python")]
-            script_diagnostics_this_frame: 0,
             varg_script_cache: HashMap::new(),
             #[cfg(feature = "audio")]
             audio_bindings: Vec::new(),
@@ -401,12 +351,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.time.update(dt);
         self.stats.frame_time_seconds = self.time.delta_seconds;
         self.stats.physics_steps = 0;
-        #[cfg(feature = "script-python")]
-        {
-            self.script_diagnostics_this_frame = 0;
-        }
-        self.report_script_proxy_diagnostics();
-
         let should_simulate = !self.paused || single_step;
 
         // ── script startup ───────────────────────────────────────────
@@ -415,8 +359,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
             self.ensure_physics_bindings()?;
             #[cfg(feature = "audio")]
             self.ensure_audio_bindings()?;
-            #[cfg(feature = "script-python")]
-            self.run_python_scripts("start", dt);
             self.run_varg_scripts_start();
 
             // ── fixed_timestep_loop ────────────────────────────────────
@@ -432,11 +374,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     self.sync_physics_to_scene()?;
                     self.stats.physics_steps = self.stats.physics_steps.saturating_add(1);
                 }
-                #[cfg(feature = "script-python")]
-                {
-                    let fixed_dt = self.time.fixed_delta_seconds;
-                    self.run_python_scripts("fixed_update", fixed_dt);
-                }
                 let fixed_dt = self.time.fixed_delta_seconds;
                 self.run_varg_scripts_fixed_update(fixed_dt);
                 self.scene.tick_fixed_frame();
@@ -445,8 +382,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
             // ── update ─────────────────────────────────────────────────
             self.apply_builtin_player_controller();
-            #[cfg(feature = "script-python")]
-            self.run_python_scripts("update", dt);
             self.run_varg_scripts_update(dt);
 
             // ── late_update ────────────────────────────────────────────
@@ -573,12 +508,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
                                 _ => None,
                             }),
                     )
-                    .filter(|script| {
-                        script
-                            .legacy_backend
-                            .as_deref()
-                            .is_none_or(|backend| backend == "varg")
-                    })
                     .cloned()
                     .map(move |script| (entity, script))
                     .collect::<Vec<_>>()
@@ -586,7 +515,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             .collect::<Vec<_>>();
 
         for (entity, script) in invocations {
-            if once && !script.pending_recovery && script.state.contains_key("__varg_started") {
+            if once && script.state.contains_key("__varg_started") {
                 continue;
             }
             let script_path = self.resolve_project_path(&script.source);
@@ -674,26 +603,14 @@ impl<R: RenderDevice> RuntimeServices<R> {
     ) {
         if let Some(object) = self.scene.object_mut(entity) {
             for candidate in &mut object.scripts {
-                if candidate.source == source
-                    && candidate
-                        .legacy_backend
-                        .as_deref()
-                        .is_none_or(|backend| backend == "varg")
-                {
+                if candidate.source == source {
                     candidate.state = state.clone();
-                    candidate.pending_recovery = false;
                 }
             }
             for component in &mut object.components {
                 if let ComponentData::Script(candidate) = component {
-                    if candidate.source == source
-                        && candidate
-                            .legacy_backend
-                            .as_deref()
-                            .is_none_or(|backend| backend == "varg")
-                    {
+                    if candidate.source == source {
                         candidate.state = state.clone();
-                        candidate.pending_recovery = false;
                     }
                 }
             }
@@ -759,12 +676,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
             }
         }
         Ok(())
-    }
-
-    /// Updates Python script subprocess configuration.
-    #[cfg(feature = "script-python")]
-    pub fn set_python_script_runtime_config(&mut self, config: PythonScriptRuntimeConfig) {
-        self.python_script_runtime = config;
     }
 
     /// Replaces the active render graph.
@@ -1132,46 +1043,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.physics_bindings
             .iter()
             .find(|binding| binding.object == object.id)
-    }
-
-    fn report_script_proxy_diagnostics(&mut self) {
-        for (_, object) in self.scene.iter_objects() {
-            for script in object
-                .scripts
-                .iter()
-                .chain(
-                    object
-                        .components
-                        .iter()
-                        .filter_map(|component| match component {
-                            ComponentData::Script(script) => Some(script),
-                            _ => None,
-                        }),
-                )
-            {
-                #[cfg(feature = "script-python")]
-                if script.legacy_backend.as_deref() == Some("python") {
-                    continue;
-                }
-                let backend = script.legacy_backend.as_deref().unwrap_or("varg");
-                if backend == "varg" {
-                    continue;
-                }
-                let key = format!("{}:{}", backend, script.source);
-                if script.pending_recovery && self.reported_script_errors.insert(key) {
-                    self.diagnostics.push(RuntimeDiagnostic {
-                        source: "script".to_string(),
-                        level: "error".to_string(),
-                        message: format!(
-                            "{} script `{}` is pending backend recovery",
-                            backend, script.source
-                        ),
-                        file: Some(PathBuf::from(&script.source)),
-                        line: None,
-                    });
-                }
-            }
-        }
     }
 
     #[cfg(feature = "physics")]
@@ -1790,372 +1661,6 @@ fn parse_hrtf_quality(value: &str) -> HrtfQuality {
         _ => HrtfQuality::Medium,
     }
 }
-
-#[cfg(feature = "script-python")]
-#[derive(Clone, Debug)]
-struct ScriptInvocation {
-    entity: engine_ecs::Entity,
-    object: engine_core::EntityId,
-    name: String,
-    script: ScriptComponentProxy,
-}
-
-#[cfg(feature = "script-python")]
-impl<R: RenderDevice> RuntimeServices<R> {
-    fn run_python_scripts(&mut self, stage: &str, dt: f32) {
-        let invocations = self
-            .scene
-            .iter_objects()
-            .flat_map(|(entity, object)| {
-                object
-                    .scripts
-                    .iter()
-                    .chain(
-                        object
-                            .components
-                            .iter()
-                            .filter_map(|component| match component {
-                                ComponentData::Script(script) => Some(script),
-                                _ => None,
-                            }),
-                    )
-                    .filter(|script| script.legacy_backend.as_deref() == Some("python"))
-                    .cloned()
-                    .map(move |script| ScriptInvocation {
-                        entity,
-                        object: object.id,
-                        name: object.name.clone(),
-                        script,
-                    })
-            })
-            .collect::<Vec<_>>();
-
-        for invocation in invocations {
-            let key = ScriptInstanceKey {
-                object: invocation.object,
-                backend: invocation
-                    .script
-                    .legacy_backend
-                    .clone()
-                    .unwrap_or_else(|| "varg".to_string()),
-                script: invocation.script.source.clone(),
-            };
-            if stage == "start" {
-                if !self.script_instances.insert(key) {
-                    continue;
-                }
-            } else if !self.script_instances.contains(&key) {
-                continue;
-            }
-            if let Err(error) = self.run_python_script(invocation, stage, dt) {
-                self.push_script_diagnostic(error.to_string(), None);
-            }
-        }
-    }
-
-    fn push_script_diagnostic(&mut self, message: String, file: Option<PathBuf>) {
-        if self.script_diagnostics_this_frame >= self.python_script_runtime.diagnostics_per_frame {
-            return;
-        }
-        self.script_diagnostics_this_frame = self.script_diagnostics_this_frame.saturating_add(1);
-        self.diagnostics.push(RuntimeDiagnostic {
-            source: "script".to_string(),
-            level: "error".to_string(),
-            message,
-            file,
-            line: None,
-        });
-    }
-
-    fn run_python_script(
-        &mut self,
-        invocation: ScriptInvocation,
-        stage: &str,
-        dt: f32,
-    ) -> EngineResult<()> {
-        let script_path = self.resolve_project_path(&invocation.script.source);
-        let transform = self
-            .scene
-            .transforms()
-            .local(invocation.entity)
-            .unwrap_or_default();
-        let payload = serde_json::json!({
-            "stage": stage,
-            "dt": dt,
-            "entity_id": invocation.object.as_u128(),
-            "name": invocation.name,
-            "transform": transform_to_json(transform),
-            "input": {
-                "actions": {
-                    "MoveX": self.input.action_value("MoveX"),
-                    "MoveY": self.input.action_value("MoveY"),
-                    "MoveForward": self.input.action_value("MoveForward"),
-                    "MoveBackward": self.input.action_value("MoveBackward"),
-                    "MoveLeft": self.input.action_value("MoveLeft"),
-                    "MoveRight": self.input.action_value("MoveRight")
-                }
-            },
-            "state": invocation.script.state
-        });
-        let mut child = std::process::Command::new(&self.python_script_runtime.interpreter)
-            .arg("-c")
-            .arg(PYTHON_SCRIPT_SHIM)
-            .arg(&script_path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|source| EngineError::Filesystem {
-                path: script_path.clone(),
-                source,
-            })?;
-        {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin
-                    .write_all(payload.to_string().as_bytes())
-                    .map_err(|source| EngineError::Filesystem {
-                        path: script_path.clone(),
-                        source,
-                    })?;
-            }
-        }
-        drop(child.stdin.take());
-
-        let started = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(|source| EngineError::Filesystem {
-                path: script_path.clone(),
-                source,
-            })? {
-                break status;
-            }
-            if started.elapsed() >= self.python_script_runtime.invocation_timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(EngineError::other(format!(
-                    "python script `{}` timed out after {:?}",
-                    invocation.script.source, self.python_script_runtime.invocation_timeout
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        {
-            use std::io::Read;
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_end(&mut stdout)
-                    .map_err(|source| EngineError::Filesystem {
-                        path: script_path.clone(),
-                        source,
-                    })?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_end(&mut stderr)
-                    .map_err(|source| EngineError::Filesystem {
-                        path: script_path.clone(),
-                        source,
-                    })?;
-            }
-        }
-        if !status.success() {
-            let stderr = String::from_utf8_lossy(&stderr);
-            return Err(EngineError::other(format!(
-                "python script `{}` failed: {}",
-                invocation.script.source,
-                stderr.trim()
-            )));
-        }
-        let stdout = String::from_utf8_lossy(&stdout);
-        let result = serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|error| {
-            EngineError::other(format!(
-                "python script `{}` returned invalid json: {error}",
-                invocation.script.source
-            ))
-        })?;
-        self.apply_script_result(invocation.entity, &invocation.script, &result)
-    }
-
-    fn apply_script_result(
-        &mut self,
-        entity: engine_ecs::Entity,
-        script: &ScriptComponentProxy,
-        result: &serde_json::Value,
-    ) -> EngineResult<()> {
-        if let Some(state) = result.get("state") {
-            let state_map = match state {
-                serde_json::Value::Object(map) => map.clone().into_iter().collect(),
-                _ => std::collections::HashMap::new(),
-            };
-            if let Some(object) = self.scene.object_mut(entity) {
-                for candidate in &mut object.scripts {
-                    if candidate.legacy_backend == script.legacy_backend
-                        && candidate.source == script.source
-                    {
-                        candidate.state = state_map.clone();
-                        candidate.pending_recovery = false;
-                    }
-                }
-                for component in &mut object.components {
-                    if let ComponentData::Script(candidate) = component {
-                        if candidate.legacy_backend == script.legacy_backend
-                            && candidate.source == script.source
-                        {
-                            candidate.state = state_map.clone();
-                            candidate.pending_recovery = false;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(transform) = result.get("transform").and_then(json_to_transform) {
-            self.scene.transforms_mut().set_local(entity, transform);
-        }
-        if let Some(commands) = result.get("commands").and_then(serde_json::Value::as_array) {
-            for command in commands {
-                match command.get("type").and_then(serde_json::Value::as_str) {
-                    Some("spawn") => {
-                        let name = command
-                            .get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Script Object");
-                        let spawned = self.scene.create_object(name)?;
-                        if let Some(transform) =
-                            command.get("transform").and_then(json_to_transform)
-                        {
-                            self.scene.transforms_mut().set_local(spawned, transform);
-                        }
-                    }
-                    Some("destroy") => {
-                        if let Some(id) = command.get("id").and_then(serde_json::Value::as_u64) {
-                            let id = engine_core::EntityId::from_u128(id as u128);
-                            if let Some(target) = self.scene.find_by_id(id) {
-                                self.scene.destroy_deferred(target)?;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "script-python")]
-fn transform_to_json(transform: engine_core::math::Transform) -> serde_json::Value {
-    serde_json::json!({
-        "translation": {
-            "x": transform.translation.x,
-            "y": transform.translation.y,
-            "z": transform.translation.z
-        },
-        "rotation": {
-            "x": transform.rotation.x,
-            "y": transform.rotation.y,
-            "z": transform.rotation.z,
-            "w": transform.rotation.w
-        },
-        "scale": {
-            "x": transform.scale.x,
-            "y": transform.scale.y,
-            "z": transform.scale.z
-        }
-    })
-}
-
-#[cfg(feature = "script-python")]
-fn json_to_transform(value: &serde_json::Value) -> Option<engine_core::math::Transform> {
-    Some(engine_core::math::Transform {
-        translation: json_to_vec3(value.get("translation")?)?,
-        rotation: engine_core::math::Quat {
-            x: value.get("rotation")?.get("x")?.as_f64()? as f32,
-            y: value.get("rotation")?.get("y")?.as_f64()? as f32,
-            z: value.get("rotation")?.get("z")?.as_f64()? as f32,
-            w: value.get("rotation")?.get("w")?.as_f64()? as f32,
-        },
-        scale: json_to_vec3(value.get("scale")?)?,
-    })
-}
-
-#[cfg(feature = "script-python")]
-fn json_to_vec3(value: &serde_json::Value) -> Option<engine_core::math::Vec3> {
-    Some(engine_core::math::Vec3::new(
-        value.get("x")?.as_f64()? as f32,
-        value.get("y")?.as_f64()? as f32,
-        value.get("z")?.as_f64()? as f32,
-    ))
-}
-
-#[cfg(feature = "script-python")]
-const PYTHON_SCRIPT_SHIM: &str = r#"
-import importlib.util
-import json
-import sys
-import traceback
-
-script_path = sys.argv[1]
-payload = json.load(sys.stdin)
-
-class Vec3:
-    def __init__(self, data):
-        self.x = float(data.get("x", 0.0))
-        self.y = float(data.get("y", 0.0))
-        self.z = float(data.get("z", 0.0))
-    def to_json(self):
-        return {"x": self.x, "y": self.y, "z": self.z}
-
-class Transform:
-    def __init__(self, data):
-        self.translation = Vec3(data.get("translation", {}))
-        self.rotation = data.get("rotation", {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})
-        self.scale = Vec3(data.get("scale", {"x": 1.0, "y": 1.0, "z": 1.0}))
-    def to_json(self):
-        return {"translation": self.translation.to_json(), "rotation": self.rotation, "scale": self.scale.to_json()}
-
-class Input:
-    def __init__(self, data):
-        self.actions = data.get("actions", {})
-    def action_value(self, name):
-        return float(self.actions.get(name, 0.0))
-    def action_down(self, name):
-        return self.action_value(name) > 0.0
-
-class Scene:
-    def __init__(self):
-        self.commands = []
-    def spawn(self, name, transform=None):
-        command = {"type": "spawn", "name": name}
-        if transform is not None:
-            command["transform"] = transform.to_json()
-        self.commands.append(command)
-    def destroy(self, entity_id):
-        self.commands.append({"type": "destroy", "id": int(entity_id)})
-
-class Context:
-    def __init__(self, payload):
-        self.entity_id = int(payload["entity_id"])
-        self.name = payload["name"]
-        self.dt = float(payload["dt"])
-        self.transform = Transform(payload["transform"])
-        self.input = Input(payload.get("input", {}))
-        self.scene = Scene()
-        self.state = payload.get("state", {})
-
-try:
-    spec = importlib.util.spec_from_file_location("aster_script_module", script_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    ctx = Context(payload)
-    fn = getattr(module, payload["stage"], None)
-    if callable(fn):
-        fn(ctx)
-    print(json.dumps({"transform": ctx.transform.to_json(), "state": ctx.state, "commands": ctx.scene.commands}))
-except Exception:
-    traceback.print_exc()
-    sys.exit(1)
-"#;
 
 #[cfg(feature = "physics")]
 fn collider_desc_from_scene(
@@ -3215,122 +2720,6 @@ mod tests {
             script.state.get("ticks").and_then(|value| value.as_f64()),
             Some(1.0)
         );
-        assert_eq!(script.pending_recovery, false);
-    }
-
-    #[cfg(feature = "script-python")]
-    #[test]
-    fn python_script_update_can_move_transform() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("aster-script-test-{}", std::process::id()));
-        let scripts = root.join("scripts");
-        std::fs::create_dir_all(&scripts).unwrap();
-        std::fs::write(
-            scripts.join("move.py"),
-            "def start(ctx):\n    ctx.transform.translation.x += 2.0\n    ctx.state['started'] = True\n\ndef update(ctx):\n    ctx.transform.translation.z += ctx.input.action_value('MoveY')\n",
-        )
-        .unwrap();
-
-        let mut services = RuntimeServices::minimal(EngineConfig::default());
-        services.set_project_root(&root);
-        let entity = services.scene.create_object("Scripted").unwrap();
-        services
-            .scene
-            .object_mut(entity)
-            .unwrap()
-            .scripts
-            .push(ScriptComponentProxy {
-                source: "scripts/move.py".to_string(),
-                exported_values: HashMap::new(),
-                state: HashMap::new(),
-                legacy_backend: Some("python".to_string()),
-                pending_recovery: true,
-            });
-        services
-            .input
-            .apply_event(engine_platform::InputEvent::KeyDown(
-                engine_platform::KeyCode::Character('w'),
-            ));
-
-        services
-            .tick_game_frame(Duration::from_millis(16), false)
-            .unwrap();
-
-        let transform = services.scene.transforms().local(entity).unwrap();
-        assert_eq!(transform.translation.x, 2.0);
-        assert_eq!(transform.translation.z, 1.0);
-        assert!(
-            services
-                .scene
-                .object(entity)
-                .unwrap()
-                .scripts
-                .first()
-                .unwrap()
-                .state
-                .contains_key("started")
-        );
-    }
-
-    #[cfg(feature = "script-python")]
-    #[test]
-    fn python_script_timeout_reports_diagnostic() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let root =
-            std::env::temp_dir().join(format!("aster-script-timeout-test-{}", std::process::id()));
-        let scripts = root.join("scripts");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&scripts).unwrap();
-        std::fs::write(
-            scripts.join("hang.py"),
-            "import time\n\ndef start(ctx):\n    time.sleep(1.0)\n",
-        )
-        .unwrap();
-
-        let mut services = RuntimeServices::minimal(EngineConfig::default());
-        services.set_python_script_runtime_config(PythonScriptRuntimeConfig {
-            invocation_timeout: Duration::from_millis(10),
-            ..PythonScriptRuntimeConfig::default()
-        });
-        services.set_project_root(&root);
-        let entity = services.scene.create_object("Scripted").unwrap();
-        services
-            .scene
-            .object_mut(entity)
-            .unwrap()
-            .scripts
-            .push(ScriptComponentProxy {
-                source: "scripts/hang.py".to_string(),
-                exported_values: HashMap::new(),
-                state: HashMap::new(),
-                legacy_backend: Some("python".to_string()),
-                pending_recovery: true,
-            });
-
-        services
-            .tick_game_frame(Duration::from_millis(16), false)
-            .unwrap();
-
-        assert!(
-            services
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("timed out"))
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(feature = "audio")]

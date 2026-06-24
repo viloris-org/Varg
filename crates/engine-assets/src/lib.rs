@@ -2060,7 +2060,6 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         "gltf" | "glb" => Some((ResourceKind::Model, "gltf")),
         "wgsl" | "glsl" => Some((ResourceKind::Shader, "shader-source")),
         "wav" | "ogg" => Some((ResourceKind::Audio, "audio")),
-        "py" => Some((ResourceKind::Script, "script-python")),
         "varg" => Some((ResourceKind::Script, "script-varg")),
         "vscene" => Some((ResourceKind::Scene, "vscene")),
         "vasset" => Some((ResourceKind::Material, "vasset")),
@@ -3454,13 +3453,11 @@ mod tests {
             ResourceKind::Script,
             "Varg script files should map to Script"
         );
-        assert_eq!(
+        assert!(
             database
                 .entry_for_path(Path::new("scripts/player.py"))
-                .unwrap()
-                .kind,
-            ResourceKind::Script,
-            "Python files should map to Script"
+                .is_none(),
+            "Python files are not Aster script assets"
         );
         assert_eq!(
             database

@@ -103,16 +103,7 @@ pub struct ScriptComponent {
         deserialize_with = "deserialize_script_state"
     )]
     pub state: HashMap<String, serde_json::Value>,
-    /// Legacy backend marker retained only when reading old scene files.
-    #[serde(default, alias = "backend", skip_serializing)]
-    pub legacy_backend: Option<String>,
-    /// Whether the component awaits script runtime recovery.
-    #[serde(default)]
-    pub pending_recovery: bool,
 }
-
-/// Compatibility alias for older call sites during the Varg migration.
-pub type ScriptComponentProxy = ScriptComponent;
 
 impl ScriptComponent {
     /// Creates a Varg script component with no exported overrides or state.
@@ -121,8 +112,6 @@ impl ScriptComponent {
             source: source.into(),
             exported_values: HashMap::new(),
             state: HashMap::new(),
-            legacy_backend: None,
-            pending_recovery: false,
         }
     }
 }

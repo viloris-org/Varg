@@ -1225,7 +1225,7 @@ impl AgentSession {
             "Sprite2D" => Ok(ComponentData::Sprite2D(
                 engine_ecs::Sprite2DComponentData::default(),
             )),
-            "Script" => Ok(ComponentData::Script(engine_ecs::ScriptComponentProxy {
+            "Script" => Ok(ComponentData::Script(engine_ecs::ScriptComponent {
                 source: spec
                     .properties
                     .get("script")
@@ -1234,8 +1234,6 @@ impl AgentSession {
                     .to_string(),
                 exported_values: Default::default(),
                 state: Default::default(),
-                legacy_backend: None,
-                pending_recovery: false,
             })),
             _ => Err(EngineError::config(format!(
                 "unknown component type: {}",
@@ -1780,12 +1778,10 @@ impl AgentSession {
     ) -> EngineResult<()> {
         use engine_ecs::ComponentData;
 
-        let script_component = ComponentData::Script(engine_ecs::ScriptComponentProxy {
+        let script_component = ComponentData::Script(engine_ecs::ScriptComponent {
             source: behavior_path.to_string(),
             exported_values: Default::default(),
             state: Default::default(),
-            legacy_backend: None,
-            pending_recovery: false,
         });
 
         self.context

@@ -53,13 +53,37 @@ import {
   createViewMatrix,
   projectToScreen,
 } from './gizmoMath';
+import AiPanel from './AiPanel';
 
 interface CalmEditorPrototypeProps {
   onCloseProject: () => void;
   onOpenSettings?: () => void;
-  onOpenQuest?: () => void;
+  onOpenQuest?: (questId?: string | null) => void;
   questArtifact?: QuestEditorArtifact | null;
   onDismissQuestArtifact?: () => void;
+}
+
+class AiPanelBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: string | null }
+> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="m-3 rounded-[var(--radius-md)] border border-[rgba(248,113,113,0.28)] bg-[var(--danger-dim)] p-3 text-[12px] leading-5 text-[var(--danger)]">
+          <div className="mb-1 font-semibold">AI panel failed to load</div>
+          <div className="break-words font-mono text-[10px]">{this.state.error}</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 type NavSection = 'scene' | 'assets' | 'scripts' | 'build' | 'ai';
@@ -412,17 +436,17 @@ function SectionHeader({
   children?: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      className="flex h-8 w-full items-center justify-between border-t border-[var(--border)] px-3 text-left text-[12px] font-semibold text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
-      onClick={onToggle}
-    >
-      <span className="flex min-w-0 items-center gap-2">
+    <div className="flex h-8 w-full items-center justify-between border-t border-[var(--border)] text-[12px] font-semibold text-[var(--text-secondary)]">
+      <button
+        type="button"
+        className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        onClick={onToggle}
+      >
         {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
         <span className="truncate">{title}</span>
-      </span>
-      {children}
-    </button>
+      </button>
+      {children && <div className="flex shrink-0 items-center pr-2">{children}</div>}
+    </div>
   );
 }
 
@@ -1041,6 +1065,7 @@ export default function CalmEditorPrototype({
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [showDrawer, setShowDrawer] = useState(true);
   const [aiPrompt, setAiPrompt] = useState('');
+  const [contextualRequest, setContextualRequest] = useState<{ id: number; prompt: string } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
   const [cameraRevision, setCameraRevision] = useState(0);
@@ -1934,15 +1959,35 @@ export default function CalmEditorPrototype({
                 )}
               </div>
             ) : activeNav === 'ai' ? (
-              <div className="p-3">
-                <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3">
-                  <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
-                    <IconBot size={14} /> Varg Assistant
-                  </div>
-                  <p className="text-[12px] leading-5 text-[var(--text-secondary)]">
-                    Ask about the selected entity, scene diagnostics, build output, or scripts.
-                  </p>
-                </div>
+              <div className="h-full min-h-0">
+                <AiPanelBoundary>
+                  <AiPanel
+                    projectName={shellState?.project_name}
+                    selectedEntity={selectedEntityId}
+                    selectedEntityName={inspectorEntity.name}
+                    sceneObjectCount={entities.length}
+                    sceneObjects={entities.map(entity => ({ id: entity.id, name: entity.name }))}
+                    onQuickAction={(action) => {
+                      if (action === 'play') {
+                        openGameView();
+                      } else if (action === 'save') {
+                        rpc('shell/save').then(() => refreshSceneTree());
+                      } else if (action === 'undo') {
+                        rpc('shell/undo').then(() => refreshSceneTree());
+                      }
+                    }}
+                    onSceneChanged={() => {
+                      refreshSceneTree();
+                      refreshConsole();
+                    }}
+                    chatOnly
+                    contextualRequest={contextualRequest}
+                    onContextualRequestConsumed={id => setContextualRequest(current => current?.id === id ? null : current)}
+                    onOpenSettings={onOpenSettings}
+                    onOpenQuest={onOpenQuest}
+                    compact
+                  />
+                </AiPanelBoundary>
               </div>
             ) : (
               Object.entries(groupedEntities).map(([group, groupEntities]) => (
@@ -2114,6 +2159,11 @@ export default function CalmEditorPrototype({
               className="absolute bottom-4 right-4 z-[4] flex w-[min(360px,42%)] items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[rgba(13,14,16,0.78)] p-2 backdrop-blur-xl"
               onSubmit={(event) => {
                 event.preventDefault();
+                const prompt = aiPrompt.trim();
+                if (prompt) {
+                  setActiveNav('ai');
+                  setContextualRequest({ id: Date.now(), prompt });
+                }
                 setAiPrompt('');
               }}
             >

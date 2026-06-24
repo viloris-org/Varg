@@ -655,9 +655,9 @@ The old dual model of object-level script lists plus script components should be
 
 ### Phase 2: Data Model Cleanup
 
-- Replace `ScriptComponentProxy { backend, script, state_json, pending_recovery }` with a Varg-first script component.
+- Keep `ScriptComponent { source, exported_values, state }` as the Varg-first script component.
 - Remove object-level `scripts` as a public scene model.
-- Remove Python from the default runtime path.
+- Keep Python out of the runtime path.
 - Hide Rhai or any other execution backend behind a Varg runtime adapter.
 
 ### Phase 3: Parser and Validator

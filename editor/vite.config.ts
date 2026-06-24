@@ -11,9 +11,14 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    host: '127.0.0.1',
+    host: 'localhost',
     port: 5173,
     strictPort: true,
+    hmr: {
+      host: 'localhost',
+      port: 5173,
+      protocol: 'ws',
+    },
     watch: {
       usePolling: true,
       interval: 500,

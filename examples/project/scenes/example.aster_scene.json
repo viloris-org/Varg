@@ -78,8 +78,7 @@
                 "speed": 6.0,
                 "jumpForce": 8.0
               },
-              "state": {},
-              "pending_recovery": true
+              "state": {}
             }
           }
         ]
