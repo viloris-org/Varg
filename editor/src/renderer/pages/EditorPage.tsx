@@ -17,7 +17,6 @@ import {
   type ViewportPresentationMode,
   type ViewportPresentationStatus,
   type WaylandEmbeddedCompositorRuntimeStatus,
-  viewportReadback,
 } from '../api';
 import { useTranslation } from '../i18n';
 import {
@@ -67,32 +66,7 @@ import {
 } from '../icons';
 import type { QuestEditorArtifact } from '../App';
 
-const editorViewportTargetFps = 75;
-const editorViewportFrameMs = 1000 / editorViewportTargetFps;
-const editorViewportMaxPixels = 1920 * 1080;
-const interactiveViewportMaxPixels = 1280 * 720;
-const playViewportMaxPixels = editorViewportMaxPixels;
-
-function viewportDevicePixelRatio() {
-  return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
-}
-
-function fitViewportReadbackSize(width: number, height: number, maxPixels = editorViewportMaxPixels) {
-  const pixelRatio = viewportDevicePixelRatio();
-  const roundedWidth = Math.max(1, Math.round(width * pixelRatio));
-  const roundedHeight = Math.max(1, Math.round(height * pixelRatio));
-  if (!maxPixels || roundedWidth * roundedHeight <= maxPixels) {
-    return { width: roundedWidth, height: roundedHeight, scaled: false };
-  }
-  const scale = Math.sqrt(maxPixels / (roundedWidth * roundedHeight));
-  return {
-    width: Math.max(1, Math.round(roundedWidth * scale)),
-    height: Math.max(1, Math.round(roundedHeight * scale)),
-    scaled: true,
-  };
-}
-
-function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode) {
+function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode | null) {
   return mode === 'wayland-embedded-compositor';
 }
 
@@ -526,7 +500,6 @@ const workspaceSelectionClass = {
 const viewportClass = {
   container: 'relative flex h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[radial-gradient(circle_at_50%_18%,rgba(96,165,250,0.10),transparent_32%),linear-gradient(180deg,#101721_0%,#081018_55%,#070A0F_100%)]',
   nativeInput: '!bg-transparent',
-  canvas: 'block h-full w-full object-fill',
   selectionOverlay: 'pointer-events-none absolute inset-0 z-20 h-full w-full',
 };
 
@@ -1176,8 +1149,7 @@ function useDragHandle(
 
 // ─── Viewport ────────────────────────────────────────────────────────────────
 
-function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize, viewMode, playMode, editorCamera, suspendReadback }: {
-  sceneVersion?: number;
+function SceneViewportInputLayer({ cameraRef, onCameraChange, onResize, viewMode, showGuides = false }: {
   cameraRef?: React.MutableRefObject<{
     yaw: number; pitch: number; distance: number;
     targetX: number; targetY: number; targetZ: number;
@@ -1185,20 +1157,9 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
   onCameraChange?: () => void;
   onResize?: (size: { width: number; height: number }) => void;
   viewMode: '2d' | '3d';
-  playMode?: boolean;
-  editorCamera?: boolean;
-  suspendReadback?: boolean;
+  showGuides?: boolean;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const sizeRef = useRef({ width: 640, height: 480 });
-  const isActiveRef = useRef(true);
-  const versionRef = useRef(sceneVersion);
-  const lastRenderedVersionRef = useRef<number | null>(null);
-  const fastPreviewUntilRef = useRef(0);
-  const dirtyRef = useRef(true);
-  const lastDrawWasScaledRef = useRef(false);
   const onResizeRef = useRef(onResize);
   const internalCameraRef = useRef({
     yaw: -0.5, pitch: 0.3, distance: 6,
@@ -1210,133 +1171,28 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
     x: 0, y: 0, yaw: 0, pitch: 0, targetX: 0, targetY: 0, targetZ: 0,
   });
 
-  if (versionRef.current !== sceneVersion) {
-    versionRef.current = sceneVersion;
-    dirtyRef.current = true;
-  }
   onResizeRef.current = onResize;
 
-  const markViewportDirty = useCallback((resetVersion = true) => {
-    dirtyRef.current = true;
-    if (resetVersion) lastRenderedVersionRef.current = null;
-  }, []);
-
-  // Poll for frames via binary IPC
-  useEffect(() => {
-    isActiveRef.current = true;
-    lastRenderedVersionRef.current = null;
-    dirtyRef.current = true;
-    const poll = async () => {
-      if (!isActiveRef.current) return;
-      if (suspendReadback) {
-        window.setTimeout(poll, 250);
-        return;
-      }
-      const previewIsActive = performance.now() < fastPreviewUntilRef.current;
-      if (!dirtyRef.current && !playMode && !previewIsActive) {
-        if (lastDrawWasScaledRef.current) {
-          markViewportDirty();
-        } else {
-          window.setTimeout(poll, 100);
-          return;
-        }
-      }
-      const { width, height } = fitViewportReadbackSize(
-        sizeRef.current.width,
-        sizeRef.current.height,
-        previewIsActive ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
-      );
-      const cam = camRef.current;
-      const lastVersion = !playMode && !previewIsActive
-        ? lastRenderedVersionRef.current ?? undefined
-        : undefined;
-      dirtyRef.current = false;
-      try {
-        const buffer = await viewportReadback({
-          width, height,
-          lastVersion,
-          yaw: cam.yaw, pitch: cam.pitch, distance: cam.distance,
-          targetX: cam.targetX, targetY: cam.targetY, targetZ: cam.targetZ,
-          viewMode,
-          playMode,
-          editorCamera,
-        });
-        if (!isActiveRef.current || !canvasRef.current) return;
-        const uint8 = new Uint8Array(buffer);
-        const header = new Uint32Array(uint8.buffer, uint8.byteOffset, 2);
-        const w = header[0];
-        const h = header[1];
-        if (w > 0 && h > 0) {
-          lastRenderedVersionRef.current = versionRef.current;
-          const expected = fitViewportReadbackSize(
-            sizeRef.current.width,
-            sizeRef.current.height,
-            previewIsActive ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
-          );
-          lastDrawWasScaledRef.current = w !== expected.width || h !== expected.height;
-          const canvas = canvasRef.current;
-          if (canvas.width !== w || canvas.height !== h) {
-            canvas.width = w;
-            canvas.height = h;
-            contextRef.current = null;
-          }
-          const ctx = contextRef.current ?? canvas.getContext('2d');
-          contextRef.current = ctx;
-          if (ctx) {
-            const pixelOffset = uint8.byteOffset + 8;
-            const pixelBytes = w * h * 4;
-            const imageData = new ImageData(
-              new Uint8ClampedArray(uint8.buffer, pixelOffset, pixelBytes),
-              w, h,
-            );
-            ctx.putImageData(imageData, 0, 0);
-          }
-        }
-      } catch (e) {
-        console.error('[viewport] readback error:', e);
-      }
-      // GPU readback is synchronous on the backend and copies the full RGBA
-      // frame through IPC. Refresh quickly only while the camera is actively
-      // moving; keep idle scene previews on a low-cost dirty/version poll.
-      window.setTimeout(poll, playMode || previewIsActive ? editorViewportFrameMs : 100);
-    };
-    poll();
-    return () => { isActiveRef.current = false; };
-  }, [editorCamera, markViewportDirty, playMode, suspendReadback, viewMode]);
-
-  // Resize observer
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const initRect = container.getBoundingClientRect();
-    sizeRef.current = {
+    onResizeRef.current?.({
       width: Math.round(initRect.width) || 640,
       height: Math.round(initRect.height) || 480,
-    };
-    onResizeRef.current?.(sizeRef.current);
+    });
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          const nextSize = { width: Math.round(width), height: Math.round(height) };
-          sizeRef.current = nextSize;
-          onResizeRef.current?.(nextSize);
-          markViewportDirty();
-          const canvas = canvasRef.current;
-          if (canvas) {
-            const nextReadback = fitViewportReadbackSize(width, height);
-            canvas.width = nextReadback.width;
-            canvas.height = nextReadback.height;
-            contextRef.current = null;
-          }
+          onResizeRef.current?.({ width: Math.round(width), height: Math.round(height) });
         }
       }
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [markViewportDirty]);
+  }, []);
 
-  // Mouse handlers for orbit/pan
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button === 2) {
       dragging.current = viewMode === '2d' ? 'pan' : 'orbit';
@@ -1365,16 +1221,12 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
         camRef.current.targetY = dragStart.current.targetY + dy * d * 0.5;
         camRef.current.targetZ = dragStart.current.targetZ + (dx * Math.sin(yaw) - dy * Math.cos(yaw) * 0.5) * d;
       }
-      markViewportDirty();
-      fastPreviewUntilRef.current = performance.now() + 160;
       onCameraChange?.();
     };
     const handleMouseUp = () => { dragging.current = null; };
     const handleWheel = (e: WheelEvent) => {
       if (containerRef.current && containerRef.current.contains(e.target as Node)) {
         camRef.current.distance = Math.max(0.5, Math.min(100, camRef.current.distance + e.deltaY * 0.01));
-        markViewportDirty();
-        fastPreviewUntilRef.current = performance.now() + 160;
         onCameraChange?.();
         e.preventDefault();
       }
@@ -1387,17 +1239,16 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
       window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('wheel', handleWheel);
     };
-  }, [markViewportDirty, onCameraChange, viewMode]);
+  }, [onCameraChange, viewMode]);
 
   return (
     <div
       ref={containerRef}
-      className={cx(viewportClass.container, suspendReadback && viewportClass.nativeInput)}
+      className={cx(viewportClass.container, viewportClass.nativeInput)}
       onMouseDown={onMouseDown}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {!suspendReadback && <canvas ref={canvasRef} className={viewportClass.canvas} />}
-      <ViewportGrid show={!suspendReadback} />
+      <ViewportGrid show={showGuides} />
       {viewMode === '3d' && <OrientationGizmo camera={camRef.current} onSnapToAxis={(axis) => {
         switch (axis) {
           case 'top':    camRef.current.pitch = 1.5;  camRef.current.yaw = 0;     break;
@@ -1407,8 +1258,6 @@ function ViewportCanvas({ sceneVersion = 0, cameraRef, onCameraChange, onResize,
           case 'front':  camRef.current.pitch = 0;    camRef.current.yaw = 0;     break;
           case 'back':   camRef.current.pitch = 0;    camRef.current.yaw = 3.14;  break;
         }
-        markViewportDirty();
-        fastPreviewUntilRef.current = performance.now() + 160;
         onCameraChange?.();
       }} />}
     </div>
@@ -1600,7 +1449,7 @@ export default function EditorPage({
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
   const [cameraRevision, setCameraRevision] = useState(0);
-  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode>('canvas-readback');
+  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode | null>(null);
   const [viewportPresentationAdapters, setViewportPresentationAdapters] = useState<ViewportPresentationAdapter[]>([]);
   const [viewportPresentationDiagnostics, setViewportPresentationDiagnostics] = useState<ViewportPresentationStatus | null>(null);
   const [waylandRuntimeDiagnostics, setWaylandRuntimeDiagnostics] = useState<WaylandEmbeddedCompositorRuntimeStatus | null>(null);
@@ -1674,7 +1523,9 @@ export default function EditorPage({
   const [activeTool] = useState<'view' | 'move' | 'rotate' | 'scale'>('move');
 
   const effectivePresentationAdapters = viewportPresentationDiagnostics?.adapters ?? viewportPresentationAdapters;
-  const viewportPresentationAdapter = effectivePresentationAdapters.find((adapter) => adapter.mode === viewportPresentation);
+  const viewportPresentationAdapter = viewportPresentation
+    ? effectivePresentationAdapters.find((adapter) => adapter.mode === viewportPresentation)
+    : undefined;
   const noCpuReadbackPresentation = isNoCpuReadbackAdapter(viewportPresentationAdapter);
   const waylandRuntimeStatusLabel = waylandRuntimeLabel(waylandRuntimeDiagnostics);
   const nativeSceneActive = Boolean(
@@ -1766,6 +1617,7 @@ export default function EditorPage({
   }, []);
 
   const openDefaultScenePresentation = useCallback(async () => {
+    if (!viewportPresentation) throw new Error('No native Scene View adapter is available.');
     const viewport = embeddedSceneViewport();
     if (!viewport) throw new Error('Scene View frame is not ready yet.');
     const camera = cameraRef.current;
@@ -1794,7 +1646,7 @@ export default function EditorPage({
       .then((status) => {
         setViewportPresentationDiagnostics(status);
         if (status.adapters) setViewportPresentationAdapters(status.adapters);
-        if (status.default_mode) setViewportPresentation(status.default_mode);
+        setViewportPresentation(status.default_mode ?? null);
       })
       .catch(() => {
         setViewportPresentationDiagnostics(null);
@@ -2813,17 +2665,15 @@ export default function EditorPage({
                 >
                   {nativeSceneError && (
                     <div className={gameClass.nativeError}>
-                      Native Scene View failed, using canvas fallback: {nativeSceneError}
+                      Native Scene View unavailable: {nativeSceneError}
                     </div>
                   )}
-                  <ViewportCanvas
-                    sceneVersion={sceneVersion}
+                  <SceneViewportInputLayer
                     cameraRef={cameraRef}
                     onCameraChange={handleCameraChange}
                     onResize={handleViewportResize}
                     viewMode={viewMode}
-                    editorCamera
-                    suspendReadback={nativeSceneActive}
+                    showGuides={!nativeSceneActive}
                   />
                   <SelectionOverlay sceneTree={sceneTree} selectedId={selectedId} camera={cameraRef.current} width={viewportSize.width} height={viewportSize.height} viewMode={viewMode} />
                 </div>

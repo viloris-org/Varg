@@ -4,6 +4,71 @@ use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
 
 impl WgpuRenderDevice {
+    pub(crate) fn screen_space_gi_enabled(&self, world: &RenderWorld) -> bool {
+        self.ssgi_compute_pipeline.is_some()
+            && matches!(
+                world.global_illumination,
+                engine_render::RenderGlobalIllumination::ScreenSpace
+            )
+    }
+
+    pub(crate) fn prepare_skybox_environment(&mut self, world: &RenderWorld) -> bool {
+        let requested = world
+            .skybox
+            .as_ref()
+            .and_then(|skybox| skybox.cubemap.as_deref())
+            .and_then(|label| self.skybox_cubemaps.get(label).copied())
+            .filter(|handle| {
+                self.images
+                    .get(handle)
+                    .and_then(|image| image.cube_view.as_ref())
+                    .is_some()
+            });
+
+        if self.active_skybox_cubemap != requested {
+            let cube_view = requested
+                .and_then(|handle| {
+                    self.images
+                        .get(&handle)
+                        .and_then(|image| image.cube_view.as_ref())
+                })
+                .unwrap_or(&self._skybox_default_cubemap_view);
+            self.skybox_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aster skybox bind group"),
+                layout: &self.skybox_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.skybox_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(cube_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self._skybox_sampler),
+                    },
+                ],
+            });
+            self.active_skybox_cubemap = requested;
+        }
+
+        match requested {
+            Some(handle) if self.active_ibl_cubemap != Some(handle) => {
+                self.bake_ibl_for_cubemap(handle);
+                self.ibl_enabled = true;
+            }
+            None if self.active_ibl_cubemap.is_some() || !self.ibl_enabled => {
+                self.bake_ibl();
+                self.ibl_enabled = true;
+            }
+            _ => {}
+        }
+
+        requested.is_some()
+    }
+
     pub(crate) fn upload_lighting_uniform(&mut self, world: &RenderWorld) {
         let lighting = lighting_uniform_from_world(world);
         self.latest_submitted_lights = world.lights.len() as u32;
@@ -13,6 +78,16 @@ impl WgpuRenderDevice {
             .saturating_sub(self.latest_visible_lights);
         self.queue
             .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+    }
+
+    pub(crate) fn upload_gi_probes(&mut self, world: &RenderWorld) {
+        let (uniform, probes) = gi_probe_uniform_and_data(world);
+        self.queue
+            .write_buffer(&self.gi_probe_uniform, 0, bytemuck::bytes_of(&uniform));
+        if !probes.is_empty() {
+            self.queue
+                .write_buffer(&self.gi_probe_buffer, 0, bytemuck::cast_slice(&probes));
+        }
     }
 
     pub(crate) fn lighting_mode_metrics(
@@ -495,14 +570,13 @@ impl WgpuRenderDevice {
             encoder_label,
             "render_world_to_target"
         );
-        let uniform = camera_uniform_from_world(world, aspect);
-        self.queue
-            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
         self.upload_lighting_uniform(world);
+        self.upload_gi_probes(world);
         let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
-        let skybox = skybox_uniform_from_world(world);
+        let use_cubemap = self.prepare_skybox_environment(world);
+        let skybox = skybox_uniform_from_world(world, use_cubemap);
         self.queue
             .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
         let fog = fog_uniform_from_world(world);
@@ -533,8 +607,19 @@ impl WgpuRenderDevice {
             self.reset_temporal_history = reset_history;
         }
         self.upload_temporal_uniform();
+        let uniform = if plan.temporal_inputs {
+            camera_uniform_with_view_projection(
+                world,
+                aspect,
+                mat4_from_flat(self.latest_temporal_camera.view_projection),
+            )
+        } else {
+            camera_uniform_from_world(world, aspect)
+        };
+        self.queue
+            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
         let enable_ssao = self.ssao_compute_pipeline.is_some();
-        let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+        let enable_ssgi = self.screen_space_gi_enabled(world);
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
 
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -658,6 +743,14 @@ impl WgpuRenderDevice {
                 ssgi_intensity: SSGI_INTENSITY,
                 ssr_enabled: 1.0,
                 ssr_intensity: 0.35,
+                taa_reset: if self.reset_temporal_history {
+                    1.0
+                } else {
+                    0.0
+                },
+                taa_history_weight: 0.88,
+                taa_enabled: 1.0,
+                _pad: 0.0,
             }),
         );
         self.queue.write_buffer(
@@ -698,6 +791,7 @@ impl WgpuRenderDevice {
         );
 
         self.ensure_hdr_target(tw, th);
+        self.ensure_taa_targets();
         self.ensure_bloom_mips(tw, th);
         if ssao_enabled {
             self.ensure_ssao_output();
@@ -732,6 +826,7 @@ impl WgpuRenderDevice {
         };
         let ssgi_view = self.ssgi_output_view.clone();
         let (bloom_down_bgs, bloom_up_bgs) = self.ensure_bloom_bind_groups();
+        let taa_bg = Some(self.ensure_taa_bind_group());
         let post_bg = Some(self.ensure_post_bind_group());
 
         FrameResources {
@@ -741,6 +836,7 @@ impl WgpuRenderDevice {
             ssgi_view,
             bloom_down_bgs,
             bloom_up_bgs,
+            taa_bg,
             post_bg,
         }
     }
@@ -979,13 +1075,14 @@ impl WgpuRenderDevice {
             self.post_target_height = h;
             // Invalidate cached bind groups that reference the old HDR target.
             self.post_cached_bg = None;
+            self.taa_bind_group = None;
             self.ssao_cached_bg = None;
             self.ssgi_cached_bg = None;
         }
     }
 }
 
-fn mat4_from_flat(matrix: [f32; 16]) -> [[f32; 4]; 4] {
+pub(crate) fn mat4_from_flat(matrix: [f32; 16]) -> [[f32; 4]; 4] {
     [
         [matrix[0], matrix[1], matrix[2], matrix[3]],
         [matrix[4], matrix[5], matrix[6], matrix[7]],

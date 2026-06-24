@@ -134,6 +134,7 @@ fn forward_shader_selects_cascades_with_linear_camera_depth() {
 #[test]
 fn gpu_uniform_structs_match_wgsl_alignment() {
     assert_eq!(std::mem::size_of::<CameraUniform>(), 96);
+    assert_eq!(std::mem::size_of::<PostProcessUniform>(), 80);
     assert_eq!(
         std::mem::size_of::<LightingUniform>(),
         32 + MAX_FORWARD_LIGHTS * std::mem::size_of::<ForwardLightUniform>()
@@ -202,6 +203,17 @@ fn post_shader_uses_cubic_reconstruction_and_bounded_sharpening() {
     assert!(POST_SHADER.contains("fn sharpen_hdr"));
     assert!(POST_SHADER.contains("textureLoad(hdr_tex"));
     assert!(POST_SHADER.contains("clamp(center + detail"));
+}
+
+#[test]
+fn taa_shader_reprojects_and_clamps_history_for_antialiasing() {
+    assert!(TAA_SHADER.contains("var history_tex: texture_2d<f32>"));
+    assert!(TAA_SHADER.contains("var motion_tex: texture_2d<f32>"));
+    assert!(TAA_SHADER.contains("history_uv = uv - motion"));
+    assert!(TAA_SHADER.contains("clamp(history, neighborhood_min, neighborhood_max)"));
+    assert!(TAA_SHADER.contains("post.taa_history_weight"));
+    assert!(POST_SHADER.contains("let hdr = resolve_hdr(input.uv)"));
+    assert!(!POST_SHADER.contains("fn fxaa_hdr"));
 }
 
 #[test]
@@ -303,6 +315,7 @@ fn packs_scene_lights_into_forward_uniform() {
         lighting_mode: Default::default(),
         global_illumination: Default::default(),
         shadow_virtualization: Default::default(),
+        ..RenderWorld::default()
     };
 
     let uniform = lighting_uniform_from_world(&world);
@@ -331,6 +344,7 @@ fn mesh_batches_group_objects_without_per_object_mesh_names() {
         lighting_mode: Default::default(),
         global_illumination: Default::default(),
         shadow_virtualization: Default::default(),
+        ..RenderWorld::default()
     };
 
     let batches = test_mesh_batches(&world);
@@ -359,6 +373,7 @@ fn mesh_batches_merge_particles_with_plane_objects() {
         lighting_mode: Default::default(),
         global_illumination: Default::default(),
         shadow_virtualization: Default::default(),
+        ..RenderWorld::default()
     };
 
     let batches = test_mesh_batches(&world);
@@ -593,6 +608,7 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
         lighting_mode: Default::default(),
         global_illumination: Default::default(),
         shadow_virtualization: Default::default(),
+        ..RenderWorld::default()
     };
 
     let selected = select_forward_lights(&world);
@@ -683,4 +699,40 @@ fn grid_vertices_within_extent() {
         assert!(v.position[0].abs() <= 50.0 + f32::EPSILON);
         assert!(v.position[2].abs() <= 50.0 + f32::EPSILON);
     }
+}
+
+#[test]
+fn probe_volume_generates_enabled_irradiance_grid() {
+    let world = RenderWorld {
+        global_illumination: engine_render::RenderGlobalIllumination::ProbeVolume(
+            engine_render::RenderProbeVolume {
+                counts: [2, 2, 2],
+                extent: engine_core::math::Vec3::new(2.0, 2.0, 2.0),
+                intensity: 1.5,
+                ..engine_render::RenderProbeVolume::default()
+            },
+        ),
+        lights: vec![RenderLight {
+            object: engine_core::EntityId::from_u128(42),
+            transform: engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(0.0, 2.0, 0.0),
+                rotation: engine_core::math::Quat::IDENTITY,
+                scale: engine_core::math::Vec3::ONE,
+            },
+            kind: RenderLightKind::Point,
+            color: engine_core::math::Vec3::new(1.0, 0.5, 0.25),
+            intensity: 4.0,
+            range: 10.0,
+            spot_angle: 45.0,
+        }],
+        ..RenderWorld::default()
+    };
+
+    let (uniform, probes) = gi_probe_uniform_and_data(&world);
+
+    assert_eq!(uniform.params[0], 1);
+    assert_eq!(uniform.params[1], 8);
+    assert_eq!(uniform.counts_intensity, [2.0, 2.0, 2.0, 1.5]);
+    assert_eq!(probes.len(), 8);
+    assert!(probes.iter().any(|probe| probe.irradiance[0] > 0.03));
 }

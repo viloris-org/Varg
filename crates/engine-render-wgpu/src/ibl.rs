@@ -3,14 +3,43 @@ use wgpu::util::DeviceExt;
 
 impl WgpuRenderDevice {
     pub(crate) fn bake_ibl(&mut self) {
-        let skybox_view = &self._skybox_default_cubemap_view;
+        self.bake_ibl_from_view(&self._skybox_default_cubemap_view);
+        self.active_ibl_cubemap = None;
+    }
+
+    pub(crate) fn bake_ibl_for_cubemap(&mut self, handle: engine_core::Handle) {
+        let view = match self
+            .images
+            .get(&handle)
+            .and_then(|image| image.cube_view.as_ref())
+        {
+            Some(view) => view,
+            None => {
+                return;
+            }
+        };
+        self.bake_ibl_from_view(view);
+        self.active_ibl_cubemap = Some(handle);
+    }
+
+    pub(crate) fn bake_ibl_from_view(&self, skybox_view: &wgpu::TextureView) {
         let scratch_view = self.ibl_scratch_view.as_ref().unwrap();
         let scratch_tex = self.ibl_scratch_tex.as_ref().unwrap();
         let bake_bgl = self.ibl_bake_bgl.as_ref().unwrap();
         let sampl = &self.ibl_sampler;
 
-        let irradiance_pipeline = self.ibl_irradiance_compute.as_ref().unwrap();
-        let prefilter_pipeline = self.ibl_prefilter_compute.as_ref().unwrap();
+        let irradiance_pipeline = match self.ibl_irradiance_compute.as_ref() {
+            Some(pipeline) => pipeline,
+            None => {
+                return;
+            }
+        };
+        let prefilter_pipeline = match self.ibl_prefilter_compute.as_ref() {
+            Some(pipeline) => pipeline,
+            None => {
+                return;
+            }
+        };
 
         let mut encoder = self
             .device
@@ -27,11 +56,14 @@ impl WgpuRenderDevice {
             }],
         });
         {
+            let Some(brdf_pipeline) = self.ibl_brdf_compute.as_ref() else {
+                return;
+            };
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("aster ibl brdf pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(self.ibl_brdf_compute.as_ref().unwrap());
+            cpass.set_pipeline(brdf_pipeline);
             cpass.set_bind_group(0, &brdf_bg, &[]);
             cpass.dispatch_workgroups((IBL_BRDF_LUT_RES + 7) / 8, (IBL_BRDF_LUT_RES + 7) / 8, 1);
         }
@@ -160,6 +192,5 @@ impl WgpuRenderDevice {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        self.ibl_enabled = true;
     }
 }

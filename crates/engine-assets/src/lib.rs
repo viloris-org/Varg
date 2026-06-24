@@ -390,6 +390,34 @@ pub struct DecodedTextureResource {
     pub pixels: Vec<u8>,
 }
 
+/// Decoded cubemap resource with six tightly packed square RGBA faces.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DecodedCubemapResource {
+    /// Width and height in pixels for every face.
+    pub face_size: u32,
+    /// Runtime pixel format.
+    pub format: String,
+    /// Six tightly packed RGBA faces in +X, -X, +Y, -Y, +Z, -Z order.
+    pub pixels: Vec<u8>,
+}
+
+/// Source JSON for a six-image cubemap.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CubemapSource {
+    /// Positive X face path, relative to the cubemap source file.
+    pub positive_x: PathBuf,
+    /// Negative X face path, relative to the cubemap source file.
+    pub negative_x: PathBuf,
+    /// Positive Y face path, relative to the cubemap source file.
+    pub positive_y: PathBuf,
+    /// Negative Y face path, relative to the cubemap source file.
+    pub negative_y: PathBuf,
+    /// Positive Z face path, relative to the cubemap source file.
+    pub positive_z: PathBuf,
+    /// Negative Z face path, relative to the cubemap source file.
+    pub negative_z: PathBuf,
+}
+
 /// CPU-side texture resource with mip chain for GPU upload.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct CpuTextureResource {
@@ -435,6 +463,23 @@ impl DecodedTextureResource {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetError> {
         serde_json::from_slice(bytes).map_err(|source| AssetError::Parse {
             format: "decoded texture",
+            diagnostic: AssetDiagnostic::new(source.to_string()),
+        })
+    }
+
+    /// Serializes to JSON bytes.
+    pub fn to_bytes(&self) -> EngineResult<Arc<[u8]>> {
+        serde_json::to_vec(self)
+            .map(Arc::from)
+            .map_err(|error| EngineError::other(error.to_string()))
+    }
+}
+
+impl DecodedCubemapResource {
+    /// Parses a decoded cubemap payload from JSON bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetError> {
+        serde_json::from_slice(bytes).map_err(|source| AssetError::Parse {
+            format: "decoded cubemap",
             diagnostic: AssetDiagnostic::new(source.to_string()),
         })
     }
@@ -2020,9 +2065,12 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         // Legacy projects may still contain Rhai-named scripts.
         "rhai" => Some((ResourceKind::Script, "script-rhai")),
         "json" => {
-            if path.to_string_lossy().contains("material") {
+            let path_text = path.to_string_lossy();
+            if path_text.contains("cubemap") || path_text.contains("skybox") {
+                Some((ResourceKind::Texture, "cubemap-json"))
+            } else if path_text.contains("material") {
                 Some((ResourceKind::Material, "material-json"))
-            } else if path.to_string_lossy().contains("prefab") {
+            } else if path_text.contains("prefab") {
                 Some((ResourceKind::Prefab, "prefab-json"))
             } else {
                 infer_scene_json(path)
@@ -2497,6 +2545,10 @@ fn import_cpu_payload(
 }
 
 fn import_texture_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    if importer == "cubemap-json" {
+        return import_cubemap_payload(path, importer, bytes);
+    }
+
     let mut diagnostics = Vec::new();
     let (payload, summary) = match image::load_from_memory(bytes) {
         Ok(image) => {
@@ -2547,6 +2599,129 @@ fn import_texture_payload(path: &Path, importer: &str, bytes: &[u8]) -> Imported
     ImportedCpuPayload {
         bytes: payload,
         summary,
+        diagnostics,
+    }
+}
+
+fn import_cubemap_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
+    let mut diagnostics = Vec::new();
+    let source = match serde_json::from_slice::<CubemapSource>(bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            diagnostics.push(
+                AssetDiagnostic::new(format!("cubemap manifest parse failed: {error}"))
+                    .with_path(path),
+            );
+            return ImportedCpuPayload {
+                bytes: Arc::from(bytes),
+                summary: format!(
+                    "{} bytes cubemap source imported by {importer}",
+                    bytes.len()
+                ),
+                diagnostics,
+            };
+        }
+    };
+
+    let base_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    let faces = [
+        source.positive_x,
+        source.negative_x,
+        source.positive_y,
+        source.negative_y,
+        source.positive_z,
+        source.negative_z,
+    ];
+    let mut face_size = None;
+    let mut pixels = Vec::new();
+    for face in faces {
+        let face_path = base_dir.join(&face);
+        let face_bytes = match fs::read(&face_path) {
+            Ok(bytes) => bytes,
+            Err(source) => {
+                diagnostics.push(
+                    AssetDiagnostic::new(format!("cubemap face read failed: {source}"))
+                        .with_path(face_path),
+                );
+                return ImportedCpuPayload {
+                    bytes: Arc::from(bytes),
+                    summary: format!(
+                        "{} bytes cubemap source imported by {importer}",
+                        bytes.len()
+                    ),
+                    diagnostics,
+                };
+            }
+        };
+        let image = match image::load_from_memory(&face_bytes) {
+            Ok(image) => image.to_rgba8(),
+            Err(error) => {
+                diagnostics.push(
+                    AssetDiagnostic::new(format!("cubemap face decode failed: {error}"))
+                        .with_path(face_path),
+                );
+                return ImportedCpuPayload {
+                    bytes: Arc::from(bytes),
+                    summary: format!(
+                        "{} bytes cubemap source imported by {importer}",
+                        bytes.len()
+                    ),
+                    diagnostics,
+                };
+            }
+        };
+        if image.width() != image.height() {
+            diagnostics
+                .push(AssetDiagnostic::new("cubemap face must be square").with_path(face_path));
+            return ImportedCpuPayload {
+                bytes: Arc::from(bytes),
+                summary: format!(
+                    "{} bytes cubemap source imported by {importer}",
+                    bytes.len()
+                ),
+                diagnostics,
+            };
+        }
+        match face_size {
+            Some(size) if size != image.width() => {
+                diagnostics.push(
+                    AssetDiagnostic::new("all cubemap faces must have identical dimensions")
+                        .with_path(face_path),
+                );
+                return ImportedCpuPayload {
+                    bytes: Arc::from(bytes),
+                    summary: format!(
+                        "{} bytes cubemap source imported by {importer}",
+                        bytes.len()
+                    ),
+                    diagnostics,
+                };
+            }
+            Some(_) => {}
+            None => face_size = Some(image.width()),
+        }
+        pixels.extend_from_slice(&image.into_raw());
+    }
+
+    let face_size = face_size.unwrap_or(1);
+    let cubemap = DecodedCubemapResource {
+        face_size,
+        format: "cubemap_rgba8_srgb".to_string(),
+        pixels,
+    };
+    let payload = match cubemap.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diagnostics.push(
+                AssetDiagnostic::new(format!("cubemap encode failed: {error}")).with_path(path),
+            );
+            Arc::from(bytes)
+        }
+    };
+
+    ImportedCpuPayload {
+        bytes: payload,
+        summary: format!("decoded {face_size}x{face_size}x6 rgba8_srgb cubemap by {importer}"),
         diagnostics,
     }
 }
@@ -3064,6 +3239,67 @@ mod tests {
         assert_eq!(texture.height, 1);
         assert_eq!(texture.format, "rgba8_srgb");
         assert_eq!(texture.pixels, vec![255, 255, 255, 255]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn imports_cubemap_manifest_as_decoded_cube_payload() {
+        let root =
+            std::env::temp_dir().join(format!("aster-cubemap-decode-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("textures/cube")).unwrap();
+        for name in ["px", "nx", "py", "ny", "pz", "nz"] {
+            std::fs::write(
+                root.join(format!("textures/cube/{name}.png")),
+                one_pixel_png(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("textures/skybox.cubemap.json"),
+            r#"{
+  "positive_x": "cube/px.png",
+  "negative_x": "cube/nx.png",
+  "positive_y": "cube/py.png",
+  "negative_y": "cube/ny.png",
+  "positive_z": "cube/pz.png",
+  "negative_z": "cube/nz.png"
+}"#,
+        )
+        .unwrap();
+
+        let mut database = AssetDatabase::new(&root, "builtin");
+        let report = scan_project_assets(&root, &mut database).unwrap();
+        let meta = report
+            .metas
+            .iter()
+            .find(|meta| meta.source_path == PathBuf::from("textures/skybox.cubemap.json"))
+            .unwrap();
+        assert_eq!(meta.kind, ResourceKind::Texture);
+        assert_eq!(meta.importer, "cubemap-json");
+
+        let mut registry = AssetRegistry::default();
+        import_builtin_asset(
+            &root,
+            &mut registry,
+            ImportTask {
+                guid: meta.guid,
+                source_path: meta.source_path.clone(),
+                kind: meta.kind,
+                importer: meta.importer.clone(),
+            },
+        )
+        .unwrap();
+
+        let handle = registry.handle_for_guid(meta.guid).unwrap();
+        let cubemap =
+            DecodedCubemapResource::from_bytes(&registry.cpu_resource(handle).unwrap().bytes)
+                .unwrap();
+
+        assert_eq!(cubemap.face_size, 1);
+        assert_eq!(cubemap.format, "cubemap_rgba8_srgb");
+        assert_eq!(cubemap.pixels.len(), 6 * 4);
 
         let _ = std::fs::remove_dir_all(&root);
     }

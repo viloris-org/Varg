@@ -16,9 +16,9 @@ use engine_script_rhai::RhaiScriptBackend;
 use std::time::Instant;
 
 use engine_assets::{
-    AssetDatabase, AssetGuid, AssetRegistry, DecodedTextureResource, GpuResource, HotReloadTracker,
-    ImportTask, MaterialFormat, ModelResource, ResourceKind, import_builtin_asset,
-    scan_project_assets,
+    AssetDatabase, AssetGuid, AssetRegistry, DecodedCubemapResource, DecodedTextureResource,
+    GpuResource, HotReloadTracker, ImportTask, MaterialFormat, ModelResource, ResourceKind,
+    import_builtin_asset, scan_project_assets,
 };
 #[cfg(feature = "audio")]
 use engine_audio::{
@@ -910,20 +910,30 @@ impl<R: RenderDevice> RuntimeServices<R> {
         };
         match kind {
             ResourceKind::Texture => {
-                let texture =
-                    DecodedTextureResource::from_bytes(&cpu.bytes).map_err(EngineError::from)?;
-                let gpu = self.renderer.upload_texture(
-                    ImageDesc {
-                        width: texture.width,
-                        height: texture.height,
-                        mip_levels: 1,
-                        samples: 1,
-                        format: ImageFormat::Rgba8Srgb,
-                        usage: ImageUsage::SAMPLED.or(ImageUsage::TRANSFER_DST),
-                        label: Some("project texture"),
-                    },
-                    &texture.pixels,
-                )?;
+                let gpu = if let Ok(cubemap) = DecodedCubemapResource::from_bytes(&cpu.bytes) {
+                    let gpu = self.renderer.upload_cubemap(
+                        ImageDesc::cubemap(cubemap.face_size, ImageFormat::Rgba8Srgb),
+                        &cubemap.pixels,
+                    )?;
+                    self.renderer
+                        .register_skybox_cubemap(&format!("asset:{:032x}", guid.as_u128()), gpu);
+                    gpu
+                } else {
+                    let texture = DecodedTextureResource::from_bytes(&cpu.bytes)
+                        .map_err(EngineError::from)?;
+                    self.renderer.upload_texture(
+                        ImageDesc {
+                            width: texture.width,
+                            height: texture.height,
+                            mip_levels: 1,
+                            samples: 1,
+                            format: ImageFormat::Rgba8Srgb,
+                            usage: ImageUsage::SAMPLED.or(ImageUsage::TRANSFER_DST),
+                            label: Some("project texture"),
+                        },
+                        &texture.pixels,
+                    )?
+                };
                 self.texture_resources.insert(guid.as_asset_id(), gpu);
                 self.asset_registry.put_gpu(
                     handle,

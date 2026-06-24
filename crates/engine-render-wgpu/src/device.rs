@@ -41,6 +41,7 @@ pub(crate) const SSAO_RADIUS: f32 = 0.5;
 pub(crate) const SSAO_BIAS: f32 = 0.025;
 pub(crate) const SSGI_RADIUS: f32 = 2.5;
 pub(crate) const SSGI_INTENSITY: f32 = 0.65;
+pub(crate) const MAX_GI_PROBES: usize = 512;
 pub(crate) const INTERMEDIATE_WIDTH: u32 = 1920;
 pub(crate) const INTERMEDIATE_HEIGHT: u32 = 1080;
 
@@ -93,6 +94,7 @@ impl SurfaceViewportRect {
 pub(crate) struct GpuImage {
     pub(crate) _texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
+    pub(crate) cube_view: Option<wgpu::TextureView>,
     pub(crate) _desc: ImageDesc,
 }
 
@@ -225,6 +227,8 @@ pub struct WgpuRenderDevice {
     pub(crate) camera_uniform: wgpu::Buffer,
     pub(crate) temporal_uniform: wgpu::Buffer,
     pub(crate) lighting_uniform: wgpu::Buffer,
+    pub(crate) gi_probe_uniform: wgpu::Buffer,
+    pub(crate) gi_probe_buffer: wgpu::Buffer,
     pub(crate) _default_texture: wgpu::Texture,
     pub(crate) default_texture_view: wgpu::TextureView,
     pub(crate) _default_normal_texture: wgpu::Texture,
@@ -277,7 +281,11 @@ pub struct WgpuRenderDevice {
     pub(crate) shadow_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) material_cache: HashMap<String, ([f32; 4], f32, f32, [f32; 3])>,
     pub(crate) skybox_pipeline: wgpu::RenderPipeline,
+    pub(crate) skybox_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) skybox_bind_group: wgpu::BindGroup,
+    pub(crate) skybox_cubemaps: HashMap<String, Handle>,
+    pub(crate) active_skybox_cubemap: Option<Handle>,
+    pub(crate) active_ibl_cubemap: Option<Handle>,
     pub(crate) skybox_uniform: wgpu::Buffer,
     pub(crate) fog_uniform: wgpu::Buffer,
     pub(crate) _skybox_default_cubemap: wgpu::Texture,
@@ -301,6 +309,9 @@ pub struct WgpuRenderDevice {
     pub(crate) post_pipeline: wgpu::RenderPipeline,
     pub(crate) post_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) post_bind_group: wgpu::BindGroup,
+    pub(crate) taa_pipeline: wgpu::ComputePipeline,
+    pub(crate) taa_bind_group_layout: wgpu::BindGroupLayout,
+    pub(crate) taa_bind_group: Option<Arc<wgpu::BindGroup>>,
     /// Frame-level post bind group, cached per output resolution.
     pub(crate) post_cached_bg: Option<Arc<wgpu::BindGroup>>,
     pub(crate) post_cached_dims: (u32, u32),
@@ -347,6 +358,10 @@ pub struct WgpuRenderDevice {
     pub(crate) hdr_albedo_view: Option<wgpu::TextureView>,
     pub(crate) hdr_motion_texture: Option<wgpu::Texture>,
     pub(crate) hdr_motion_view: Option<wgpu::TextureView>,
+    pub(crate) taa_resolved_texture: Option<wgpu::Texture>,
+    pub(crate) taa_resolved_view: Option<wgpu::TextureView>,
+    pub(crate) taa_history_texture: Option<wgpu::Texture>,
+    pub(crate) taa_history_view: Option<wgpu::TextureView>,
     pub(crate) post_target_width: u32,
     pub(crate) post_target_height: u32,
     pub(crate) ibl_irradiance_compute: Option<wgpu::ComputePipeline>,
@@ -393,6 +408,7 @@ pub(crate) struct FrameResources {
     pub(crate) ssgi_view: Option<wgpu::TextureView>,
     pub(crate) bloom_down_bgs: Vec<Arc<wgpu::BindGroup>>,
     pub(crate) bloom_up_bgs: Vec<Arc<wgpu::BindGroup>>,
+    pub(crate) taa_bg: Option<Arc<wgpu::BindGroup>>,
     pub(crate) post_bg: Option<Arc<wgpu::BindGroup>>,
 }
 

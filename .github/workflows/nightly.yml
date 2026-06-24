@@ -16,18 +16,23 @@ jobs:
           - name: Linux x64
             os: ubuntu-latest
             platform: linux-x64
+            bundles: deb,rpm,appimage
           - name: Windows x64
             os: windows-latest
             platform: windows-x64
+            bundles: msi,nsis
           - name: macOS arm64
-            os: macos-14
+            os: macos-26
             platform: macos-arm64
+            bundles: dmg
           - name: macOS x64
-            os: macos-13
+            os: macos-26-intel
             platform: macos-x64
+            bundles: dmg
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      RUSTC_WRAPPER: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -44,8 +49,10 @@ jobs:
             wget \
             file \
             libssl-dev \
+            libudev-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            libxdo-dev
 
       - uses: oven-sh/setup-bun@v2
 
@@ -57,7 +64,7 @@ jobs:
 
       - name: Build Tauri editor (release)
         working-directory: editor
-        run: bun tauri build
+        run: bun tauri build --bundles ${{ matrix.bundles }}
 
       - name: List build artifacts
         run: |
@@ -88,11 +95,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create nightly release
+        shell: bash
         run: |
+          mapfile -d '' artifacts < <(find artifacts -type f -print0)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "No nightly artifacts found"
+            exit 1
+          fi
           gh release create nightly \
             --prerelease \
             --title "Nightly Build $(date +%Y-%m-%d)" \
             --notes "Automated nightly build from [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})." \
-            artifacts/*/aster-editor-*
+            "${artifacts[@]}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

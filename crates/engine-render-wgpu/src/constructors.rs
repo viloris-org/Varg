@@ -477,6 +477,20 @@ impl WgpuRenderDevice {
             contents: bytemuck::bytes_of(&LightingUniform::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let gi_probe_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster gi probe uniform"),
+            contents: bytemuck::bytes_of(&GiProbeUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let gi_probe_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("aster gi probe buffer"),
+            contents: bytemuck::cast_slice(
+                &[GiProbe {
+                    irradiance: [0.0; 4],
+                }; MAX_GI_PROBES],
+            ),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
         let default_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("aster default white texture"),
             size: wgpu::Extent3d {
@@ -726,6 +740,26 @@ impl WgpuRenderDevice {
                         visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -982,6 +1016,14 @@ impl WgpuRenderDevice {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: temporal_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: gi_probe_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: gi_probe_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1875,8 +1917,91 @@ impl WgpuRenderDevice {
                 ssgi_intensity: SSGI_INTENSITY,
                 ssr_enabled: 1.0,
                 ssr_intensity: 0.35,
+                taa_reset: 1.0,
+                taa_history_weight: 0.88,
+                taa_enabled: 1.0,
+                _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("aster taa resolve shader"),
+            source: wgpu::ShaderSource::Wgsl(TAA_SHADER.into()),
+        });
+        let taa_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("aster taa bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let taa_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("aster taa pipeline layout"),
+            bind_group_layouts: &[Some(&taa_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let taa_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("aster taa resolve pipeline"),
+            layout: Some(&taa_pipeline_layout),
+            module: &taa_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
         });
         let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("aster post pipeline layout"),
@@ -2591,6 +2716,8 @@ impl WgpuRenderDevice {
             camera_uniform,
             temporal_uniform,
             lighting_uniform,
+            gi_probe_uniform,
+            gi_probe_buffer,
             _default_texture: default_texture,
             default_texture_view,
             _default_normal_texture: default_normal_texture,
@@ -2641,7 +2768,11 @@ impl WgpuRenderDevice {
             shadow_bind_group_layout,
             material_cache: HashMap::new(),
             skybox_pipeline,
+            skybox_bind_group_layout,
             skybox_bind_group,
+            skybox_cubemaps: HashMap::new(),
+            active_skybox_cubemap: None,
+            active_ibl_cubemap: None,
             skybox_uniform,
             fog_uniform,
             _skybox_default_cubemap: skybox_default_cubemap,
@@ -2662,6 +2793,9 @@ impl WgpuRenderDevice {
             post_pipeline,
             post_bind_group_layout,
             post_bind_group: post_bg,
+            taa_pipeline,
+            taa_bind_group_layout,
+            taa_bind_group: None,
             post_cached_bg: None,
             post_cached_dims: (0, 0),
             post_uniform,
@@ -2702,6 +2836,10 @@ impl WgpuRenderDevice {
             hdr_albedo_view: None,
             hdr_motion_texture: None,
             hdr_motion_view: None,
+            taa_resolved_texture: None,
+            taa_resolved_view: None,
+            taa_history_texture: None,
+            taa_history_view: None,
             post_target_width: 0,
             post_target_height: 0,
             ibl_irradiance_compute,

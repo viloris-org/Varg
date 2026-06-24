@@ -3,6 +3,152 @@ use std::sync::Arc;
 use crate::device::*;
 
 impl WgpuRenderDevice {
+    pub(crate) fn ensure_taa_targets(&mut self) {
+        let w = self.post_target_width.max(1);
+        let h = self.post_target_height.max(1);
+        let need_create = match &self.taa_resolved_texture {
+            None => true,
+            Some(t) => t.width() != w || t.height() != h,
+        };
+        if !need_create {
+            return;
+        }
+
+        self.taa_resolved_view = None;
+        self.taa_resolved_texture = None;
+        self.taa_history_view = None;
+        self.taa_history_texture = None;
+
+        let resolved = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aster taa resolved hdr"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        self.taa_resolved_view =
+            Some(resolved.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.taa_resolved_texture = Some(resolved);
+
+        let history = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aster taa history hdr"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.taa_history_view = Some(history.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.taa_history_texture = Some(history);
+
+        self.taa_bind_group = None;
+        self.post_cached_bg = None;
+    }
+
+    pub(crate) fn ensure_taa_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
+        if self.taa_bind_group.is_none() {
+            let bg = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aster taa bind group frame"),
+                layout: &self.taa_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.hdr_target.as_ref().unwrap().color_view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.hdr_motion_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.taa_history_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.taa_resolved_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.post_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom_sampler),
+                    },
+                ],
+            }));
+            self.taa_bind_group = Some(Arc::clone(&bg));
+            bg
+        } else {
+            Arc::clone(self.taa_bind_group.as_ref().unwrap())
+        }
+    }
+
+    pub(crate) fn encode_taa_resolve_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        taa_bg: &Arc<wgpu::BindGroup>,
+    ) {
+        let w = self.post_target_width.max(1);
+        let h = self.post_target_height.max(1);
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("aster taa resolve"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&self.taa_pipeline);
+        cpass.set_bind_group(0, &**taa_bg, &[]);
+        cpass.dispatch_workgroups((w + 7) / 8, (h + 7) / 8, 1);
+        drop(cpass);
+
+        if let (Some(resolved), Some(history)) = (
+            self.taa_resolved_texture.as_ref(),
+            self.taa_history_texture.as_ref(),
+        ) {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: resolved,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: history,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
     pub(crate) fn ensure_ssao_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
         if self.ssao_cached_bg.is_none() {
             let bgl = self.ssao_compute_bgl.as_ref().unwrap();
@@ -296,7 +442,10 @@ impl WgpuRenderDevice {
 
     pub(crate) fn ensure_post_bind_group(&mut self) -> Arc<wgpu::BindGroup> {
         if self.post_cached_bg.is_none() {
-            let hdr_cv = &self.hdr_target.as_ref().unwrap().color_view;
+            let hdr_cv = self
+                .taa_resolved_view
+                .as_ref()
+                .unwrap_or(&self.hdr_target.as_ref().unwrap().color_view);
             let depth_view = self
                 .hdr_target
                 .as_ref()
@@ -375,6 +524,9 @@ impl WgpuRenderDevice {
         output_view: &wgpu::TextureView,
         viewport: Option<SurfaceViewportRect>,
     ) {
+        if let Some(taa_bg) = &res.taa_bg {
+            self.encode_taa_resolve_pass(encoder, taa_bg);
+        }
         let post_bg = res.post_bg.as_ref().unwrap();
         let load = viewport.map_or(
             wgpu::LoadOp::Clear(wgpu::Color {

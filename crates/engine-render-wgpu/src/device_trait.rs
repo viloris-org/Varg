@@ -42,14 +42,13 @@ impl RenderDevice for WgpuRenderDevice {
         let batches = self.prepare_render_batches(world, aspect);
         self.prepare_gpu_particles(world);
         let plan = self.active_frame_plan.clone().unwrap_or_default();
-        let uniform = camera_uniform_from_world(world, aspect);
-        self.queue
-            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
         self.upload_lighting_uniform(world);
+        self.upload_gi_probes(world);
         let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
-        let skybox = skybox_uniform_from_world(world);
+        let use_cubemap = self.prepare_skybox_environment(world);
+        let skybox = skybox_uniform_from_world(world, use_cubemap);
         self.queue
             .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
         let fog = fog_uniform_from_world(world);
@@ -100,10 +99,21 @@ impl RenderDevice for WgpuRenderDevice {
                 self.reset_temporal_history = reset_history || frame.frame_index == 0;
             }
             self.upload_temporal_uniform();
+            let uniform = if plan.temporal_inputs {
+                camera_uniform_with_view_projection(
+                    world,
+                    aspect,
+                    crate::render::mat4_from_flat(self.latest_temporal_camera.view_projection),
+                )
+            } else {
+                camera_uniform_from_world(world, aspect)
+            };
+            self.queue
+                .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let enable_ssao = self.ssao_compute_pipeline.is_some();
-            let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+            let enable_ssgi = self.screen_space_gi_enabled(world);
             let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
             let frame_res = self.encode_frame_passes(
                 &batches,
@@ -195,7 +205,7 @@ impl RenderDevice for WgpuRenderDevice {
         };
 
         let enable_ssao = false;
-        let enable_ssgi = self.ssgi_compute_pipeline.is_some();
+        let enable_ssgi = self.screen_space_gi_enabled(world);
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
         let frame_res = self.encode_frame_passes(
             &batches,
@@ -223,6 +233,17 @@ impl RenderDevice for WgpuRenderDevice {
             self.reset_temporal_history = reset_history || frame.frame_index == 0;
         }
         self.upload_temporal_uniform();
+        let uniform = if plan.temporal_inputs {
+            camera_uniform_with_view_projection(
+                world,
+                aspect,
+                crate::render::mat4_from_flat(self.latest_temporal_camera.view_projection),
+            )
+        } else {
+            camera_uniform_from_world(world, aspect)
+        };
+        self.queue
+            .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
 
         let target = self
             .targets
@@ -429,6 +450,7 @@ impl RenderDevice for WgpuRenderDevice {
             GpuImage {
                 _texture: texture,
                 view: view,
+                cube_view: None,
                 _desc: desc,
             },
         );
@@ -466,6 +488,88 @@ impl RenderDevice for WgpuRenderDevice {
             GpuImage {
                 _texture: texture,
                 view: view,
+                cube_view: None,
+                _desc: desc,
+            },
+        );
+        Ok(ImageHandle::new(handle))
+    }
+
+    fn upload_cubemap(&mut self, mut desc: ImageDesc, data: &[u8]) -> EngineResult<ImageHandle> {
+        desc.usage = desc
+            .usage
+            .or(engine_render::ImageUsage::SAMPLED)
+            .or(engine_render::ImageUsage::TRANSFER_DST);
+        let face_size = desc.width.max(1);
+        if desc.height.max(1) != face_size {
+            return Err(EngineError::other("cubemap faces must be square"));
+        }
+        let bytes_per_face =
+            face_size as usize * face_size as usize * desc.format.bytes_per_pixel() as usize;
+        if !data.is_empty() && data.len() != bytes_per_face * 6 {
+            return Err(EngineError::other(format!(
+                "cubemap upload expected {} bytes, got {}",
+                bytes_per_face * 6,
+                data.len()
+            )));
+        }
+
+        let handle = self.image_allocator.allocate()?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: desc.label,
+            size: wgpu::Extent3d {
+                width: face_size,
+                height: face_size,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: desc.mip_levels.max(1),
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: to_wgpu_format(desc.format),
+            usage: to_wgpu_texture_usage(desc.usage),
+            view_formats: &[],
+        });
+        if !data.is_empty() {
+            for face in 0..6u32 {
+                let start = face as usize * bytes_per_face;
+                let end = start + bytes_per_face;
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: face,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data[start..end],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(face_size * desc.format.bytes_per_pixel()),
+                        rows_per_image: Some(face_size),
+                    },
+                    wgpu::Extent3d {
+                        width: face_size,
+                        height: face_size,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let cube_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("aster uploaded cubemap view"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        self.images.insert(
+            handle,
+            GpuImage {
+                _texture: texture,
+                view,
+                cube_view: Some(cube_view),
                 _desc: desc,
             },
         );
@@ -538,6 +642,7 @@ impl RenderDevice for WgpuRenderDevice {
             GpuImage {
                 _texture: texture,
                 view: view,
+                cube_view: None,
                 _desc: desc,
             },
         );
@@ -954,5 +1059,11 @@ impl RenderDevice for WgpuRenderDevice {
         });
         self.material_gpu
             .insert(name.to_owned(), MaterialGpuData { bind_group });
+    }
+
+    fn register_skybox_cubemap(&mut self, label: &str, cubemap: ImageHandle) {
+        self.skybox_cubemaps.insert(label.to_owned(), cubemap.raw());
+        self.active_skybox_cubemap = None;
+        self.active_ibl_cubemap = None;
     }
 }

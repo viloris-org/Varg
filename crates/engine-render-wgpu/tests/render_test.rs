@@ -80,6 +80,7 @@ fn render_one_frame_with_debug_cube_succeeds() {
         lighting_mode: Default::default(),
         global_illumination: Default::default(),
         shadow_virtualization: Default::default(),
+        ..RenderWorld::default()
     };
 
     device

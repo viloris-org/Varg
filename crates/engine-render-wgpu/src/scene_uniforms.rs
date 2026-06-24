@@ -153,7 +153,7 @@ pub(crate) fn snap_csm_bounds_to_texel_grid(
         (max_y / texel_size).ceil() * texel_size,
     )
 }
-pub(crate) fn skybox_uniform_from_world(world: &RenderWorld) -> SkyboxUniform {
+pub(crate) fn skybox_uniform_from_world(world: &RenderWorld, use_cubemap: bool) -> SkyboxUniform {
     let skybox = match &world.skybox {
         Some(s) => s,
         None => {
@@ -206,7 +206,7 @@ pub(crate) fn skybox_uniform_from_world(world: &RenderWorld) -> SkyboxUniform {
             1.0,
         ],
         rotation_intensity: [skybox.rotation_degrees, skybox.intensity, 0.0, 0.0],
-        use_cubemap: [0, 0, 0, 0],
+        use_cubemap: [u32::from(use_cubemap), 0, 0, 0],
     }
 }
 
@@ -230,6 +230,22 @@ pub(crate) fn camera_uniform_from_world(world: &RenderWorld, aspect: f32) -> Cam
     let (vp, eye, target, _) = camera_temporal_basis(world, aspect);
     CameraUniform {
         view_projection: vp,
+        camera_position: [eye.x, eye.y, eye.z, 1.0],
+        camera_forward: {
+            let forward = (target - eye).normalized();
+            [forward.x, forward.y, forward.z, 0.0]
+        },
+    }
+}
+
+pub(crate) fn camera_uniform_with_view_projection(
+    world: &RenderWorld,
+    aspect: f32,
+    view_projection: [[f32; 4]; 4],
+) -> CameraUniform {
+    let (_, eye, target, _) = camera_temporal_basis(world, aspect);
+    CameraUniform {
+        view_projection,
         camera_position: [eye.x, eye.y, eye.z, 1.0],
         camera_forward: {
             let forward = (target - eye).normalized();
@@ -360,6 +376,111 @@ pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUnifor
 
     uniform.params = [count as u32, 0, 0, 0];
     uniform
+}
+
+pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform, Vec<GiProbe>) {
+    let engine_render::RenderGlobalIllumination::ProbeVolume(volume) = &world.global_illumination
+    else {
+        return (GiProbeUniform::default(), Vec::new());
+    };
+
+    let counts = [
+        volume.counts[0].clamp(1, 16),
+        volume.counts[1].clamp(1, 16),
+        volume.counts[2].clamp(1, 16),
+    ];
+    let total = counts
+        .iter()
+        .product::<u32>()
+        .min(crate::device::MAX_GI_PROBES as u32);
+    let mut probes = Vec::with_capacity(total as usize);
+    let min = volume.center - volume.extent * 0.5;
+    let step = engine_core::math::Vec3::new(
+        if counts[0] > 1 {
+            volume.extent.x / (counts[0] - 1) as f32
+        } else {
+            0.0
+        },
+        if counts[1] > 1 {
+            volume.extent.y / (counts[1] - 1) as f32
+        } else {
+            0.0
+        },
+        if counts[2] > 1 {
+            volume.extent.z / (counts[2] - 1) as f32
+        } else {
+            0.0
+        },
+    );
+
+    'z: for z in 0..counts[2] {
+        for y in 0..counts[1] {
+            for x in 0..counts[0] {
+                if probes.len() >= crate::device::MAX_GI_PROBES {
+                    break 'z;
+                }
+                let position = engine_core::math::Vec3::new(
+                    min.x + step.x * x as f32,
+                    min.y + step.y * y as f32,
+                    min.z + step.z * z as f32,
+                );
+                probes.push(GiProbe {
+                    irradiance: [
+                        probe_irradiance_at(world, position).x,
+                        probe_irradiance_at(world, position).y,
+                        probe_irradiance_at(world, position).z,
+                        1.0,
+                    ],
+                });
+            }
+        }
+    }
+
+    (
+        GiProbeUniform {
+            center: [volume.center.x, volume.center.y, volume.center.z, 0.0],
+            extent: [volume.extent.x, volume.extent.y, volume.extent.z, 0.0],
+            counts_intensity: [
+                counts[0] as f32,
+                counts[1] as f32,
+                counts[2] as f32,
+                volume.intensity,
+            ],
+            params: [1, probes.len() as u32, counts[0], counts[1]],
+        },
+        probes,
+    )
+}
+
+fn probe_irradiance_at(
+    world: &RenderWorld,
+    position: engine_core::math::Vec3,
+) -> engine_core::math::Vec3 {
+    let mut irradiance = engine_core::math::Vec3::new(0.03, 0.035, 0.04);
+    if let Some(skybox) = &world.skybox {
+        let sky = engine_core::math::Vec3::new(
+            (skybox.zenith_color[0] + skybox.horizon_color[0]) * 0.5,
+            (skybox.zenith_color[1] + skybox.horizon_color[1]) * 0.5,
+            (skybox.zenith_color[2] + skybox.horizon_color[2]) * 0.5,
+        ) * (0.18 * skybox.intensity);
+        irradiance += sky;
+    }
+    for light in &world.lights {
+        let color = light.color * light.intensity;
+        match light.kind {
+            engine_render::RenderLightKind::Directional => {
+                irradiance += color * 0.08;
+            }
+            engine_render::RenderLightKind::Point | engine_render::RenderLightKind::Spot => {
+                let to_probe = position - light.transform.translation;
+                let distance = to_probe.length();
+                let range = light.range.max(0.001);
+                let attenuation = (1.0 - distance / range).max(0.0).powi(2);
+                irradiance += color * attenuation * 0.22;
+            }
+        }
+    }
+    irradiance
 }
 
 pub(crate) fn primary_directional_light(world: &RenderWorld) -> Option<&RenderLight> {

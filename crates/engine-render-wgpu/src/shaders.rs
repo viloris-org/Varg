@@ -37,6 +37,17 @@ struct FogUniform {
     enabled: f32,
 };
 
+struct GiProbeUniform {
+    center: vec4<f32>,
+    extent: vec4<f32>,
+    counts_intensity: vec4<f32>,
+    params: vec4<u32>,
+};
+
+struct GiProbe {
+    irradiance: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> lighting: LightingUniform;
 @group(0) @binding(2) var<uniform> csm: CsmUniform;
@@ -52,6 +63,8 @@ struct FogUniform {
 @group(0) @binding(12) var ibl_sampler: sampler;
 @group(0) @binding(13) var<uniform> fog: FogUniform;
 @group(0) @binding(14) var<uniform> temporal: TemporalUniform;
+@group(0) @binding(15) var<uniform> gi_probe_volume: GiProbeUniform;
+@group(0) @binding(16) var<storage, read> gi_probes: array<GiProbe>;
 
 // Group 1: material textures
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
@@ -149,6 +162,53 @@ fn compute_ibl(n: vec3<f32>, v: vec3<f32>, base_color: vec3<f32>, metallic: f32,
     let specular_ibl = sample_ibl_specular(n, v, roughness);
     let specular = specular_ibl * (f * brdf.x + brdf.y);
     return diffuse + specular;
+}
+
+fn gi_probe_index(x: u32, y: u32, z: u32, cx: u32, cy: u32) -> u32 {
+    return x + y * cx + z * cx * cy;
+}
+
+fn sample_gi_probe_volume(world_pos: vec3<f32>, n: vec3<f32>, base_color: vec3<f32>, metallic: f32) -> vec3<f32> {
+    if (gi_probe_volume.params.x == 0u || gi_probe_volume.params.y == 0u) {
+        return vec3<f32>(0.0);
+    }
+
+    let cx = max(u32(gi_probe_volume.counts_intensity.x), 1u);
+    let cy = max(u32(gi_probe_volume.counts_intensity.y), 1u);
+    let cz = max(u32(gi_probe_volume.counts_intensity.z), 1u);
+    let volume_min = gi_probe_volume.center.xyz - gi_probe_volume.extent.xyz * 0.5;
+    let local = (world_pos - volume_min) / max(gi_probe_volume.extent.xyz, vec3<f32>(0.001));
+    if (any(local < vec3<f32>(0.0)) || any(local > vec3<f32>(1.0))) {
+        return vec3<f32>(0.0);
+    }
+
+    let grid = local * vec3<f32>(f32(cx - 1u), f32(cy - 1u), f32(cz - 1u));
+    let base = vec3<u32>(floor(grid));
+    let next = min(base + vec3<u32>(1u), vec3<u32>(cx - 1u, cy - 1u, cz - 1u));
+    let f = fract(grid);
+    let max_probe = gi_probe_volume.params.y;
+
+    var irradiance = vec3<f32>(0.0);
+    for (var dz = 0u; dz <= 1u; dz = dz + 1u) {
+        for (var dy = 0u; dy <= 1u; dy = dy + 1u) {
+            for (var dx = 0u; dx <= 1u; dx = dx + 1u) {
+                let px = select(base.x, next.x, dx == 1u);
+                let py = select(base.y, next.y, dy == 1u);
+                let pz = select(base.z, next.z, dz == 1u);
+                let idx = gi_probe_index(px, py, pz, cx, cy);
+                if (idx >= max_probe) {
+                    continue;
+                }
+                let wx = select(1.0 - f.x, f.x, dx == 1u);
+                let wy = select(1.0 - f.y, f.y, dy == 1u);
+                let wz = select(1.0 - f.z, f.z, dz == 1u);
+                irradiance = irradiance + gi_probes[idx].irradiance.rgb * wx * wy * wz;
+            }
+        }
+    }
+
+    let normal_weight = clamp(n.y * 0.35 + 0.65, 0.35, 1.0);
+    return irradiance * base_color * (1.0 - metallic) * gi_probe_volume.counts_intensity.w * normal_weight;
 }
 
 fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>, dist: f32) -> vec3<f32> {
@@ -336,6 +396,7 @@ fn fs_main(input: VsOut) -> FsOut {
 
     // Ambient from IBL
     var color = compute_ibl(n, v, base_color, metallic, roughness, f0) * ao;
+    color = color + sample_gi_probe_volume(input.world_position, n, base_color, metallic) * ao;
 
     // CSM shadow
     let view_depth = max(
@@ -1113,6 +1174,10 @@ struct PostProcessUniform {
     ssgi_intensity: f32,
     ssr_enabled: f32,
     ssr_intensity: f32,
+    taa_reset: f32,
+    taa_history_weight: f32,
+    taa_enabled: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -1199,6 +1264,19 @@ fn sharpen_hdr(center: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return clamp(center + detail * post.upscale_sharpness, neighborhood_min, neighborhood_max);
 }
 
+fn resolve_hdr(uv: vec2<f32>) -> vec3<f32> {
+    let clamped_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let scaling = post.render_width != post.output_width || post.render_height != post.output_height;
+    if (scaling) {
+        return sharpen_hdr(reconstruct_hdr(clamped_uv), clamped_uv);
+    }
+    let pixel = vec2<i32>(
+        clamp(i32(clamped_uv.x * post.render_width), 0, i32(post.render_width) - 1),
+        clamp(i32(clamped_uv.y * post.render_height), 0, i32(post.render_height) - 1)
+    );
+    return textureLoad(hdr_tex, pixel, 0).rgb;
+}
+
 fn decode_post_normal(encoded: vec3<f32>) -> vec3<f32> {
     return normalize(encoded * 2.0 - 1.0);
 }
@@ -1248,11 +1326,7 @@ fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-    let scaling = post.render_width != post.output_width || post.render_height != post.output_height;
-    var hdr = textureSampleLevel(hdr_tex, lin_sampler, input.uv, 0.0).rgb;
-    if (scaling) {
-        hdr = sharpen_hdr(reconstruct_hdr(input.uv), input.uv);
-    }
+    let hdr = resolve_hdr(input.uv);
     let bloom = textureSampleLevel(bloom_tex, lin_sampler, input.uv, 0.0).rgb * post.bloom_intensity;
     var color = hdr + bloom;
     if (post.ssgi_enabled > 0.5) {
@@ -1266,5 +1340,90 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     }
     color = aces_tonemap(color);
     return vec4<f32>(color, 1.0);
+}
+"#;
+
+pub(crate) const TAA_SHADER: &str = r#"
+struct PostProcessUniform {
+    render_width: f32,
+    render_height: f32,
+    inv_render_width: f32,
+    inv_render_height: f32,
+    output_width: f32,
+    output_height: f32,
+    inv_output_width: f32,
+    inv_output_height: f32,
+    exposure: f32,
+    bloom_intensity: f32,
+    ssao_enabled: f32,
+    upscale_sharpness: f32,
+    ssgi_enabled: f32,
+    ssgi_intensity: f32,
+    ssr_enabled: f32,
+    ssr_intensity: f32,
+    taa_reset: f32,
+    taa_history_weight: f32,
+    taa_enabled: f32,
+    _pad: f32,
+};
+
+@group(0) @binding(0) var current_tex: texture_2d<f32>;
+@group(0) @binding(1) var motion_tex: texture_2d<f32>;
+@group(0) @binding(2) var history_tex: texture_2d<f32>;
+@group(0) @binding(3) var resolved_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var<uniform> post: PostProcessUniform;
+@group(0) @binding(5) var lin_sampler: sampler;
+
+fn load_current(pixel: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+    return textureLoad(current_tex, clamp(pixel, vec2<i32>(0), size - vec2<i32>(1)), 0).rgb;
+}
+
+fn color_distance(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = a - b;
+    return dot(d, d);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= u32(post.render_width) || gid.y >= u32(post.render_height)) {
+        return;
+    }
+
+    let pixel = vec2<i32>(i32(gid.x), i32(gid.y));
+    let size = vec2<i32>(i32(post.render_width), i32(post.render_height));
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) * vec2<f32>(post.inv_render_width, post.inv_render_height);
+
+    let current = load_current(pixel, size);
+    let motion = textureLoad(motion_tex, pixel, 0).xy;
+    let history_uv = uv - motion;
+    let inside_history = history_uv.x >= 0.0 && history_uv.x <= 1.0 && history_uv.y >= 0.0 && history_uv.y <= 1.0;
+    let reset_history = post.taa_reset > 0.5 || post.taa_enabled < 0.5;
+    if (reset_history || !inside_history) {
+        textureStore(resolved_tex, pixel, vec4<f32>(current, 1.0));
+        return;
+    }
+
+    let n = load_current(pixel + vec2<i32>(0, -1), size);
+    let s = load_current(pixel + vec2<i32>(0, 1), size);
+    let w = load_current(pixel + vec2<i32>(-1, 0), size);
+    let e = load_current(pixel + vec2<i32>(1, 0), size);
+    let nw = load_current(pixel + vec2<i32>(-1, -1), size);
+    let ne = load_current(pixel + vec2<i32>(1, -1), size);
+    let sw = load_current(pixel + vec2<i32>(-1, 1), size);
+    let se = load_current(pixel + vec2<i32>(1, 1), size);
+
+    let neighborhood_min = min(current, min(min(min(n, s), min(w, e)), min(min(nw, ne), min(sw, se))));
+    let neighborhood_max = max(current, max(max(max(n, s), max(w, e)), max(max(nw, ne), max(sw, se))));
+    let history = textureSampleLevel(history_tex, lin_sampler, clamp(history_uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    let clipped_history = clamp(history, neighborhood_min, neighborhood_max);
+
+    let motion_len = length(motion * vec2<f32>(post.render_width, post.render_height));
+    let history_weight = clamp(mix(post.taa_history_weight, 0.55, saturate(motion_len * 0.08)), 0.0, 0.92);
+    var resolved = mix(current, clipped_history, history_weight);
+    if (color_distance(clipped_history, history) > 4.0) {
+        resolved = mix(current, clipped_history, 0.45);
+    }
+
+    textureStore(resolved_tex, pixel, vec4<f32>(resolved, 1.0));
 }
 "#;

@@ -75,7 +75,7 @@ pub const WINDOWS_NATIVE_HOST_PLAN: NativeHostPlatformPlan = NativeHostPlatformP
     host_api: "DirectComposition visual tree",
     scene_surface: "D3D/DXGI composition swapchain or WGPU-compatible native surface",
     web_ui: "WebView2 CompositionController visual hosting",
-    status: "Windows DirectComposition/WebView2 native host adapter is planned but not implemented yet; using canvas readback fallback.",
+    status: "Windows DirectComposition/WebView2 native host adapter is planned but not implemented yet; Scene View is unavailable without a no-CPU-readback adapter.",
     blocking_work: &[
         "create HWND-owned DirectComposition host tree",
         "connect Scene View WGPU output to a DirectComposition-compatible surface",
@@ -89,7 +89,7 @@ pub const MACOS_NATIVE_HOST_PLAN: NativeHostPlatformPlan = NativeHostPlatformPla
     host_api: "NSWindow/NSView with Core Animation layer tree",
     scene_surface: "Metal-backed NSView/CAMetalLayer behind WGPU presentation",
     web_ui: "WKWebView/AppKit panel views",
-    status: "macOS NSView/CAMetalLayer/WKWebView native host adapter is planned but not implemented yet; using canvas readback fallback.",
+    status: "macOS NSView/CAMetalLayer/WKWebView native host adapter is planned but not implemented yet; Scene View is unavailable without a no-CPU-readback adapter.",
     blocking_work: &[
         "create NSWindow/NSView root host adapter",
         "present Scene View through a Metal-backed native view/layer",
@@ -116,7 +116,7 @@ pub fn platform_support() -> EditorCompositorSupport {
         EditorCompositorSupport {
             backend: EditorCompositorBackend::AndroidWebView,
             available: false,
-            reason: "Android native host view with WebView panels is not implemented yet; using canvas readback fallback for now.",
+            reason: "Android native host view with WebView panels is not implemented yet; Scene View is unavailable without a no-CPU-readback adapter.",
         }
     }
     #[cfg(target_os = "ios")]
@@ -124,7 +124,7 @@ pub fn platform_support() -> EditorCompositorSupport {
         EditorCompositorSupport {
             backend: EditorCompositorBackend::IosWkWebView,
             available: false,
-            reason: "iOS native host view with WKWebView panels is not implemented yet; using canvas readback fallback for now.",
+            reason: "iOS native host view with WKWebView panels is not implemented yet; Scene View is unavailable without a no-CPU-readback adapter.",
         }
     }
     #[cfg(not(any(
@@ -138,7 +138,7 @@ pub fn platform_support() -> EditorCompositorSupport {
         EditorCompositorSupport {
             backend: EditorCompositorBackend::Unsupported,
             available: false,
-            reason: "This platform has no native editor compositor adapter yet; using canvas readback fallback.",
+            reason: "This platform has no native editor compositor adapter; Scene View is unavailable without a no-CPU-readback adapter.",
         }
     }
 }
@@ -159,7 +159,7 @@ pub fn platform_support_for_window_handle(
             _ => EditorCompositorSupport {
                 backend: EditorCompositorBackend::LinuxGtk,
                 available: false,
-                reason: "Linux native-host-window Scene View requires an X11/Xwayland GTK window handle; using canvas readback fallback.",
+                reason: "Linux native-host-window Scene View requires an X11/Xwayland GTK window handle.",
             },
         }
     }
@@ -176,7 +176,7 @@ pub(crate) fn linux_platform_support_for_runtime(is_wayland: bool) -> EditorComp
         return EditorCompositorSupport {
             backend: EditorCompositorBackend::LinuxGtk,
             available: false,
-            reason: "Linux native Wayland Scene View embedding is disabled; using canvas readback fallback.",
+            reason: "Linux native Wayland Scene View embedding is disabled.",
         };
     }
 
@@ -190,7 +190,6 @@ pub(crate) fn linux_platform_support_for_runtime(is_wayland: bool) -> EditorComp
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViewportPresentationMode {
-    CanvasReadback,
     NativeHostWindow,
     WaylandEmbeddedCompositor,
     /// Legacy compatibility name for the native host-window architecture.
@@ -225,7 +224,7 @@ pub struct ViewportPresentationAdapter {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ViewportPresentationCapabilities {
-    pub default_mode: ViewportPresentationMode,
+    pub default_mode: Option<ViewportPresentationMode>,
     pub adapters: Vec<ViewportPresentationAdapter>,
 }
 
@@ -247,12 +246,12 @@ pub struct ViewportPresentationWaylandEmbeddedCompositorStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ViewportPresentationStatus {
     pub compositor_requested: bool,
-    pub default_mode: ViewportPresentationMode,
+    pub default_mode: Option<ViewportPresentationMode>,
     pub selected_backend: Option<&'static str>,
     pub adapters: Vec<ViewportPresentationAdapter>,
     pub platform_support: ViewportPresentationPlatformStatus,
     pub wayland_embedded_compositor: ViewportPresentationWaylandEmbeddedCompositorStatus,
-    pub fallback_reason: Option<String>,
+    pub unavailable_reason: Option<String>,
 }
 
 pub fn presentation_capabilities(compositor_requested: bool) -> ViewportPresentationCapabilities {
@@ -271,32 +270,19 @@ pub fn presentation_capabilities_for(
     let native_host_available = compositor_requested && support.available;
     let wayland_embedded_available = compositor_requested && wayland_support.available;
     let default_mode = if native_host_available {
-        ViewportPresentationMode::NativeHostWindow
+        Some(ViewportPresentationMode::NativeHostWindow)
     } else if wayland_embedded_available {
-        ViewportPresentationMode::WaylandEmbeddedCompositor
+        Some(ViewportPresentationMode::WaylandEmbeddedCompositor)
     } else {
-        ViewportPresentationMode::CanvasReadback
+        None
     };
     ViewportPresentationCapabilities {
         default_mode,
         adapters: vec![
             ViewportPresentationAdapter {
-                mode: ViewportPresentationMode::CanvasReadback,
-                available: true,
-                default: default_mode == ViewportPresentationMode::CanvasReadback,
-                zero_copy: false,
-                experimental: false,
-                backend: "webview-canvas",
-                cpu_readback: true,
-                gpu_native_surface: false,
-                gpu_composited: false,
-                direct_scanout_possible: DirectScanoutSupport::No,
-                reason: "Stable WebView-composited fallback. Copies pixels through readback, so it is not the final performance path.",
-            },
-            ViewportPresentationAdapter {
                 mode: ViewportPresentationMode::WaylandEmbeddedCompositor,
                 available: wayland_embedded_available,
-                default: default_mode == ViewportPresentationMode::WaylandEmbeddedCompositor,
+                default: default_mode == Some(ViewportPresentationMode::WaylandEmbeddedCompositor),
                 zero_copy: true,
                 experimental: false,
                 backend: wayland_embedded_compositor::BACKEND_ID,
@@ -309,7 +295,7 @@ pub fn presentation_capabilities_for(
             ViewportPresentationAdapter {
                 mode: ViewportPresentationMode::NativeHostWindow,
                 available: native_host_available,
-                default: default_mode == ViewportPresentationMode::NativeHostWindow,
+                default: default_mode == Some(ViewportPresentationMode::NativeHostWindow),
                 zero_copy: true,
                 experimental: false,
                 backend: support.backend.id(),
@@ -356,7 +342,7 @@ pub fn presentation_status_for(
         .iter()
         .find(|adapter| adapter.default)
         .map(|adapter| adapter.backend);
-    let fallback_reason = canvas_readback_fallback_reason(
+    let unavailable_reason = scene_view_unavailable_reason(
         compositor_requested,
         support,
         wayland_support,
@@ -379,7 +365,7 @@ pub fn presentation_status_for(
             available: wayland_support.available,
             reason: wayland_support.reason,
         },
-        fallback_reason,
+        unavailable_reason,
     }
 }
 
@@ -399,25 +385,25 @@ fn wayland_embedded_status_id(
     }
 }
 
-fn canvas_readback_fallback_reason(
+fn scene_view_unavailable_reason(
     compositor_requested: bool,
     support: EditorCompositorSupport,
     wayland_support: wayland_embedded_compositor::WaylandEmbeddedCompositorSupport,
-    default_mode: ViewportPresentationMode,
+    default_mode: Option<ViewportPresentationMode>,
 ) -> Option<String> {
-    if default_mode != ViewportPresentationMode::CanvasReadback {
+    if default_mode.is_some() {
         return None;
     }
 
     if !compositor_requested {
         return Some(
-            "Canvas readback selected because no no-CPU-readback viewport adapter is enabled."
+            "Scene View unavailable because no no-CPU-readback viewport adapter is enabled."
                 .to_owned(),
         );
     }
 
     Some(format!(
-        "Canvas readback selected because native host {} is unavailable ({}) and {} is unavailable ({}: {}).",
+        "Scene View unavailable because native host {} is unavailable ({}) and {} is unavailable ({}: {}).",
         support.backend.id(),
         support.reason,
         wayland_embedded_compositor::BACKEND_ID,
@@ -537,7 +523,7 @@ mod tests {
         let support = linux_platform_support_for_runtime(true);
         assert_eq!(support.backend, EditorCompositorBackend::LinuxGtk);
         assert!(!support.available);
-        assert!(support.reason.contains("canvas readback"));
+        assert!(support.reason.contains("Wayland"));
     }
 
     #[cfg(target_os = "linux")]
@@ -578,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_capabilities_fall_back_to_canvas_when_explicitly_disabled() {
+    fn presentation_capabilities_have_no_default_when_explicitly_disabled() {
         let capabilities = presentation_capabilities_for(
             false,
             EditorCompositorSupport {
@@ -589,20 +575,14 @@ mod tests {
             unavailable_wayland_support(),
         );
 
-        let canvas = capabilities
-            .adapters
-            .iter()
-            .find(|adapter| adapter.mode == ViewportPresentationMode::CanvasReadback)
-            .unwrap();
-        assert_eq!(
-            capabilities.default_mode,
-            ViewportPresentationMode::CanvasReadback
+        assert_eq!(capabilities.default_mode, None);
+        assert!(capabilities.adapters.iter().all(|adapter| !adapter.default));
+        assert!(
+            capabilities
+                .adapters
+                .iter()
+                .all(|adapter| !adapter.cpu_readback)
         );
-        assert!(canvas.default);
-        assert!(canvas.cpu_readback);
-        assert!(!canvas.zero_copy);
-        assert!(!canvas.gpu_native_surface);
-        assert_eq!(canvas.direct_scanout_possible, DirectScanoutSupport::No);
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::NativeHostWindow
             && !adapter.available));
@@ -622,7 +602,7 @@ mod tests {
 
         assert_eq!(
             capabilities.default_mode,
-            ViewportPresentationMode::NativeHostWindow
+            Some(ViewportPresentationMode::NativeHostWindow)
         );
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::NativeHostWindow
@@ -640,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_capabilities_fall_back_when_platform_adapter_is_missing() {
+    fn presentation_capabilities_have_no_default_when_platform_adapter_is_missing() {
         let capabilities = presentation_capabilities_for(
             true,
             EditorCompositorSupport {
@@ -651,9 +631,13 @@ mod tests {
             unavailable_wayland_support(),
         );
 
-        assert_eq!(
-            capabilities.default_mode,
-            ViewportPresentationMode::CanvasReadback
+        assert_eq!(capabilities.default_mode, None);
+        assert!(capabilities.adapters.iter().all(|adapter| !adapter.default));
+        assert!(
+            capabilities
+                .adapters
+                .iter()
+                .all(|adapter| adapter.backend != "webview-canvas")
         );
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::NativeHostWindow
@@ -662,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_status_reports_windows_unavailable_canvas_fallback_reason() {
+    fn presentation_status_reports_windows_unavailable_scene_view_reason() {
         let status = presentation_status_for(
             true,
             EditorCompositorSupport {
@@ -673,22 +657,19 @@ mod tests {
             unavailable_wayland_support(),
         );
 
-        let fallback_reason = status.fallback_reason.unwrap();
-        assert_eq!(
-            status.default_mode,
-            ViewportPresentationMode::CanvasReadback
-        );
-        assert_eq!(status.selected_backend, Some("webview-canvas"));
+        let unavailable_reason = status.unavailable_reason.unwrap();
+        assert_eq!(status.default_mode, None);
+        assert_eq!(status.selected_backend, None);
         assert_eq!(status.platform_support.backend, "windows-webview2");
         assert!(!status.platform_support.available);
-        assert!(fallback_reason.contains("windows-webview2"));
-        assert!(fallback_reason.contains("not implemented"));
-        assert!(fallback_reason.contains("feature-disabled"));
-        assert!(fallback_reason.contains("feature disabled"));
+        assert!(unavailable_reason.contains("windows-webview2"));
+        assert!(unavailable_reason.contains("not implemented"));
+        assert!(unavailable_reason.contains("feature-disabled"));
+        assert!(unavailable_reason.contains("feature disabled"));
     }
 
     #[test]
-    fn presentation_status_reports_wayland_feature_disabled_canvas_fallback_reason() {
+    fn presentation_status_reports_wayland_feature_disabled_scene_view_reason() {
         let status = presentation_status_for(
             true,
             EditorCompositorSupport {
@@ -699,21 +680,18 @@ mod tests {
             unavailable_wayland_support(),
         );
 
-        let fallback_reason = status.fallback_reason.unwrap();
-        assert_eq!(
-            status.default_mode,
-            ViewportPresentationMode::CanvasReadback
-        );
-        assert_eq!(status.selected_backend, Some("webview-canvas"));
+        let unavailable_reason = status.unavailable_reason.unwrap();
+        assert_eq!(status.default_mode, None);
+        assert_eq!(status.selected_backend, None);
         assert_eq!(
             status.wayland_embedded_compositor.status,
             wayland_embedded_compositor::WaylandEmbeddedCompositorStatus::FeatureDisabled
         );
         assert!(!status.wayland_embedded_compositor.available);
-        assert!(fallback_reason.contains("linux-gtk"));
-        assert!(fallback_reason.contains("disabled on Wayland"));
-        assert!(fallback_reason.contains("wayland-embedded-compositor"));
-        assert!(fallback_reason.contains("feature-disabled"));
+        assert!(unavailable_reason.contains("linux-gtk"));
+        assert!(unavailable_reason.contains("disabled on Wayland"));
+        assert!(unavailable_reason.contains("wayland-embedded-compositor"));
+        assert!(unavailable_reason.contains("feature-disabled"));
     }
 
     #[test]
@@ -730,7 +708,7 @@ mod tests {
 
         assert_eq!(
             capabilities.default_mode,
-            ViewportPresentationMode::NativeHostWindow
+            Some(ViewportPresentationMode::NativeHostWindow)
         );
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::WaylandEmbeddedCompositor
@@ -741,9 +719,6 @@ mod tests {
             && !adapter.cpu_readback
             && adapter.gpu_native_surface
             && adapter.gpu_composited));
-        assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
-            == ViewportPresentationMode::CanvasReadback
-            && !adapter.default));
         assert!(capabilities.adapters.iter().any(|adapter| adapter.mode
             == ViewportPresentationMode::NativeHostWindow
             && adapter.default));

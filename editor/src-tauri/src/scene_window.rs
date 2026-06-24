@@ -23,6 +23,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const EDITOR_TARGET_FRAME_DT: Duration = Duration::from_micros(13_333);
+const TEMPORAL_ACCUMULATION_FRAMES: u8 = 16;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SceneCameraState {
@@ -337,6 +338,8 @@ fn run_scene_window(
         mode,
         visible: true,
         dirty: true,
+        temporal_frames_remaining: TEMPORAL_ACCUMULATION_FRAMES,
+        render_frame_index: 0,
         dragging: None,
         last_cursor: None,
         initial_viewport,
@@ -428,6 +431,8 @@ struct SceneApp {
     mode: SceneWindowMode,
     visible: bool,
     dirty: bool,
+    temporal_frames_remaining: u8,
+    render_frame_index: u64,
     dragging: Option<MouseButton>,
     last_cursor: Option<(f64, f64)>,
     initial_viewport: Option<SceneViewportRect>,
@@ -482,7 +487,7 @@ impl ApplicationHandler for SceneApp {
                 if let Some(runtime) = self.runtime.as_mut() {
                     runtime.renderer.resize_surface(self.width, self.height);
                 }
-                self.dirty = true;
+                self.request_temporal_accumulation();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.dragging = if state == ElementState::Pressed {
@@ -502,7 +507,7 @@ impl ApplicationHandler for SceneApp {
                 };
                 self.camera.distance =
                     (self.camera.distance - scroll as f32 * 0.01).clamp(0.5, 100.0);
-                self.dirty = true;
+                self.request_temporal_accumulation();
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
@@ -530,7 +535,7 @@ impl ApplicationHandler for SceneApp {
                         }
                         window.request_redraw();
                     }
-                    self.dirty = true;
+                    self.request_temporal_accumulation();
                 }
                 SceneCommand::Hide => {
                     self.visible = false;
@@ -543,7 +548,7 @@ impl ApplicationHandler for SceneApp {
                 }
                 SceneCommand::SetCamera(camera) => {
                     self.camera = camera;
-                    self.dirty = true;
+                    self.request_temporal_accumulation();
                 }
                 SceneCommand::SetViewport(viewport) => {
                     self.apply_viewport(viewport);
@@ -555,7 +560,9 @@ impl ApplicationHandler for SceneApp {
             }
         }
 
-        if self.visible && (self.dirty || self.dragging.is_some()) {
+        if self.visible
+            && (self.dirty || self.dragging.is_some() || self.temporal_frames_remaining > 0)
+        {
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -607,7 +614,7 @@ impl SceneApp {
                 .renderer
                 .resize_surface(viewport.width, viewport.height);
         }
-        self.dirty = true;
+        self.request_temporal_accumulation();
     }
 
     fn install_runtime(&mut self, snapshot: SceneRuntimeSnapshot) -> Result<(), String> {
@@ -630,7 +637,8 @@ impl SceneApp {
         );
         self.runtime = Some(runtime);
         self.last_frame = Instant::now();
-        self.dirty = true;
+        self.render_frame_index = 0;
+        self.request_temporal_accumulation();
         Ok(())
     }
 
@@ -660,7 +668,12 @@ impl SceneApp {
             _ => {}
         }
         self.last_cursor = Some((x, y));
+        self.request_temporal_accumulation();
+    }
+
+    fn request_temporal_accumulation(&mut self) {
         self.dirty = true;
+        self.temporal_frames_remaining = TEMPORAL_ACCUMULATION_FRAMES;
     }
 
     fn render_frame(&mut self) {
@@ -699,7 +712,8 @@ impl SceneApp {
             look_at_target: Some(target),
         });
 
-        let frame_index = runtime.frame_index();
+        let frame_index = self.render_frame_index;
+        self.render_frame_index = self.render_frame_index.wrapping_add(1);
         if let Err(error) = runtime
             .renderer
             .submit_render_world(&world, RenderFrame { frame_index })
@@ -707,6 +721,9 @@ impl SceneApp {
             tracing::error!(target: "scene", error = %error, "scene view render failed");
         }
         runtime.render_world = world;
+        if self.temporal_frames_remaining > 0 {
+            self.temporal_frames_remaining -= 1;
+        }
         self.dirty = false;
     }
 }
@@ -724,6 +741,8 @@ struct RawSceneApp {
     camera: SceneCameraState,
     visible: bool,
     dirty: bool,
+    temporal_frames_remaining: u8,
+    render_frame_index: u64,
     shutdown: bool,
 }
 
@@ -750,6 +769,8 @@ fn run_raw_scene_surface(
         camera,
         visible: true,
         dirty: true,
+        temporal_frames_remaining: TEMPORAL_ACCUMULATION_FRAMES,
+        render_frame_index: 0,
         shutdown: false,
     };
     if let Some(snapshot) = app.pending_snapshot.take() {
@@ -776,7 +797,7 @@ fn run_raw_scene_surface(
             }
             continue;
         }
-        if app.dirty {
+        if app.dirty || app.temporal_frames_remaining > 0 {
             app.render_frame();
         }
         match app.cmd_rx.recv_timeout(EDITOR_TARGET_FRAME_DT) {
@@ -808,7 +829,7 @@ impl RawSceneApp {
             }
             SceneCommand::Show => {
                 self.visible = true;
-                self.dirty = true;
+                self.request_temporal_accumulation();
             }
             SceneCommand::Hide => {
                 self.visible = false;
@@ -816,7 +837,7 @@ impl RawSceneApp {
             }
             SceneCommand::SetCamera(camera) => {
                 self.camera = camera;
-                self.dirty = true;
+                self.request_temporal_accumulation();
             }
             SceneCommand::SetViewport(viewport) => self.apply_viewport(viewport),
             SceneCommand::Shutdown => {
@@ -851,7 +872,7 @@ impl RawSceneApp {
                     .resize_surface(viewport.width, viewport.height);
             }
         }
-        self.dirty = true;
+        self.request_temporal_accumulation();
     }
 
     fn install_runtime(&mut self, snapshot: SceneRuntimeSnapshot) -> Result<(), String> {
@@ -973,8 +994,14 @@ impl RawSceneApp {
         );
         self.runtime = Some(runtime);
         self.last_frame = Instant::now();
-        self.dirty = true;
+        self.render_frame_index = 0;
+        self.request_temporal_accumulation();
         Ok(())
+    }
+
+    fn request_temporal_accumulation(&mut self) {
+        self.dirty = true;
+        self.temporal_frames_remaining = TEMPORAL_ACCUMULATION_FRAMES;
     }
 
     fn render_frame(&mut self) {
@@ -1012,7 +1039,8 @@ impl RawSceneApp {
             far: 1000.0,
             look_at_target: Some(target),
         });
-        let frame_index = runtime.frame_index();
+        let frame_index = self.render_frame_index;
+        self.render_frame_index = self.render_frame_index.wrapping_add(1);
         if let Err(error) = runtime
             .renderer
             .submit_render_world(&world, RenderFrame { frame_index })
@@ -1022,6 +1050,9 @@ impl RawSceneApp {
                 .send(SceneEvent::Error(format!("render: {error}")));
         }
         runtime.render_world = world;
+        if self.temporal_frames_remaining > 0 {
+            self.temporal_frames_remaining -= 1;
+        }
         self.dirty = false;
     }
 }

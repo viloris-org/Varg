@@ -150,6 +150,21 @@ impl ImageDesc {
         }
     }
 
+    /// Creates a sampled cubemap descriptor.
+    ///
+    /// Pixel uploads use six tightly packed square faces in +X, -X, +Y, -Y, +Z, -Z order.
+    pub fn cubemap(face_size: u32, format: ImageFormat) -> Self {
+        Self {
+            width: face_size,
+            height: face_size,
+            mip_levels: 1,
+            samples: 1,
+            format,
+            usage: ImageUsage::SAMPLED,
+            label: Some("aster cubemap"),
+        }
+    }
+
     /// Creates a depth image descriptor.
     pub fn depth_2d(width: u32, height: u32) -> Self {
         Self {
@@ -189,6 +204,18 @@ mod tests {
         assert_eq!(desc.format, ImageFormat::Rg16Float);
         assert!(desc.usage.contains(ImageUsage::SAMPLED));
         assert!(desc.usage.contains(ImageUsage::COLOR_ATTACHMENT));
+    }
+
+    #[test]
+    fn cubemap_descriptor_uses_square_sampled_faces() {
+        let desc = ImageDesc::cubemap(512, ImageFormat::Rgba16Float);
+        assert_eq!(desc.width, 512);
+        assert_eq!(desc.height, 512);
+        assert_eq!(desc.mip_levels, 1);
+        assert_eq!(desc.samples, 1);
+        assert_eq!(desc.format, ImageFormat::Rgba16Float);
+        assert!(desc.usage.contains(ImageUsage::SAMPLED));
+        assert!(!desc.usage.contains(ImageUsage::COLOR_ATTACHMENT));
     }
 }
 

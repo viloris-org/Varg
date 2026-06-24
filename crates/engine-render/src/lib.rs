@@ -693,6 +693,14 @@ pub trait RenderDevice {
         self.create_image(desc)
     }
 
+    /// Creates a GPU cubemap and uploads six tightly packed square faces into mip 0.
+    ///
+    /// Face order is +X, -X, +Y, -Y, +Z, -Z. Backends without cubemap support may
+    /// fall back to a regular image handle, but GPU backends should create a cube view.
+    fn upload_cubemap(&mut self, desc: ImageDesc, data: &[u8]) -> EngineResult<ImageHandle> {
+        self.upload_texture(desc, data)
+    }
+
     /// Destroys a GPU image.
     fn destroy_image(&mut self, handle: ImageHandle);
 
@@ -789,6 +797,11 @@ pub trait RenderDevice {
     /// Backends that support texture sampling override this to create
     /// per-material bind groups. Unset slots fall back to default textures.
     fn register_material_textures(&mut self, _name: &str, _textures: &RenderMaterialTextures) {}
+
+    /// Registers a cubemap handle under a scene skybox asset label.
+    ///
+    /// The label must match `RenderSkybox::cubemap` after scene extraction.
+    fn register_skybox_cubemap(&mut self, _label: &str, _cubemap: ImageHandle) {}
 }
 
 /// Null renderer used by minimal runtime builds.
@@ -826,6 +839,10 @@ impl RenderDevice for HeadlessRenderDevice {
     }
 
     fn upload_texture(&mut self, desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
+        self.create_image(desc)
+    }
+
+    fn upload_cubemap(&mut self, desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
         self.create_image(desc)
     }
 
@@ -884,6 +901,12 @@ impl RenderDevice for MissingRenderDevice {
     }
 
     fn upload_texture(&mut self, _desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
+        Err(EngineError::UnsupportedCapability {
+            capability: "render-backend",
+        })
+    }
+
+    fn upload_cubemap(&mut self, _desc: ImageDesc, _data: &[u8]) -> EngineResult<ImageHandle> {
         Err(EngineError::UnsupportedCapability {
             capability: "render-backend",
         })

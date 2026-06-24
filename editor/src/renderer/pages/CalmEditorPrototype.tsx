@@ -129,62 +129,12 @@ interface EditorConsoleEntry {
   message: string;
 }
 
-function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode) {
+function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode | null) {
   return mode === 'wayland-embedded-compositor';
 }
 
 function isNoCpuReadbackAdapter(adapter?: ViewportPresentationAdapter) {
   return Boolean(adapter?.available && !adapter.cpu_readback && adapter.gpu_native_surface);
-}
-
-function supportStateLabel(value: ViewportPresentationStatus['platform_support']) {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'boolean') return value ? 'supported' : 'unsupported';
-  if (!value || typeof value !== 'object') return null;
-  if (typeof value.reason === 'string' && value.reason) return value.reason;
-  if (typeof value.detail === 'string' && value.detail) return value.detail;
-  if (typeof value.available === 'boolean') return value.available ? 'available' : 'unavailable';
-  if (typeof value.supported === 'boolean') return value.supported ? 'supported' : 'unsupported';
-  if (typeof value.enabled === 'boolean') return value.enabled ? 'enabled' : 'disabled';
-  return null;
-}
-
-function directScanoutLabel(status?: ViewportPresentationStatus | null, adapter?: ViewportPresentationAdapter) {
-  const state = status?.direct_scanout_state
-    ?? status?.direct_scanout
-    ?? status?.direct_scanout_possible
-    ?? adapter?.direct_scanout_possible;
-  if (typeof state === 'boolean') return state ? 'scanout yes' : 'scanout no';
-  if (typeof state !== 'string' || !state) return null;
-  if (state === 'yes-when-unobscured') return 'scanout when unobscured';
-  return `scanout ${state}`;
-}
-
-function presentationDiagnosticsLabel(
-  status: ViewportPresentationStatus | null,
-  adapter?: ViewportPresentationAdapter,
-  active: boolean = false,
-) {
-  const backend = status?.active_backend
-    ?? status?.selected_backend
-    ?? adapter?.backend
-    ?? status?.default_mode
-    ?? adapter?.mode
-    ?? 'viewport';
-  const cpuReadback = adapter?.cpu_readback ?? (status?.default_mode ? status.default_mode === 'canvas-readback' : true);
-  const transport = cpuReadback ? 'canvas readback' : 'no CPU readback';
-  const fallbackReason = status?.fallback_reason || (!active && cpuReadback ? adapter?.reason : null);
-  const platform = supportStateLabel(status?.platform_support);
-  const wayland = supportStateLabel(status?.wayland_embedded_compositor ?? status?.wayland_support);
-  const scanout = directScanoutLabel(status, adapter);
-  return [
-    backend,
-    transport,
-    fallbackReason ? `fallback ${fallbackReason}` : null,
-    scanout,
-    platform && platform !== backend ? `platform ${platform}` : null,
-    wayland ? `wayland ${wayland}` : null,
-  ].filter(Boolean).join(' · ');
 }
 
 interface BuildTargetOption {
@@ -967,7 +917,7 @@ export default function CalmEditorPrototype({
   const [viewMode, setViewMode] = useState<ViewMode>('3d');
   const [viewportSize, setViewportSize] = useState({ width: 640, height: 480 });
   const [cameraRevision, setCameraRevision] = useState(0);
-  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode>('canvas-readback');
+  const [viewportPresentation, setViewportPresentation] = useState<ViewportPresentationMode | null>(null);
   const [viewportPresentationAdapters, setViewportPresentationAdapters] = useState<ViewportPresentationAdapter[]>([]);
   const [viewportPresentationDiagnostics, setViewportPresentationDiagnostics] = useState<ViewportPresentationStatus | null>(null);
   const [nativeSceneError, setNativeSceneError] = useState<string | null>(null);
@@ -1007,7 +957,9 @@ export default function CalmEditorPrototype({
 
   const selectedEntity = entities.find((entity) => entity.id === selectedEntityId) ?? entities[0];
   const effectivePresentationAdapters = viewportPresentationDiagnostics?.adapters ?? viewportPresentationAdapters;
-  const viewportPresentationAdapter = effectivePresentationAdapters.find((adapter) => adapter.mode === viewportPresentation);
+  const viewportPresentationAdapter = viewportPresentation
+    ? effectivePresentationAdapters.find((adapter) => adapter.mode === viewportPresentation)
+    : undefined;
   const noCpuReadbackPresentation = isNoCpuReadbackAdapter(viewportPresentationAdapter);
   const inspectorEntity = selectedEntityDetails
     ? {
@@ -1135,6 +1087,7 @@ export default function CalmEditorPrototype({
   }, []);
 
   const openNativeSceneViewport = useCallback(async () => {
+    if (!viewportPresentation) throw new Error('No native Scene View adapter is available.');
     const viewport = embeddedSceneViewport();
     if (!viewport) throw new Error('Scene View frame is not ready yet.');
     const camera = cameraRef.current;
@@ -1159,9 +1112,6 @@ export default function CalmEditorPrototype({
     && !nativeSceneError;
 
   const nativeHostSceneActive = zeroCopySceneActive && noCpuReadbackPresentation;
-  const presentationDiagnostics = useMemo(() => (
-    presentationDiagnosticsLabel(viewportPresentationDiagnostics, viewportPresentationAdapter, zeroCopySceneActive)
-  ), [viewportPresentationDiagnostics, viewportPresentationAdapter, zeroCopySceneActive]);
 
   const setSelectedTransform = async (axis: 'position' | 'rotation' | 'scale', index: number, value: number) => {
     setEntities((current) =>
@@ -1324,7 +1274,7 @@ export default function CalmEditorPrototype({
       .then((status) => {
         setViewportPresentationDiagnostics(status);
         if (status.adapters) setViewportPresentationAdapters(status.adapters);
-        if (status.default_mode) setViewportPresentation(status.default_mode);
+        setViewportPresentation(status.default_mode ?? null);
       })
       .catch(() => {
         setViewportPresentationDiagnostics(null);
@@ -1932,7 +1882,6 @@ export default function CalmEditorPrototype({
             <div className="flex items-center gap-2 font-mono text-[10px] text-[var(--text-muted)]">
               <span className={cx('size-1.5 rounded-full', isPlaying ? 'bg-[var(--brand)]' : 'bg-[var(--text-muted)]')} />
               <span>{isPlaying ? 'Play mode' : 'Editor mode'}</span>
-              <span className="max-w-[440px] truncate">{presentationDiagnostics}</span>
               <span>{viewportSize.width}x{viewportSize.height}</span>
             </div>
           </div>
@@ -1949,9 +1898,6 @@ export default function CalmEditorPrototype({
             {zeroCopySceneActive ? (
               <div className="pointer-events-none absolute inset-0 z-[1] bg-[linear-gradient(180deg,rgba(7,10,15,0.10),transparent_18%,transparent_78%,rgba(7,10,15,0.18))]" aria-hidden="true">
                 <ViewportGrid />
-                <div className="absolute right-3 top-3 max-w-[min(520px,62%)] truncate rounded-[var(--radius-sm)] border border-[rgba(245,158,11,0.30)] bg-[rgba(7,10,15,0.72)] px-2 py-1 font-mono text-[10px] text-[#fbbf24] backdrop-blur-xl">
-                  {presentationDiagnostics}
-                </div>
               </div>
             ) : !zeroCopySceneActive ? (
               <ViewportCanvas
@@ -1986,7 +1932,7 @@ export default function CalmEditorPrototype({
 
             {nativeSceneError && (
               <div className="absolute left-4 top-4 z-[4] max-w-[420px] rounded-[var(--radius-md)] border border-[rgba(245,158,11,0.36)] bg-[rgba(24,18,10,0.88)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)] backdrop-blur-xl">
-                Native Scene View failed, using canvas fallback: {nativeSceneError}
+                Native Scene View unavailable: {nativeSceneError}
               </div>
             )}
 

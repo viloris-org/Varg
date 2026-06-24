@@ -537,18 +537,21 @@ impl TemporalFrameState {
         far: f32,
     ) -> (TemporalCameraData, bool) {
         let render_size = (render_size.0.max(1), render_size.1.max(1));
-        let previous_view_projection = self.previous_view_projection.unwrap_or(view_projection);
         let reset_history = self
             .previous_render_size
             .is_none_or(|previous| previous != render_size);
         let jitter = halton_jitter(self.sequence_index, render_size);
-        self.previous_view_projection = Some(view_projection);
+        let jittered_view_projection = jitter_view_projection(view_projection, jitter);
+        let previous_view_projection = self
+            .previous_view_projection
+            .unwrap_or(jittered_view_projection);
+        self.previous_view_projection = Some(jittered_view_projection);
         self.previous_render_size = Some(render_size);
         self.sequence_index = self.sequence_index.wrapping_add(1);
         (
             TemporalCameraData {
                 jitter,
-                view_projection,
+                view_projection: jittered_view_projection,
                 previous_view_projection,
                 near,
                 far,
@@ -556,6 +559,12 @@ impl TemporalFrameState {
             reset_history,
         )
     }
+}
+
+fn jitter_view_projection(mut view_projection: [f32; 16], jitter: [f32; 2]) -> [f32; 16] {
+    view_projection[8] += jitter[0] * 2.0;
+    view_projection[9] += jitter[1] * 2.0;
+    view_projection
 }
 
 fn halton_jitter(index: u32, render_size: (u32, u32)) -> [f32; 2] {
@@ -722,13 +731,21 @@ mod tests {
 
         let (first, first_reset) = state.next_camera_data(first_vp, (1920, 1080), 0.1, 1000.0);
         assert!(first_reset);
-        assert_eq!(first.previous_view_projection, first_vp);
+        assert_eq!(first.previous_view_projection, first.view_projection);
         assert_eq!(first.jitter[0], 0.0);
         assert!(first.jitter[1].abs() > 0.0);
+        assert_eq!(
+            first.view_projection[8],
+            first_vp[8] + first.jitter[0] * 2.0
+        );
+        assert_eq!(
+            first.view_projection[9],
+            first_vp[9] + first.jitter[1] * 2.0
+        );
 
         let (second, second_reset) = state.next_camera_data(second_vp, (1920, 1080), 0.1, 1000.0);
         assert!(!second_reset);
-        assert_eq!(second.previous_view_projection, first_vp);
+        assert_eq!(second.previous_view_projection, first.view_projection);
 
         let (_, resize_reset) = state.next_camera_data(second_vp, (1280, 720), 0.1, 1000.0);
         assert!(resize_reset);

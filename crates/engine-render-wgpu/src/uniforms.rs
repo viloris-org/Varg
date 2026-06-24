@@ -63,6 +63,32 @@ pub(crate) struct LightingUniform {
     pub(crate) lights: [ForwardLightUniform; MAX_FORWARD_LIGHTS],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct GiProbeUniform {
+    pub(crate) center: [f32; 4],
+    pub(crate) extent: [f32; 4],
+    pub(crate) counts_intensity: [f32; 4],
+    pub(crate) params: [u32; 4],
+}
+
+impl Default for GiProbeUniform {
+    fn default() -> Self {
+        Self {
+            center: [0.0; 4],
+            extent: [1.0, 1.0, 1.0, 0.0],
+            counts_intensity: [1.0, 1.0, 1.0, 0.0],
+            params: [0, 0, 0, 0],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct GiProbe {
+    pub(crate) irradiance: [f32; 4],
+}
+
 impl Default for LightingUniform {
     fn default() -> Self {
         Self {
@@ -189,6 +215,10 @@ pub(crate) struct PostProcessUniform {
     pub(crate) ssgi_intensity: f32,
     pub(crate) ssr_enabled: f32,
     pub(crate) ssr_intensity: f32,
+    pub(crate) taa_reset: f32,
+    pub(crate) taa_history_weight: f32,
+    pub(crate) taa_enabled: f32,
+    pub(crate) _pad: f32,
 }
 
 #[repr(C)]

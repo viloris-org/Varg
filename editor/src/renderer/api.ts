@@ -114,7 +114,6 @@ export function viewportReadback(params: {
 }
 
 export type ViewportPresentationMode =
-  | 'canvas-readback'
   | 'native-host-window'
   | 'wayland-embedded-compositor'
   | 'editor-compositor';
@@ -140,7 +139,7 @@ export interface ViewportPresentationAdapter {
 }
 
 export interface ViewportPresentationCapabilities {
-  default_mode: ViewportPresentationMode;
+  default_mode: ViewportPresentationMode | null;
   adapters: ViewportPresentationAdapter[];
 }
 
@@ -155,12 +154,13 @@ export interface ViewportPresentationSupportStatus {
 
 export interface ViewportPresentationStatus {
   compositor_requested?: boolean;
-  default_mode?: ViewportPresentationMode;
+  default_mode?: ViewportPresentationMode | null;
   active_backend?: string | null;
   selected_backend?: string | null;
   platform_support?: string | boolean | ViewportPresentationSupportStatus | null;
   wayland_embedded_compositor?: string | boolean | ViewportPresentationSupportStatus | null;
   wayland_support?: string | boolean | ViewportPresentationSupportStatus | null;
+  unavailable_reason?: string | null;
   fallback_reason?: string | null;
   adapters?: ViewportPresentationAdapter[];
   direct_scanout?: string | boolean | null;

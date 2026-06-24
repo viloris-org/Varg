@@ -17,18 +17,34 @@ jobs:
           - name: Windows x64
             os: windows-latest
           - name: macOS arm64
-            os: macos-14
+            os: macos-26
           - name: macOS x64
-            os: macos-13
+            os: macos-26-intel
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      RUSTC_WRAPPER: ""
 
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install Linux Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libudev-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint workspace
@@ -40,6 +56,6 @@ jobs:
       - name: Build runtime-min (editor profile)
         run: cargo xtask build-editor
       - name: Check Tauri editor backend compiles
-        run: cargo check -p aster-editor-tauri --features "editor,wgpu"
+        run: cargo check -p varg-editor-tauri
       - name: Agent sandbox and worktree smoke tests
         run: cargo xtask agent-smoke
