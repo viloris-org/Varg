@@ -481,6 +481,31 @@ Component types: Camera, MeshRenderer, Light, Rigidbody, Collider, AudioSource, 
 }
 ```
 
+### scene_command — Structured scene editing (preferred for scene changes)
+For scene modifications, prefer `scene_command` over individual create_object/set_property operations. It provides validation, transaction safety, and clear audit trails.
+```json
+{
+  "action": "scene_command",
+  "op": "CreateEntity",
+  "args": {
+    "name": "NewEnemy",
+    "parent": "Spawner",
+    "position": [10.0, 0.0, 5.0],
+    "rotation_degrees": [0.0, 90.0, 0.0],
+    "scale": [1.0, 1.0, 1.0]
+  }
+}
+```
+Supported operations:
+- `CreateEntity` — Create new entity with optional parent, position, rotation, scale
+- `DeleteEntity` — Delete entity by ID
+- `RenameEntity` — Rename entity
+- `AddComponent` / `UpdateComponent` — Add or update component on entity
+- `RemoveComponent` — Remove component from entity
+- `SetTransform` — Set position, rotation, scale on entity
+- `SetParent` — Reparent entity
+- `AttachScript` — Attach script to entity
+
 ### Other operations
 - `execute_command` — Run editor commands
 - `remove_component` / `destroy_object` — Remove components/entities

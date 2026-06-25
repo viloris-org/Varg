@@ -2521,6 +2521,16 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let summary = args["summary"].as_str().map(String::from);
             Ok(AgentOperation::Complete { summary })
         }
+        "scene_command" => {
+            let op = args["op"].as_str().unwrap_or("");
+            let scene_args = args["args"].clone();
+            // Build SceneCommand JSON payload
+            let payload = serde_json::json!({
+                "op": op,
+                "args": scene_args
+            });
+            Ok(AgentOperation::SceneCommand { payload })
+        }
         other => Err(EngineError::config(format!("unknown tool call: {other}"))),
     }
 }
@@ -2781,6 +2791,18 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                     "target": { "type": "string", "description": "Filter target for 'edges_for' query" }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "scene_command".into(),
+            description: "Apply a structured scene editing operation (create/delete entity, add/remove/upsert component, set transform, reparent, attach script). Prefer this over raw file operations for scene changes.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["CreateEntity", "DeleteEntity", "RenameEntity", "AddComponent", "UpdateComponent", "RemoveComponent", "SetTransform", "SetParent", "AttachScript", "AttachAsset"], "description": "Scene operation type" },
+                    "args": { "type": "object", "description": "Operation arguments - see engine-ecs patch.rs for schema" }
+                },
+                "required": ["op", "args"]
             }),
         },
         ToolDefinition {
