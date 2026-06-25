@@ -1,0 +1,37 @@
+// Weapon cooldown system using wait()
+
+script WeaponCooldown {
+    @export var fireRate: Float = 0.5
+    @export var damage: Int = 10
+
+    var canFire: Bool = true
+    var ammo: Int = 30
+
+    func start() {
+        state.canFire = 1
+        state.ammo = ammo
+        log("Weapon ready")
+    }
+
+    func update(_ dt: Float) {
+        // Check for fire input
+        if Input.down("Fire") && state.canFire == 1 && state.ammo > 0 {
+            // Fire the weapon
+            state.ammo -= 1
+            state.canFire = 0
+            log("Fire! Ammo remaining:")
+
+            // Start cooldown
+            wait(fireRate)
+
+            // Cooldown finished, can fire again
+            state.canFire = 1
+        }
+
+        // Reload on R key
+        if Input.down("interact") && state.ammo < 30 {
+            state.ammo = 30
+            log("Reloaded")
+        }
+    }
+}

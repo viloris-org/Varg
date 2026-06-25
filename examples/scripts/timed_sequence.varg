@@ -1,0 +1,46 @@
+// Timed sequence using wait() for game events
+
+script TimedSequence {
+    @export var eventDelay: Float = 2.0
+
+    var sequenceStarted: Bool = false
+    var currentPhase: Int = 0
+
+    func start() {
+        state.sequenceStarted = 0
+        state.currentPhase = 0
+    }
+
+    func update(_ dt: Float) {
+        // Start sequence on Space key
+        if Input.down("Space") && state.sequenceStarted == 0 {
+            state.sequenceStarted = 1
+            state.currentPhase = 1
+            log("Sequence started - Phase 1")
+        }
+
+        // Phase 1: Initial delay
+        if state.currentPhase == 1 {
+            wait(eventDelay)
+            log("Phase 1 complete - Moving to Phase 2")
+            state.currentPhase = 2
+        }
+
+        // Phase 2: Second event
+        if state.currentPhase == 2 {
+            position.y += 1.0
+            wait(eventDelay)
+            log("Phase 2 complete - Moving to Phase 3")
+            state.currentPhase = 3
+        }
+
+        // Phase 3: Final event
+        if state.currentPhase == 3 {
+            position.y -= 1.0
+            wait(eventDelay)
+            log("Sequence complete!")
+            state.currentPhase = 0
+            state.sequenceStarted = 0
+        }
+    }
+}

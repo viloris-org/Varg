@@ -215,6 +215,7 @@ enum RuntimeStatement {
     Return(Expression),
     Break,
     Continue,
+    Wait(Expression),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1552,6 +1553,37 @@ impl RuntimeEnvironment<'_> {
             RuntimeStatement::Continue => {
                 self.should_continue = true;
             }
+            RuntimeStatement::Wait(duration) => {
+                let seconds = self.eval_number(duration);
+                if seconds > 0.0 {
+                    let timer_key = "__wait_timer";
+
+                    // Check if we're already waiting
+                    if let Some(remaining) = self.state.get(timer_key).and_then(|v| v.as_f64()) {
+                        let remaining = remaining as f32;
+                        let new_remaining = remaining - self.delta_time;
+
+                        if new_remaining > 0.0 {
+                            // Still waiting
+                            self.state.insert(
+                                timer_key.to_string(),
+                                serde_json::Value::from(new_remaining as f64),
+                            );
+                            self.should_return = true;
+                        } else {
+                            // Wait finished, clear timer and continue
+                            self.state.remove(timer_key);
+                        }
+                    } else {
+                        // Start new wait
+                        self.state.insert(
+                            timer_key.to_string(),
+                            serde_json::Value::from(seconds as f64),
+                        );
+                        self.should_return = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1843,6 +1875,9 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
     }
     if line.trim() == "return" {
         return Some(RuntimeStatement::Return(Expression::Number(0.0)));
+    }
+    if let Some(content) = function_args(line, "wait") {
+        return Some(RuntimeStatement::Wait(parse_expression(content)?));
     }
     if let Some(content) = function_args(line, "log") {
         return parse_string_literal(content).map(RuntimeStatement::Log);
@@ -3201,6 +3236,165 @@ mod tests {
         assert_eq!(
             output.state.get("frame").and_then(|value| value.as_f64()),
             Some(7.0)
+        );
+    }
+
+    #[test]
+    fn runtime_supports_wait_for_simple_delays() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/delayed.varg",
+            r#"script Delayed {
+    func update(_ dt: Float) {
+        if state.executed == 1 {
+            return
+        }
+        wait(1.0)
+        state.executed = 1
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+
+        // First frame: wait starts, executed should not be set
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+            },
+        );
+
+        // Wait timer should be created, but executed should not be 1
+        assert!(output.state.get("__wait_timer").is_some());
+        assert_ne!(
+            output.state.get("executed").and_then(|v| v.as_f64()),
+            Some(1.0)
+        );
+
+        // Simulate frames during wait (0.5 seconds passed)
+        let mut state = output.state;
+        for _ in 0..30 {
+            let output = script.run_hook(
+                "update",
+                VargRuntimeContext {
+                    transform: Transform::default(),
+                    input: engine_platform::InputState::default(),
+                    delta_time: 0.016,
+                    total_time: 0.5,
+                    frame_index: 30,
+                    exported_values: HashMap::new(),
+                    state: state.clone(),
+                },
+            );
+            state = output.state;
+        }
+
+        // Still waiting
+        assert_ne!(
+            state.get("executed").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert!(state.get("__wait_timer").is_some());
+
+        // Simulate more frames (total > 1.0 second)
+        for _ in 0..40 {
+            let output = script.run_hook(
+                "update",
+                VargRuntimeContext {
+                    transform: Transform::default(),
+                    input: engine_platform::InputState::default(),
+                    delta_time: 0.016,
+                    total_time: 1.2,
+                    frame_index: 70,
+                    exported_values: HashMap::new(),
+                    state: state.clone(),
+                },
+            );
+            state = output.state;
+        }
+
+        // Wait finished, code after wait executed
+        assert_eq!(
+            state.get("executed").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert!(state.get("__wait_timer").is_none());
+    }
+
+    #[test]
+    fn runtime_supports_wait_with_expressions() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/dynamic_wait.varg",
+            r#"script DynamicWait {
+    @export var cooldown: Float = 0.5
+
+    func update(_ dt: Float) {
+        if state.fired == 1 {
+            return
+        }
+        wait(cooldown)
+        state.fired = 1
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+
+        let mut exported = HashMap::new();
+        exported.insert("cooldown".to_string(), serde_json::Value::from(0.5));
+
+        // First frame
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: exported.clone(),
+                state: HashMap::new(),
+            },
+        );
+
+        // Count should not be set yet
+        assert_ne!(
+            output.state.get("fired").and_then(|v| v.as_f64()),
+            Some(1.0)
+        );
+
+        // Simulate 0.5 seconds of frames
+        let mut state = output.state;
+        for _ in 0..32 {
+            let output = script.run_hook(
+                "update",
+                VargRuntimeContext {
+                    transform: Transform::default(),
+                    input: engine_platform::InputState::default(),
+                    delta_time: 0.016,
+                    total_time: 0.5,
+                    frame_index: 32,
+                    exported_values: exported.clone(),
+                    state: state.clone(),
+                },
+            );
+            state = output.state;
+        }
+
+        // After 0.5 seconds, fired should be set
+        assert_eq!(
+            state.get("fired").and_then(|value| value.as_f64()),
+            Some(1.0)
         );
     }
 }
