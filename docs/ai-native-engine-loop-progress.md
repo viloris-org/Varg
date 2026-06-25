@@ -256,9 +256,10 @@ This branch added:
 2. `2b0cc13` - test(ai): add SceneCommand execution tests
 3. `376652a` - docs(ai): update progress with SceneCommand test status
 4. `7966260` - feat(ai): expose scene_command tool to AI model
+5. `cd5d6a7` - docs(ai): update progress with scene_command tool exposure
 
 ### Merge Risk Assessment
-- Branch is 6 commits ahead of main
+- Branch is 7 commits ahead of main
 - All tests pass (except 1 network test due to infrastructure)
 - Frontend builds successfully
 - No conflicts expected as changes are additive
