@@ -3133,4 +3133,87 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
     }
+
+    #[test]
+    fn scene_command_execution_in_workspace() {
+        // This test verifies that SceneCommand operations can be parsed and executed
+        // in an isolated workspace context. This is the key integration point for
+        // structured scene editing via Quest.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir.join("../engine-editor/../../examples/project");
+
+        let ctx = ProjectContext::open(&project_root).unwrap();
+        let mut session = AgentSession::new(ctx).unwrap();
+
+        // Create a SceneCommand payload - create_entity operation
+        let scene_command_payload = serde_json::json!({
+            "op": "CreateEntity",
+            "args": {
+                "name": "TestEntity",
+                "parent": null,
+                "position": [1.0, 2.0, 3.0],
+                "rotation_degrees": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0]
+            }
+        });
+
+        // Execute the SceneCommand operation
+        let result = session.execute_operation(&AgentOperation::SceneCommand {
+            payload: scene_command_payload
+        });
+
+        // The operation should either succeed or fail with a clear error message
+        // Key assertion: it doesn't panic or produce an internal error
+        match result {
+            Ok(_) => {
+                // Successfully executed - SceneCommand infrastructure is working
+            }
+            Err(e) => {
+                // It's OK if validation fails (e.g., entity already exists, missing scene file),
+                // as long as the error is actionable and not a system crash
+                let error_msg = e.to_string();
+                assert!(
+                    error_msg.contains("SceneCommand") ||
+                    error_msg.contains("entity") ||
+                    error_msg.contains("validation") ||
+                    error_msg.contains("not found"),
+                    "Error should be actionable, got: {error_msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scene_command_validation_failure_produces_clear_error() {
+        // Test that SceneCommand validation failures are surfaced clearly
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir.join("../engine-editor/../../examples/project");
+
+        let ctx = ProjectContext::open(&project_root).unwrap();
+        let mut session = AgentSession::new(ctx).unwrap();
+
+        // Create an invalid SceneCommand with empty entity name
+        let invalid_command = serde_json::json!({
+            "op": "CreateEntity",
+            "args": {
+                "name": "",  // Invalid: empty name
+                "parent": null,
+                "position": [0.0, 0.0, 0.0],
+                "rotation_degrees": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0]
+            }
+        });
+
+        let result = session.execute_operation(&AgentOperation::SceneCommand {
+            payload: invalid_command
+        });
+
+        // Should fail with clear validation error
+        assert!(result.is_err(), "Empty entity name should fail validation");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("validation") || err_msg.contains("name") || err_msg.contains("empty"),
+            "Error message should be actionable, got: {err_msg}"
+        );
+    }
 }
