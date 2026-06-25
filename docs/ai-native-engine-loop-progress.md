@@ -245,13 +245,20 @@ This branch added:
 - **NEW**: SceneCommand execution tests: 2 tests added
   - `scene_command_execution_in_workspace` - verifies SceneCommand works in workspace context
   - `scene_command_validation_failure_produces_clear_error` - verifies validation errors are actionable
+- **NEW**: SceneCommand tool now exposed to AI model
+  - Added `scene_command` tool definition in `agent_tool_definitions()`
+  - Added parsing in `tool_call_to_operation()` for `scene_command` tool calls
+  - Updated system prompt to document `scene_command` with examples
+  - AI models can now generate structured scene editing operations
 
 ### Commit History (2026-06-25)
 1. `8dbfd39` - feat(ai): wire SceneCommand into Quest execution, add deterministic StubProvider
 2. `2b0cc13` - test(ai): add SceneCommand execution tests
+3. `376652a` - docs(ai): update progress with SceneCommand test status
+4. `7966260` - feat(ai): expose scene_command tool to AI model
 
 ### Merge Risk Assessment
-- Branch is 5 commits ahead of main
+- Branch is 6 commits ahead of main
 - All tests pass (except 1 network test due to infrastructure)
 - Frontend builds successfully
 - No conflicts expected as changes are additive
