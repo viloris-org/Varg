@@ -992,6 +992,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network — run with `cargo test -p engine-ai -- --ignored`
     fn openai_detection_returns_provider_gpt5_models() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
