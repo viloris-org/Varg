@@ -2797,6 +2797,7 @@ impl WgpuRenderDevice {
             gui_index_capacity,
             pending_surface_gui: None,
             submitted_worlds: 0,
+            editor_grid_enabled: false,
             grid_pipeline,
             grid_bind_group,
             grid_vertex_buffer,

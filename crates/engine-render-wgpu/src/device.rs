@@ -267,6 +267,7 @@ pub struct WgpuRenderDevice {
     pub(crate) gui_index_capacity: usize,
     pub(crate) pending_surface_gui: Option<engine_render::GuiDrawList>,
     pub(crate) submitted_worlds: u64,
+    pub(crate) editor_grid_enabled: bool,
     pub(crate) grid_pipeline: wgpu::RenderPipeline,
     pub(crate) grid_bind_group: wgpu::BindGroup,
     pub(crate) grid_vertex_buffer: wgpu::Buffer,
@@ -451,6 +452,11 @@ impl std::fmt::Debug for WgpuRenderDevice {
 }
 
 impl WgpuRenderDevice {
+    /// Enables or disables the editor-only ground grid overlay.
+    pub fn set_editor_grid_enabled(&mut self, enabled: bool) {
+        self.editor_grid_enabled = enabled;
+    }
+
     /// Returns a shared reference to the wgpu device.
     pub fn device_arc(&self) -> Arc<wgpu::Device> {
         Arc::clone(&self.device)

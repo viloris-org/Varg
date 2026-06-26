@@ -65,7 +65,7 @@ script PlayerController {
 - Use `state.name` when you want to make persistence explicit.
 - Supported control flow: `if`, `else`, `for i in 0..10`, `for i in 0..=10`, `for i in count(n)`, `while`, `return`, `break`, `continue`.
 - Supported local bindings: `let name: Float = expression` and `var name: Float = expression`.
-- Unsupported today: events, UI, entity spawning/destruction, entity queries, arrays, maps, physics velocity/impulse APIs, animation APIs, audio APIs, component APIs, arbitrary entity methods, and multiline expressions.
+- Unsupported today: events, entity queries, arrays, maps, physics velocity/impulse APIs, animation APIs beyond simple procedural tones, component APIs, arbitrary entity methods, and multiline expressions.
 
 ### Supported Runtime APIs
 
@@ -92,6 +92,14 @@ Input.value("MoveX")
 Input.value("MoveY")
 Input.actionValue("MoveX")
 Input.actionValue("MoveY")
+Input.mouseDeltaX()
+Input.mouseDeltaY()
+Input.cursorX()
+Input.cursorY()
+Input.wheelX()
+Input.wheelY()
+Input.captureMouse(true)
+Input.releaseMouse()
 Input.axis("move")
 Input.axis("moveX")
 Input.axis("moveY")
@@ -105,10 +113,16 @@ Time.frame
 log("literal message")
 wait(seconds)
 
+Audio.playTone("sine", 440.0, 0.12, 0.4)
+Audio.playTone("square", 880.0, 0.08, 0.35)
+Audio.playTone3D("noise", 220.0, 0.05, 0.2)
+Audio.startLoop("main", "triangle", "C4 E4 G4 R", 120.0, 0.5, 0.18)
+Audio.stopLoop("main")
+
 sin, cos, tan, abs, sqrt, floor, ceil, round, min, max, clamp, lerp
 ```
 
-Preferred input names are `Input.down`, `Input.pressed`, `Input.released`, and `Input.value`. `Input.justPressed`, `Input.justReleased`, `Input.actionPressed`, `Input.actionReleased`, and `Input.actionValue` are compatibility aliases.
+Preferred input names are `Input.down`, `Input.pressed`, `Input.released`, `Input.value`, `Input.mouseDeltaX`, and `Input.mouseDeltaY`. `Input.justPressed`, `Input.justReleased`, `Input.actionPressed`, `Input.actionReleased`, and `Input.actionValue` are compatibility aliases.
 
 Common action names: `"MoveX"`, `"MoveY"`, `"Jump"`, `"Interact"`, `"Fire"`, `"moveForward"`, `"moveBackward"`, `"moveLeft"`, `"moveRight"`.
 

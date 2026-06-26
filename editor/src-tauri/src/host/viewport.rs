@@ -204,10 +204,12 @@ impl EditorHost {
                 height: height.max(1),
                 format: ImageFormat::Rgba8Srgb,
             };
-            self.render_device = Some(WgpuRenderDevice::new_offscreen(config).map_err(|e| {
+            let mut device = WgpuRenderDevice::new_offscreen(config).map_err(|e| {
                 tracing::error!(target: "engine", error = %e, "wgpu device creation failed");
                 EngineError::other(format!("failed to create wgpu device: {e}"))
-            })?);
+            })?;
+            device.set_editor_grid_enabled(true);
+            self.render_device = Some(device);
         }
         let device = self.render_device.as_mut().unwrap();
 

@@ -218,6 +218,7 @@ fn run_game_window(
         last_frame: Instant::now(),
         pending_snapshot: Some(snapshot),
         visible: true,
+        applied_input_capture: None,
     };
 
     let run_result = event_loop.run_app(&mut app);
@@ -238,6 +239,7 @@ struct GameApp {
     last_frame: Instant,
     pending_snapshot: Option<GameRuntimeSnapshot>,
     visible: bool,
+    applied_input_capture: Option<runtime_min::RuntimeInputCapture>,
 }
 
 impl ApplicationHandler<GameCommand> for GameApp {
@@ -260,13 +262,13 @@ impl ApplicationHandler<GameCommand> for GameApp {
                 let _ = self.event_tx.send(GameEvent::Closed);
             }
             WindowEvent::Resized(size) => {
-                self.width = size.width.max(1);
-                self.height = size.height.max(1);
-                if let Some(runtime) = self.runtime.as_mut() {
-                    runtime.renderer.resize_surface(self.width, self.height);
-                }
+                self.resize_runtime_surface(size.width, size.height);
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.sync_runtime_surface_to_window();
             }
             WindowEvent::RedrawRequested => {
+                self.sync_runtime_surface_to_window();
                 self.render_frame();
             }
             _ => {}
@@ -295,8 +297,11 @@ impl ApplicationHandler<GameCommand> for GameApp {
         &mut self,
         _event_loop: &ActiveEventLoop,
         _device_id: DeviceId,
-        _event: DeviceEvent,
+        event: DeviceEvent,
     ) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.process_winit_device_event(&event);
+        }
     }
 }
 
@@ -353,6 +358,9 @@ impl GameApp {
         let window = event_loop
             .create_window(self.window_attributes())
             .map_err(|error| format!("create window: {error}"))?;
+        let size = window.inner_size();
+        self.width = size.width.max(1);
+        self.height = size.height.max(1);
         self.window = Some(window);
 
         let Some(snapshot) = self.pending_snapshot.take() else {
@@ -368,9 +376,35 @@ impl GameApp {
         Ok(())
     }
 
+    fn resize_runtime_surface(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.renderer.resize_surface(self.width, self.height);
+        }
+    }
+
+    fn sync_runtime_surface_to_window(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == self.width && size.height == self.height {
+            return;
+        }
+        self.resize_runtime_surface(size.width, size.height);
+    }
+
     fn close_window(&mut self) {
         self.visible = false;
         self.runtime = None;
+        if let Some(window) = self.window.as_ref() {
+            let _ = runtime_min::apply_winit_input_capture(
+                window,
+                runtime_min::RuntimeInputCapture::default(),
+            );
+        }
+        self.applied_input_capture = None;
         self.window = None;
     }
 
@@ -395,6 +429,7 @@ impl GameApp {
         );
         self.runtime = Some(runtime);
         self.last_frame = Instant::now();
+        self.applied_input_capture = None;
         Ok(())
     }
 
@@ -411,6 +446,17 @@ impl GameApp {
         };
         if let Err(e) = runtime.tick_game_frame(dt, false) {
             tracing::error!(target: "game", error = %e, "runtime tick/render failed");
+        }
+        let capture = runtime.input_capture();
+        if self.applied_input_capture != Some(capture) {
+            if let Some(window) = self.window.as_ref() {
+                match runtime_min::apply_winit_input_capture(window, capture) {
+                    Ok(()) => self.applied_input_capture = Some(capture),
+                    Err(error) => {
+                        tracing::warn!(target: "game", error = %error, "input capture failed");
+                    }
+                }
+            }
         }
     }
 }

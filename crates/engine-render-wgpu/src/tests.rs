@@ -110,6 +110,16 @@ fn surface_viewport_rect_clamps_to_swapchain_bounds() {
 }
 
 #[test]
+fn surface_viewport_rect_reclamps_after_surface_resize() {
+    let viewport = SurfaceViewportRect::new(1000, 700, 640, 360).clamped_to(1920, 1080);
+
+    assert_eq!(
+        viewport.clamped_to(1280, 720),
+        SurfaceViewportRect::new(1000, 700, 280, 20)
+    );
+}
+
+#[test]
 fn fullscreen_shaders_use_oversized_triangle() {
     for shader in [SKYBOX_SHADER, POST_SHADER] {
         assert!(shader.contains("f32((vertex_index << 1u) & 2u)"));

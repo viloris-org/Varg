@@ -630,11 +630,12 @@ impl SceneApp {
             .window
             .as_ref()
             .ok_or_else(|| "scene window is not initialized".to_owned())?;
-        let renderer = WgpuRenderDevice::new_with_performance(
+        let mut renderer = WgpuRenderDevice::new_with_performance(
             window,
             scene_surface_performance_config(&self.mode),
         )
         .map_err(|error| format!("wgpu device: {error}"))?;
+        renderer.set_editor_grid_enabled(true);
         let mut runtime = snapshot
             .into_runtime(renderer)
             .map_err(|error| format!("runtime: {error}"))?;
@@ -1009,6 +1010,7 @@ impl RawSceneApp {
             )
         }
         .map_err(|error| format!("wgpu device: {error}"))?;
+        renderer.set_editor_grid_enabled(true);
         if let Some(viewport) = self.viewport {
             renderer.set_surface_viewport(Some(engine_render_wgpu::SurfaceViewportRect::new(
                 viewport.x.max(0) as u32,

@@ -1,0 +1,9 @@
+script DespawnFar {
+    @export var maxDistance: Float = 46.0
+
+    func update(_ dt: Float) {
+        if playerDistance() > maxDistance {
+            entity.destroy()
+        }
+    }
+}

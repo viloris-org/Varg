@@ -226,8 +226,73 @@ pub struct VargRuntimeOutput {
     pub logs: Vec<String>,
     /// UI draw commands emitted by `ui.*(...)` calls during this hook.
     pub ui_commands: Vec<VargUiCommand>,
+    /// Audio commands emitted by script during this hook.
+    pub audio_commands: Vec<VargAudioCommand>,
+    /// Scene object creation requests emitted during this hook.
+    pub spawn_requests: Vec<VargSpawnRequest>,
     /// Whether the script requested deferred destruction of its owning entity.
     pub destroy_self: bool,
+    /// Optional request to capture or release the game window mouse.
+    pub mouse_capture: Option<bool>,
+}
+
+/// A lightweight procedural audio request emitted by Varg gameplay scripts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VargAudioCommand {
+    /// Generate and play a one-shot oscillator tone.
+    PlayTone {
+        /// Waveform name: `sine`, `square`, `sawtooth`, `triangle`, or `noise`.
+        waveform: String,
+        /// Oscillator frequency in Hz.
+        frequency_hz: f32,
+        /// Tone duration in seconds.
+        duration_seconds: f32,
+        /// Linear gain in `[0.0, 1.0]`.
+        volume: f32,
+        /// Whether to place the sound at the script entity's position.
+        spatial: bool,
+        /// Source position used when `spatial` is true.
+        position: Vec3,
+    },
+    /// Generate and loop a simple procedural note pattern.
+    StartLoop {
+        /// Stable script-provided loop id.
+        id: String,
+        /// Waveform name: `sine`, `square`, `sawtooth`, `triangle`, or `noise`.
+        waveform: String,
+        /// Whitespace/comma-separated notes, rests, or Hz values.
+        pattern: String,
+        /// Tempo in beats per minute.
+        bpm: f32,
+        /// Duration of each pattern token in beats.
+        beats_per_note: f32,
+        /// Linear gain in `[0.0, 1.0]`.
+        volume: f32,
+    },
+    /// Stop a running procedural loop.
+    StopLoop {
+        /// Stable script-provided loop id.
+        id: String,
+    },
+}
+
+/// A primitive scene object creation request emitted by Varg gameplay scripts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VargSpawnRequest {
+    /// User-visible object name.
+    pub name: String,
+    /// User-visible object tag.
+    pub tag: String,
+    /// Built-in mesh identifier such as `debug/cube` or `debug/sphere`.
+    pub builtin_mesh: String,
+    /// Collider primitive shape such as `box` or `sphere`.
+    pub collider_shape: String,
+    /// Local position for the spawned object.
+    pub position: Vec3,
+    /// Local shape size. Spheres use equal XYZ diameter.
+    pub size: Vec3,
+    /// Optional Varg script to attach to the spawned object.
+    pub script: Option<String>,
 }
 
 /// A retained UI draw request emitted by Varg scripts.
@@ -297,6 +362,21 @@ impl VargSceneContext {
             .map(|target| (*target - origin).length())
             .reduce(f32::min)
     }
+
+    /// Returns a named object's local X position.
+    pub fn x_of_name(&self, name: &str) -> Option<f32> {
+        self.positions_by_name.get(name).map(|position| position.x)
+    }
+
+    /// Returns a named object's local Y position.
+    pub fn y_of_name(&self, name: &str) -> Option<f32> {
+        self.positions_by_name.get(name).map(|position| position.y)
+    }
+
+    /// Returns a named object's local Z position.
+    pub fn z_of_name(&self, name: &str) -> Option<f32> {
+        self.positions_by_name.get(name).map(|position| position.z)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -359,6 +439,39 @@ enum RuntimeStatement {
     Continue,
     Wait(Expression),
     DestroySelf,
+    SpawnBox {
+        name: Expression,
+        tag: Expression,
+        position: Expression,
+        size: Expression,
+        script: Expression,
+    },
+    SpawnSphere {
+        name: Expression,
+        tag: Expression,
+        position: Expression,
+        radius: Expression,
+        script: Expression,
+    },
+    PlayTone {
+        waveform: Expression,
+        frequency: Expression,
+        duration: Expression,
+        volume: Expression,
+        spatial: bool,
+    },
+    StartAudioLoop {
+        id: Expression,
+        waveform: Expression,
+        pattern: Expression,
+        bpm: Expression,
+        beats_per_note: Expression,
+        volume: Expression,
+    },
+    StopAudioLoop {
+        id: Expression,
+    },
+    SetMouseCapture(Expression),
     UiLabel {
         id: Expression,
         text: Expression,
@@ -687,7 +800,10 @@ impl VargScript {
             state: context.state,
             logs: Vec::new(),
             ui_commands: Vec::new(),
+            audio_commands: Vec::new(),
+            spawn_requests: Vec::new(),
             destroy_self: false,
+            mouse_capture: None,
         };
         let Some(statements) = self.hooks.get(hook) else {
             return output;
@@ -705,7 +821,10 @@ impl VargScript {
             locals: HashMap::new(),
             logs: &mut output.logs,
             ui_commands: &mut output.ui_commands,
+            audio_commands: &mut output.audio_commands,
+            spawn_requests: &mut output.spawn_requests,
             destroy_self: &mut output.destroy_self,
+            mouse_capture: &mut output.mouse_capture,
             should_return: false,
             should_break: false,
             should_continue: false,
@@ -1597,7 +1716,7 @@ fn apply_vscene_transform_properties(block: &VsceneBlock, transform: &mut Transf
         transform.translation = position;
     }
     if let Some(rotation) = vec3_property(block, "rotation") {
-        transform.rotation = Quat::from_euler_deg(rotation.y, rotation.x, rotation.z);
+        transform.rotation = Quat::from_euler_deg(rotation.z, rotation.y, rotation.x);
     }
     if let Some(scale) = vec3_property(block, "scale") {
         transform.scale = scale;
@@ -2043,7 +2162,7 @@ fn write_transform_block(output: &mut String, indent: usize, transform: Transfor
         output,
         indent + 1,
         "rotation",
-        &vscene_vec3(Vec3::new(pitch, yaw, roll)),
+        &vscene_vec3(Vec3::new(roll, pitch, yaw)),
     );
     write_property(output, indent + 1, "scale", &vscene_vec3(transform.scale));
     write_indent(output, indent);
@@ -2318,7 +2437,10 @@ struct RuntimeEnvironment<'a> {
     locals: HashMap<String, serde_json::Value>,
     logs: &'a mut Vec<String>,
     ui_commands: &'a mut Vec<VargUiCommand>,
+    audio_commands: &'a mut Vec<VargAudioCommand>,
+    spawn_requests: &'a mut Vec<VargSpawnRequest>,
     destroy_self: &'a mut bool,
+    mouse_capture: &'a mut Option<bool>,
     /// When true, the current function should return.
     should_return: bool,
     /// When true, the current loop should break.
@@ -2514,6 +2636,90 @@ impl RuntimeEnvironment<'_> {
                 *self.destroy_self = true;
                 self.should_return = true;
             }
+            RuntimeStatement::SpawnBox {
+                name,
+                tag,
+                position,
+                size,
+                script,
+            } => {
+                self.spawn_requests.push(VargSpawnRequest {
+                    name: self
+                        .eval_string(name)
+                        .unwrap_or_else(|| "Spawned Box".to_string()),
+                    tag: self.eval_string(tag).unwrap_or_default(),
+                    builtin_mesh: "debug/cube".to_string(),
+                    collider_shape: "box".to_string(),
+                    position: self.eval_vec3(position),
+                    size: self.eval_vec3(size),
+                    script: self.empty_string_as_none(script),
+                });
+            }
+            RuntimeStatement::SpawnSphere {
+                name,
+                tag,
+                position,
+                radius,
+                script,
+            } => {
+                let diameter = self.eval_number(radius).max(0.0) * 2.0;
+                self.spawn_requests.push(VargSpawnRequest {
+                    name: self
+                        .eval_string(name)
+                        .unwrap_or_else(|| "Spawned Sphere".to_string()),
+                    tag: self.eval_string(tag).unwrap_or_default(),
+                    builtin_mesh: "debug/sphere".to_string(),
+                    collider_shape: "sphere".to_string(),
+                    position: self.eval_vec3(position),
+                    size: Vec3::new(diameter, diameter, diameter),
+                    script: self.empty_string_as_none(script),
+                });
+            }
+            RuntimeStatement::PlayTone {
+                waveform,
+                frequency,
+                duration,
+                volume,
+                spatial,
+            } => {
+                self.audio_commands.push(VargAudioCommand::PlayTone {
+                    waveform: self
+                        .eval_string(waveform)
+                        .unwrap_or_else(|| "sine".to_string()),
+                    frequency_hz: self.eval_number(frequency),
+                    duration_seconds: self.eval_number(duration),
+                    volume: self.eval_number(volume),
+                    spatial: *spatial,
+                    position: self.transform.translation,
+                });
+            }
+            RuntimeStatement::StartAudioLoop {
+                id,
+                waveform,
+                pattern,
+                bpm,
+                beats_per_note,
+                volume,
+            } => {
+                self.audio_commands.push(VargAudioCommand::StartLoop {
+                    id: self.eval_string(id).unwrap_or_else(|| "main".to_string()),
+                    waveform: self
+                        .eval_string(waveform)
+                        .unwrap_or_else(|| "sine".to_string()),
+                    pattern: self.eval_string(pattern).unwrap_or_default(),
+                    bpm: self.eval_number(bpm),
+                    beats_per_note: self.eval_number(beats_per_note),
+                    volume: self.eval_number(volume),
+                });
+            }
+            RuntimeStatement::StopAudioLoop { id } => {
+                self.audio_commands.push(VargAudioCommand::StopLoop {
+                    id: self.eval_string(id).unwrap_or_else(|| "main".to_string()),
+                });
+            }
+            RuntimeStatement::SetMouseCapture(expression) => {
+                *self.mouse_capture = Some(self.eval_bool(expression));
+            }
             RuntimeStatement::UiLabel { id, text, x, y } => {
                 self.ui_commands.push(VargUiCommand::Label {
                     id: self.eval_string(id).unwrap_or_default(),
@@ -2606,6 +2812,14 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
+    fn eval_bool(&self, expression: &Expression) -> bool {
+        match expression {
+            Expression::Bool(value) => *value,
+            Expression::String(value) => !value.is_empty(),
+            _ => self.eval_number(expression).abs() > f32::EPSILON,
+        }
+    }
+
     fn eval_number(&self, expression: &Expression) -> f32 {
         match expression {
             Expression::Number(value) => *value,
@@ -2673,6 +2887,20 @@ impl RuntimeEnvironment<'_> {
             ("entity.position", "z") | ("position", "z") => self.transform.translation.z,
             ("Input", "moveX") => self.input.action_value("MoveX"),
             ("Input", "moveY") => self.input.action_value("MoveY"),
+            ("Input", "mouseDeltaX") | ("Input", "mouseDx") => self.input.mouse_delta().0,
+            ("Input", "mouseDeltaY") | ("Input", "mouseDy") => self.input.mouse_delta().1,
+            ("Input", "wheelX") => self.input.wheel_delta().0,
+            ("Input", "wheelY") => self.input.wheel_delta().1,
+            ("Input", "cursorX") => self
+                .input
+                .cursor_position()
+                .map(|position| position.0)
+                .unwrap_or(0.0),
+            ("Input", "cursorY") => self
+                .input
+                .cursor_position()
+                .map(|position| position.1)
+                .unwrap_or(0.0),
             ("InputAction", action) => self.input.action_value(action),
             ("Time", "time") | ("Time", "elapsed") => self.total_time,
             ("Time", "delta") | ("Time", "dt") => self.delta_time,
@@ -2744,6 +2972,44 @@ impl RuntimeEnvironment<'_> {
                         .distance_to_name(self.transform.translation, "Player")
                 })
                 .unwrap_or(0.0),
+            "scene.xOf" | "xOf" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|name| self.scene.x_of_name(&name))
+                    .unwrap_or(0.0)
+            }
+            "scene.yOf" | "yOf" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|name| self.scene.y_of_name(&name))
+                    .unwrap_or(0.0)
+            }
+            "scene.zOf" | "zOf" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|name| self.scene.z_of_name(&name))
+                    .unwrap_or(0.0)
+            }
+            "Input.mouseDeltaX" | "Input.mouseDx" => self.input.mouse_delta().0,
+            "Input.mouseDeltaY" | "Input.mouseDy" => self.input.mouse_delta().1,
+            "Input.wheelX" => self.input.wheel_delta().0,
+            "Input.wheelY" => self.input.wheel_delta().1,
+            "Input.cursorX" => self
+                .input
+                .cursor_position()
+                .map(|position| position.0)
+                .unwrap_or(0.0),
+            "Input.cursorY" => self
+                .input
+                .cursor_position()
+                .map(|position| position.1)
+                .unwrap_or(0.0),
             "sin" | "Math.sin" => self.unary_math(args, f32::sin),
             "cos" | "Math.cos" => self.unary_math(args, f32::cos),
             "tan" | "Math.tan" => self.unary_math(args, f32::tan),
@@ -2801,9 +3067,79 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn eval_display_string(&self, expression: &Expression) -> String {
+    fn empty_string_as_none(&self, expression: &Expression) -> Option<String> {
         self.eval_string(expression)
-            .unwrap_or_else(|| self.eval_number(expression).to_string())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn eval_display_string(&self, expression: &Expression) -> String {
+        match expression {
+            Expression::String(value) => value.clone(),
+            Expression::Number(value) => format_display_number(*value),
+            Expression::Bool(value) => value.to_string(),
+            Expression::Variable(name) => self
+                .exported_values
+                .get(name)
+                .or_else(|| self.locals.get(name))
+                .or_else(|| self.state.get(name))
+                .map(json_display_string)
+                .or_else(|| {
+                    self.script
+                        .exports
+                        .iter()
+                        .find(|export| export.name == *name)
+                        .and_then(|export| export.default_value.as_ref())
+                        .and_then(|value| parse_default_literal(value))
+                        .map(|value| json_display_string(&value))
+                })
+                .unwrap_or_else(|| format_display_number(self.eval_number(expression))),
+            Expression::Member(owner, field) => self
+                .state
+                .get(owner)
+                .and_then(|value| value.get(field))
+                .map(json_display_string)
+                .unwrap_or_else(|| format_display_number(self.member_number(owner, field))),
+            Expression::Call { .. } => format_display_number(self.eval_number(expression)),
+            Expression::Vec3(_, _, _) => format_display_number(self.eval_number(expression)),
+            Expression::Binary { op, lhs, rhs } => match op {
+                BinaryOp::Add
+                    if self.expression_prefers_text(lhs) || self.expression_prefers_text(rhs) =>
+                {
+                    format!(
+                        "{}{}",
+                        self.eval_display_string(lhs),
+                        self.eval_display_string(rhs)
+                    )
+                }
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                    format_display_number(self.eval_number(expression))
+                }
+            },
+        }
+    }
+
+    fn expression_prefers_text(&self, expression: &Expression) -> bool {
+        match expression {
+            Expression::String(_) => true,
+            Expression::Variable(name) => self
+                .exported_values
+                .get(name)
+                .or_else(|| self.locals.get(name))
+                .or_else(|| self.state.get(name))
+                .is_some_and(serde_json::Value::is_string),
+            Expression::Member(owner, field) => self
+                .state
+                .get(owner)
+                .and_then(|value| value.get(field))
+                .is_some_and(serde_json::Value::is_string),
+            Expression::Binary {
+                op: BinaryOp::Add,
+                lhs,
+                rhs,
+            } => self.expression_prefers_text(lhs) || self.expression_prefers_text(rhs),
+            _ => false,
+        }
     }
 
     fn unary_math(&self, args: &[Expression], op: impl FnOnce(f32) -> f32) -> f32 {
@@ -2960,6 +3296,95 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
     }
     if line.trim() == "entity.destroy()" || line.trim() == "destroySelf()" {
         return Some(RuntimeStatement::DestroySelf);
+    }
+    if let Some(content) = method_args(line, "scene.spawnBox") {
+        let args = split_top_level_commas(content);
+        if args.len() == 5 {
+            return Some(RuntimeStatement::SpawnBox {
+                name: parse_expression(args[0])?,
+                tag: parse_expression(args[1])?,
+                position: parse_expression(args[2])?,
+                size: parse_expression(args[3])?,
+                script: parse_expression(args[4])?,
+            });
+        }
+    }
+    if let Some(content) = method_args(line, "scene.spawnSphere") {
+        let args = split_top_level_commas(content);
+        if args.len() == 5 {
+            return Some(RuntimeStatement::SpawnSphere {
+                name: parse_expression(args[0])?,
+                tag: parse_expression(args[1])?,
+                position: parse_expression(args[2])?,
+                radius: parse_expression(args[3])?,
+                script: parse_expression(args[4])?,
+            });
+        }
+    }
+    for (method, spatial) in [
+        ("Audio.playTone", false),
+        ("audio.playTone", false),
+        ("Audio.playTone3D", true),
+        ("audio.playTone3D", true),
+    ] {
+        if let Some(content) = method_args(line, method) {
+            let args = split_top_level_commas(content);
+            if args.len() == 4 {
+                return Some(RuntimeStatement::PlayTone {
+                    waveform: parse_expression(args[0])?,
+                    frequency: parse_expression(args[1])?,
+                    duration: parse_expression(args[2])?,
+                    volume: parse_expression(args[3])?,
+                    spatial,
+                });
+            }
+        }
+    }
+    for method in ["Audio.startLoop", "audio.startLoop"] {
+        if let Some(content) = method_args(line, method) {
+            let args = split_top_level_commas(content);
+            if args.len() == 6 {
+                return Some(RuntimeStatement::StartAudioLoop {
+                    id: parse_expression(args[0])?,
+                    waveform: parse_expression(args[1])?,
+                    pattern: parse_expression(args[2])?,
+                    bpm: parse_expression(args[3])?,
+                    beats_per_note: parse_expression(args[4])?,
+                    volume: parse_expression(args[5])?,
+                });
+            }
+        }
+    }
+    for method in ["Audio.stopLoop", "audio.stopLoop"] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::StopAudioLoop {
+                id: parse_expression(content)?,
+            });
+        }
+    }
+    if line.trim() == "Input.captureMouse()" {
+        return Some(RuntimeStatement::SetMouseCapture(Expression::Bool(true)));
+    }
+    if line.trim() == "Input.releaseMouse()" {
+        return Some(RuntimeStatement::SetMouseCapture(Expression::Bool(false)));
+    }
+    if let Some(content) = function_args(line, "Input.captureMouse") {
+        let expression = if content.trim().is_empty() {
+            Expression::Bool(true)
+        } else {
+            parse_expression(content)?
+        };
+        return Some(RuntimeStatement::SetMouseCapture(expression));
+    }
+    if let Some(content) = function_args(line, "Input.setMouseCapture") {
+        return Some(RuntimeStatement::SetMouseCapture(parse_expression(
+            content,
+        )?));
+    }
+    if let Some(content) = function_args(line, "Input.setCursorCaptured") {
+        return Some(RuntimeStatement::SetMouseCapture(parse_expression(
+            content,
+        )?));
     }
     if let Some(content) = function_args(line, "log") {
         return parse_string_literal(content).map(RuntimeStatement::Log);
@@ -3428,7 +3853,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
     if trimmed.starts_with("emit(") || trimmed.starts_with("emit ") {
         return (
             "unsupported runtime API `emit`".to_string(),
-            "The MVP runtime supports local script state, transform position changes, Input, Time, Math, `log(...)`, `wait(...)`, and basic `ui.*(...)` draw commands."
+            "The MVP runtime supports local script state, transform position changes, Input, mouse capture, Time, Math, `log(...)`, `wait(...)`, and basic `ui.*(...)` draw commands."
                 .to_string(),
             "`emit(...)` is in the target language direction but is not wired into this runtime yet. Store a value in `state.*` or use `log(...)` for now."
                 .to_string(),
@@ -3476,7 +3901,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
 
     (
         "unsupported runtime statement".to_string(),
-        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
+        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `scene.spawnBox(...)`, `scene.spawnSphere(...)`, `Audio.playTone(...)`, `Audio.playTone3D(...)`, `Audio.startLoop(...)`, `Audio.stopLoop(...)`, `Input.captureMouse(...)`, `Input.releaseMouse()`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
             .to_string(),
         "Rewrite this line using the supported MVP script API, or add runtime support before using this language construct."
             .to_string(),
@@ -3717,6 +4142,30 @@ fn json_number(value: &serde_json::Value) -> Option<f32> {
     value.as_bool().map(|value| if value { 1.0 } else { 0.0 })
 }
 
+fn json_display_string(value: &serde_json::Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(value) = value.as_bool() {
+        return value.to_string();
+    }
+    if let Some(number) = value.as_f64() {
+        return format_display_number(number as f32);
+    }
+    value.to_string()
+}
+
+fn format_display_number(value: f32) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if (value.fract()).abs() < 0.0001 {
+        return format!("{}", value as i64);
+    }
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 fn input_action_down(input: &engine_platform::InputState, action: &str) -> bool {
     if let Some(keys) = default_action_keys(action) {
         return keys.iter().any(|key| input.key_down(*key));
@@ -3925,6 +4374,37 @@ mod tests {
             })
             .expect("player should have script component");
         assert_eq!(script.source, "scripts/player_controller.varg");
+    }
+
+    #[test]
+    fn compiles_vscene_rotation_vec3_as_xyz_euler_axes() {
+        let source = r##"scene CameraRig {
+    camera "Main Camera" {
+        transform {
+            position: Vec3(9.5, 11.5, -14.0)
+            rotation: Vec3(-42, 0, 0)
+        }
+    }
+}
+"##;
+
+        let (file, diagnostics) =
+            compile_vscene_source_to_scene_file("scenes/camera.vscene", source);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let file = file.unwrap();
+        let forward = file.objects[0]
+            .local_transform
+            .rotation
+            .rotate(Vec3::new(0.0, 0.0, -1.0));
+        assert!(
+            forward.y < -0.6,
+            "negative x rotation should pitch the camera down, got {forward:?}"
+        );
+        assert!(
+            forward.x.abs() < 0.01,
+            "x rotation should not yaw the camera sideways, got {forward:?}"
+        );
     }
 
     #[test]
@@ -4229,9 +4709,12 @@ mod tests {
         let (script, diagnostics) = compile_script_source(
             "scripts/hud.varg",
             r#"script Hud {
+    var score: Int = 10
+
     func update(_ dt: Float) {
         ui.rect("health_bg", 12.0, 16.0, 120.0, 10.0, 0.1, 0.1, 0.1, 0.8)
-        ui.label("score", "Score: 10", 12.0, 32.0)
+        ui.label("score", "Score: " + score, 12.0, 32.0)
+        ui.label("math", 1 + 2, 12.0, 48.0)
     }
 }
 "#,
@@ -4268,6 +4751,112 @@ mod tests {
                     text: "Score: 10".to_string(),
                     x: 12.0,
                     y: 32.0,
+                },
+                VargUiCommand::Label {
+                    id: "math".to_string(),
+                    text: "3".to_string(),
+                    x: 12.0,
+                    y: 48.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_emits_procedural_audio_commands() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/sfx.varg",
+            r#"script Sfx {
+    func update(_ dt: Float) {
+        Audio.playTone("square", 880.0, 0.08, 0.35)
+        Audio.playTone3D("noise", 220.0, 0.05, 0.2)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let output = script.unwrap().run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform {
+                    translation: Vec3::new(1.0, 2.0, 3.0),
+                    ..Transform::IDENTITY
+                },
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 1.0,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.audio_commands,
+            vec![
+                VargAudioCommand::PlayTone {
+                    waveform: "square".to_string(),
+                    frequency_hz: 880.0,
+                    duration_seconds: 0.08,
+                    volume: 0.35,
+                    spatial: false,
+                    position: Vec3::new(1.0, 2.0, 3.0),
+                },
+                VargAudioCommand::PlayTone {
+                    waveform: "noise".to_string(),
+                    frequency_hz: 220.0,
+                    duration_seconds: 0.05,
+                    volume: 0.2,
+                    spatial: true,
+                    position: Vec3::new(1.0, 2.0, 3.0),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_emits_procedural_audio_loop_commands() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/bgm.varg",
+            r#"script Bgm {
+    func start() {
+        Audio.startLoop("main", "triangle", "C4 E4 G4 R", 120.0, 0.5, 0.18)
+        Audio.stopLoop("old")
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let output = script.unwrap().run_hook(
+            "start",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 1.0,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.audio_commands,
+            vec![
+                VargAudioCommand::StartLoop {
+                    id: "main".to_string(),
+                    waveform: "triangle".to_string(),
+                    pattern: "C4 E4 G4 R".to_string(),
+                    bpm: 120.0,
+                    beats_per_note: 0.5,
+                    volume: 0.18,
+                },
+                VargAudioCommand::StopLoop {
+                    id: "old".to_string(),
                 },
             ]
         );
@@ -4503,6 +5092,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_emits_spawn_requests() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/spawner.varg",
+            r#"script Spawner {
+    func update(_ dt: Float) {
+        scene.spawnBox("Step", "Platform", Vec3(3.0, 0.0, 8.0), Vec3(2.0, 0.5, 2.0), "")
+        scene.spawnSphere("Gem", "Collectible", Vec3(3.0, 1.1, 8.0), 0.35, "scripts/bobber.varg")
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.spawn_requests.len(), 2);
+        assert_eq!(output.spawn_requests[0].name, "Step");
+        assert_eq!(output.spawn_requests[0].tag, "Platform");
+        assert_eq!(output.spawn_requests[0].builtin_mesh, "debug/cube");
+        assert_eq!(output.spawn_requests[0].collider_shape, "box");
+        assert_eq!(output.spawn_requests[0].position, Vec3::new(3.0, 0.0, 8.0));
+        assert_eq!(output.spawn_requests[0].size, Vec3::new(2.0, 0.5, 2.0));
+        assert_eq!(output.spawn_requests[0].script, None);
+        assert_eq!(output.spawn_requests[1].name, "Gem");
+        assert_eq!(output.spawn_requests[1].builtin_mesh, "debug/sphere");
+        assert_eq!(output.spawn_requests[1].collider_shape, "sphere");
+        assert_eq!(output.spawn_requests[1].size, Vec3::new(0.7, 0.7, 0.7));
+        assert_eq!(
+            output.spawn_requests[1].script.as_deref(),
+            Some("scripts/bobber.varg")
+        );
+    }
+
+    #[test]
     fn runtime_supports_migrated_declarative_entity_queries_and_destroy() {
         let (script, diagnostics) = compile_script_source(
             "scripts/hazard.varg",
@@ -4515,6 +5151,9 @@ mod tests {
         if playerDistance() <= 5.0 {
             state.playerDistanceMatched = 1
         }
+
+        state.playerX = scene.xOf("Player")
+        state.playerZ = scene.zOf("Player")
 
         if scene.distanceToTag("Treasure") < 3.0 {
             entity.destroy()
@@ -4570,6 +5209,14 @@ mod tests {
                 .get("playerDistanceMatched")
                 .and_then(|value| value.as_f64()),
             Some(1.0)
+        );
+        assert_eq!(
+            output.state.get("playerX").and_then(|value| value.as_f64()),
+            Some(3.0)
+        );
+        assert_eq!(
+            output.state.get("playerZ").and_then(|value| value.as_f64()),
+            Some(4.0)
         );
         assert!(output.destroy_self);
         assert!(!output.state.contains_key("afterDestroy"));
@@ -5256,6 +5903,53 @@ mod tests {
         assert_eq!(
             state.get("fired").and_then(|value| value.as_f64()),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn runtime_scripts_can_capture_mouse_and_read_mouse_delta() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/input_capture.varg",
+            r#"script InputCapture {
+    var dx: Float = 0.0
+    var dy: Float = 0.0
+
+    func update(_ dt: Float) {
+        Input.captureMouse(true)
+        state.dx = Input.mouseDeltaX()
+        state.dy = Input.mouseDeltaY
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::MouseDelta { x: 12.5, y: -4.0 });
+
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input,
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.mouse_capture, Some(true));
+        assert_eq!(
+            output.state.get("dx").and_then(|value| value.as_f64()),
+            Some(12.5)
+        );
+        assert_eq!(
+            output.state.get("dy").and_then(|value| value.as_f64()),
+            Some(-4.0)
         );
     }
 }

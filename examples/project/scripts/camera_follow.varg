@@ -1,0 +1,15 @@
+script CameraFollow {
+    @export var offsetX: Float = 9.5
+    @export var offsetY: Float = 11.5
+    @export var offsetZ: Float = 24.0
+    @export var followSpeed: Float = 6.0
+
+    func update(_ dt: Float) {
+        let targetX: Float = scene.xOf("Player") + offsetX
+        let targetZ: Float = scene.zOf("Player") + offsetZ
+        let t: Float = clamp(dt * followSpeed, 0.0, 1.0)
+        position.x = lerp(position.x, targetX, t)
+        position.y = offsetY
+        position.z = lerp(position.z, targetZ, t)
+    }
+}

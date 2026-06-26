@@ -51,7 +51,7 @@ engine-render-wgpu.workspace = true
 engine-assets.workspace = true
 winit.workspace = true
 wgpu.workspace = true
-runtime-min = { workspace = true, features = ["editor", "wgpu", "physics"] }
+runtime-min = { workspace = true, features = ["editor", "wgpu", "physics", "audio"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

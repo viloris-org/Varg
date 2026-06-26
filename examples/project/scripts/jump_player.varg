@@ -2,7 +2,8 @@ script JumpPlayer {
     @export var maxCharge: Float = 1.25
     @export var jumpScale: Float = 5.0
     @export var arcHeight: Float = 3.0
-    @export var timeLimit: Float = 45.0
+    @export var spawnAhead: Float = 36.0
+    @export var segmentLength: Float = 2.9
 
     var charge: Float = 0.0
     var phase: Int = 0
@@ -12,64 +13,90 @@ script JumpPlayer {
     var targetX: Float = 0.0
     var targetZ: Float = 0.0
     var score: Int = 0
+    var bestDistance: Float = 0.0
     var attempts: Int = 0
     var runTime: Float = 0.0
-    var crystalA: Bool = false
-    var crystalB: Bool = false
-    var crystalC: Bool = false
+    var nextSpawnX: Float = 22.5
+    var nextSpawnZ: Float = 12.8
+    var spawnIndex: Int = 0
+    var checkpointX: Float = 0.0
+    var checkpointZ: Float = 0.0
     var gameOver: Bool = false
-    var won: Bool = false
+    var hudStatus: String = "Hold Space to charge"
 
     func start() {
         charge = 0.0
         phase = 0
         jumpTime = 0.0
         score = 0
+        bestDistance = 0.0
         attempts = 0
         runTime = 0.0
-        crystalA = false
-        crystalB = false
-        crystalC = false
+        nextSpawnX = 22.5
+        nextSpawnZ = 12.8
+        spawnIndex = 0
+        checkpointX = 0.0
+        checkpointZ = 0.0
         gameOver = false
-        won = false
         position = Vec3(0, 1.1, 0)
-        log("Jump Rush: hold Space, aim with WASD, collect crystals, reach the green gate.")
+        log("Jump Rush Endless: hold Space, aim with WASD, keep moving across generated islands.")
     }
 
     func update(_ dt: Float) {
         if gameOver {
+            ui.rect("jump_hud_panel", 12.0, 12.0, 330.0, 112.0, 0.03, 0.04, 0.06, 0.86)
+            ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 112.0, 1.0, 0.44, 0.38, 1.0)
+            ui.label("jump_hud_title", "Jump Rush Endless", 24.0, 22.0)
+            ui.label("jump_hud_score", "Score: " + score, 24.0, 44.0)
+            ui.label("jump_hud_distance", "Distance: " + floor(bestDistance), 154.0, 44.0)
+            ui.label("jump_hud_attempts", "Attempts: " + attempts, 24.0, 66.0)
+            ui.label("jump_hud_result", "Run ended. Space retries", 24.0, 90.0)
+
             if Input.pressed("Jump") {
                 charge = 0.0
                 phase = 0
                 jumpTime = 0.0
-                score = 0
-                attempts = 0
-                runTime = 0.0
-                crystalA = false
-                crystalB = false
-                crystalC = false
                 gameOver = false
-                won = false
-                position = Vec3(0, 1.1, 0)
-                log("Restarted Jump Rush.")
+                position = Vec3(checkpointX, 1.1, checkpointZ)
+                log("Retried from the last safe island.")
             }
             return
         }
 
         runTime += dt
-        if runTime >= timeLimit {
-            gameOver = true
-            won = false
-            log("Time up. Press Space to retry.")
-            return
+        if position.x > bestDistance {
+            bestDistance = position.x
+        }
+
+        while nextSpawnX < position.x + spawnAhead {
+            let lane: Float = spawnIndex - floor(spawnIndex / 4.0) * 4.0
+            let wobble: Float = sin(spawnIndex * 1.7) * 0.9
+            let platformZ: Float = nextSpawnZ + wobble
+            let platformWidth: Float = 2.6 + abs(sin(spawnIndex * 0.9)) * 0.7
+
+            scene.spawnBox("Generated Platform", "Platform", Vec3(nextSpawnX, 0.0, platformZ), Vec3(platformWidth, 0.5, 2.8), "scripts/despawn_far.varg")
+
+            if lane == 1.0 {
+                scene.spawnSphere("Generated Crystal", "Collectible", Vec3(nextSpawnX, 1.15, platformZ), 0.35, "scripts/despawn_far.varg")
+            }
+
+            if lane == 2.0 {
+                scene.spawnBox("Generated Hot Zone", "Hazard", Vec3(nextSpawnX + 0.55, 0.35, platformZ), Vec3(0.75, 0.18, 0.9), "scripts/despawn_far.varg")
+            }
+
+            nextSpawnX += segmentLength
+            nextSpawnZ += 1.25 + sin(spawnIndex * 0.6) * 0.35
+            spawnIndex += 1
         }
 
         if phase == 0 {
+            hudStatus = "Hold Space to charge"
             if Input.down("Jump") {
                 charge += dt
                 if charge > maxCharge {
                     charge = maxCharge
                 }
+                hudStatus = "Release to jump"
             }
 
             if Input.released("Jump") && charge > 0.05 {
@@ -89,11 +116,13 @@ script JumpPlayer {
                 jumpTime = 0.0
                 attempts += 1
                 phase = 1
+                hudStatus = "Airborne"
                 log("Leap committed.")
             }
         }
 
         if phase == 1 {
+            hudStatus = "Airborne"
             jumpTime += dt * 1.85
             let t: Float = clamp(jumpTime, 0.0, 1.0)
             position.x = lerp(startX, targetX, t)
@@ -106,69 +135,45 @@ script JumpPlayer {
                 phase = 0
 
                 var landed: Bool = false
-
-                if position.x >= -1.5 && position.x <= 1.5 && position.z >= -1.5 && position.z <= 1.5 {
+                if scene.distanceToTag("Platform") <= 3.0 {
                     landed = true
                 }
-
-                if position.x >= 2.0 && position.x <= 4.0 && position.z >= 1.6 && position.z <= 3.6 {
-                    landed = true
-                    if !crystalA {
-                        crystalA = true
-                        score += 10
-                        log("Crystal 1 collected.")
-                    }
-                }
-
-                if position.x >= 5.1 && position.x <= 7.1 && position.z >= 4.1 && position.z <= 6.1 {
+                if scene.distanceToTag("Goal") <= 3.0 {
                     landed = true
                 }
-
-                if position.x >= 8.2 && position.x <= 10.8 && position.z >= 6.7 && position.z <= 9.3 {
-                    landed = true
-                    if !crystalB {
-                        crystalB = true
-                        score += 10
-                        log("Crystal 2 collected.")
-                    }
-                }
-
-                if position.x >= 11.6 && position.x <= 13.6 && position.z >= 4.0 && position.z <= 6.0 {
-                    landed = true
-                }
-
-                if position.x >= 14.4 && position.x <= 16.6 && position.z >= 6.8 && position.z <= 9.0 {
-                    landed = true
-                    if !crystalC {
-                        crystalC = true
-                        score += 10
-                        log("Crystal 3 collected.")
-                    }
-                }
-
-                if position.x >= 17.8 && position.x <= 20.8 && position.z >= 9.2 && position.z <= 12.2 {
-                    landed = true
-                    won = true
-                    gameOver = true
-                    score += 50
-                    log("Gate reached. You win! Press Space to play again.")
-                }
-
-                if position.x >= 6.8 && position.x <= 8.2 && position.z >= 2.6 && position.z <= 4.2 {
+                if scene.distanceToTag("Hazard") <= 0.9 {
                     landed = false
-                    log("The hot zone burned the run.")
+                    log("A hot zone ended the run.")
                 }
 
                 if landed {
                     score += 1
+                    checkpointX = position.x
+                    checkpointZ = position.z
+                    if scene.distanceToTag("Collectible") <= 1.45 {
+                        score += 10
+                        log("Crystal collected.")
+                    }
+                    hudStatus = "Safe landing"
                     log("Safe landing.")
                 } else {
                     position.y = -1.2
                     gameOver = true
-                    won = false
                     log("Missed the platform. Press Space to retry.")
                 }
             }
         }
+
+        let chargeWidth: Float = 160.0 * clamp(charge / maxCharge, 0.0, 1.0)
+        ui.rect("jump_hud_panel", 12.0, 12.0, 330.0, 136.0, 0.03, 0.04, 0.06, 0.86)
+        ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 136.0, 1.0, 0.44, 0.38, 1.0)
+        ui.label("jump_hud_title", "Jump Rush Endless", 24.0, 22.0)
+        ui.label("jump_hud_score", "Score: " + score, 24.0, 42.0)
+        ui.label("jump_hud_distance", "Distance: " + floor(bestDistance), 154.0, 42.0)
+        ui.label("jump_hud_attempts", "Attempts: " + attempts, 24.0, 62.0)
+        ui.label("jump_hud_status", hudStatus, 24.0, 82.0)
+        ui.rect("jump_hud_charge_bg", 24.0, 108.0, 160.0, 10.0, 0.18, 0.2, 0.24, 1.0)
+        ui.rect("jump_hud_charge", 24.0, 108.0, chargeWidth, 10.0, 0.34, 0.75, 0.92, 1.0)
+        ui.label("jump_hud_controls", "WASD aim / Space jump", 24.0, 126.0)
     }
 }

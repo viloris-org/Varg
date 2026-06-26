@@ -209,6 +209,9 @@ impl WgpuRenderDevice {
         self.surface_depth_view = None;
         config.width = width;
         config.height = height;
+        self.surface_viewport = self
+            .surface_viewport
+            .map(|viewport| viewport.clamp_to(width, height));
         surface.configure(&self.device, config);
         self.surface_suspended = false;
     }

@@ -22,14 +22,15 @@ use engine_audio::{
     AcousticSourceSample, AttenuationModel, AudioContext, AudioListenerDesc, AudioObjectTransform,
     AudioSourceDesc, AudioSourceShape, ClipHandle, HrtfQuality, MemoryAudioBackend, OutputMode,
     SourceHandle, SpatialMode, VirtualizationPolicy, VoiceCategory, solve_direct_propagation,
+    synth::{Waveform, generate_tone},
 };
-#[cfg(feature = "physics")]
 use engine_core::math::{Transform, Vec3};
 use engine_core::{EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging};
 #[cfg(feature = "audio")]
 use engine_ecs::AudioSourceComponentData;
 use engine_ecs::{
-    BuildConfiguration, ComponentData, ProjectManifest, Scene, project_manifest_path,
+    BuildConfiguration, ColliderComponentData, ComponentData, MaterialRef,
+    MeshRendererComponentData, ProjectManifest, Scene, ScriptComponent, project_manifest_path,
 };
 #[cfg(feature = "physics")]
 use engine_ecs::{BuoyancyProbeSetComponentData, FluidVolumeComponentData};
@@ -54,8 +55,8 @@ use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
 use engine_script_varg::{
-    VargRuntimeContext, VargSceneContext, VargScript, VargUiCommand, compile_script_source,
-    compile_vscene_source_to_scene,
+    VargAudioCommand, VargRuntimeContext, VargSceneContext, VargScript, VargSpawnRequest,
+    VargUiCommand, compile_script_source, compile_vscene_source_to_scene,
 };
 #[cfg(feature = "audio")]
 use std::collections::HashSet;
@@ -91,6 +92,8 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     pub diagnostics: Vec<RuntimeDiagnostic>,
     /// UI draw commands emitted by scripts during the latest game frame.
     pub ui_commands: Vec<VargUiCommand>,
+    /// Current input capture request emitted by runtime scripts.
+    pub input_capture: RuntimeInputCapture,
     #[cfg(feature = "physics")]
     /// Physics world used by runtime-game.
     pub physics: PhysicsWorld,
@@ -128,6 +131,10 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     audio_clips: HashMap<engine_core::AssetId, ClipHandle>,
     #[cfg(feature = "audio")]
     audio_listener_position: Option<engine_core::math::Vec3>,
+    #[cfg(feature = "audio")]
+    transient_audio: Vec<(SourceHandle, ClipHandle)>,
+    #[cfg(feature = "audio")]
+    procedural_loops: HashMap<String, (SourceHandle, ClipHandle)>,
     #[cfg(feature = "physics")]
     physics_bindings: Vec<PhysicsBinding>,
 }
@@ -181,6 +188,13 @@ pub struct RuntimeStats {
     pub audio_virtual_voices: u32,
     /// Number of audio backend underruns or stream errors.
     pub audio_underruns: u64,
+}
+
+/// Runtime-owned input capture state requested by gameplay scripts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeInputCapture {
+    /// Whether the game window should capture and hide the mouse cursor.
+    pub mouse: bool,
 }
 
 /// Structured runtime diagnostic entry.
@@ -279,6 +293,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             render_scaling_selection: None,
             diagnostics: Vec::new(),
             ui_commands: Vec::new(),
+            input_capture: RuntimeInputCapture::default(),
             #[cfg(feature = "physics")]
             physics: PhysicsWorld::new(RapierPhysicsBackend::new()),
             #[cfg(feature = "runtime-game")]
@@ -307,6 +322,10 @@ impl<R: RenderDevice> RuntimeServices<R> {
             audio_clips: HashMap::new(),
             #[cfg(feature = "audio")]
             audio_listener_position: None,
+            #[cfg(feature = "audio")]
+            transient_audio: Vec::new(),
+            #[cfg(feature = "audio")]
+            procedural_loops: HashMap::new(),
             #[cfg(feature = "physics")]
             physics_bindings: Vec::new(),
         }
@@ -617,6 +636,31 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     });
                 }
             }
+            for request in output.spawn_requests {
+                if let Err(error) = self.apply_varg_spawn_request(request) {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "script".to_string(),
+                        level: "error".to_string(),
+                        message: format!("varg spawn error: {error}"),
+                        file: Some(script_path.clone()),
+                        line: None,
+                    });
+                }
+            }
+            if let Some(mouse_capture) = output.mouse_capture {
+                self.input_capture.mouse = mouse_capture;
+            }
+            for command in output.audio_commands {
+                if let Err(error) = self.apply_varg_audio_command(command) {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "audio".to_string(),
+                        level: "warning".to_string(),
+                        message: format!("varg audio error: {error}"),
+                        file: Some(script_path.clone()),
+                        line: None,
+                    });
+                }
+            }
             for message in output.logs {
                 self.diagnostics.push(RuntimeDiagnostic {
                     source: "script".to_string(),
@@ -628,6 +672,156 @@ impl<R: RenderDevice> RuntimeServices<R> {
             }
             self.ui_commands.extend(output.ui_commands);
         }
+    }
+
+    fn apply_varg_spawn_request(&mut self, request: VargSpawnRequest) -> EngineResult<()> {
+        let entity = self.scene.create_object(request.name)?;
+        if let Some(object) = self.scene.object_mut(entity) {
+            object.tag = request.tag;
+        }
+        self.scene.transforms_mut().set_local(
+            entity,
+            Transform {
+                translation: request.position,
+                scale: request.size,
+                ..Transform::IDENTITY
+            },
+        );
+        self.scene.upsert_component(
+            entity,
+            ComponentData::MeshRenderer(MeshRendererComponentData {
+                mesh: None,
+                builtin_mesh: Some(request.builtin_mesh),
+                material: MaterialRef::debug(),
+                casts_shadows: true,
+                receive_shadows: true,
+            }),
+        )?;
+        self.scene.upsert_component(
+            entity,
+            ComponentData::Collider(ColliderComponentData {
+                shape: request.collider_shape,
+                size: Vec3::ONE,
+                is_trigger: false,
+                mask: !0,
+                physics_material: "default".to_string(),
+            }),
+        )?;
+        if let Some(script) = request.script {
+            self.scene
+                .upsert_component(entity, ComponentData::Script(ScriptComponent::new(script)))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "audio")]
+    fn apply_varg_audio_command(&mut self, command: VargAudioCommand) -> EngineResult<()> {
+        match command {
+            VargAudioCommand::PlayTone {
+                waveform,
+                frequency_hz,
+                duration_seconds,
+                volume,
+                spatial,
+                position,
+            } => {
+                const SAMPLE_RATE: u32 = 44_100;
+                let waveform = parse_synth_waveform(&waveform);
+                let frequency = frequency_hz.clamp(20.0, 20_000.0);
+                let duration = duration_seconds.clamp(0.005, 5.0);
+                let volume = volume.clamp(0.0, 1.0);
+                let samples = generate_tone(waveform, frequency, duration, volume, SAMPLE_RATE);
+                let clip =
+                    self.audio
+                        .backend_mut()
+                        .load_clip("script-tone", &samples, 1, SAMPLE_RATE)?;
+                let source = self.audio.backend_mut().spawn_source(&AudioSourceDesc {
+                    clip,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    looping: false,
+                    position: spatial.then_some(position),
+                    auto_play: true,
+                    bus: "SFX".to_string(),
+                    spatial_mode: if spatial {
+                        SpatialMode::Object
+                    } else {
+                        SpatialMode::Direct
+                    },
+                    shape: AudioSourceShape::Point,
+                    attenuation: AttenuationModel::default(),
+                    priority: 160,
+                    virtualization: VirtualizationPolicy::Virtualize,
+                    category: VoiceCategory::Sfx,
+                    critical: false,
+                    doppler_scale: 0.0,
+                    spread: 1.0,
+                    use_hrtf: true,
+                })?;
+                self.transient_audio.push((source, clip));
+            }
+            VargAudioCommand::StartLoop {
+                id,
+                waveform,
+                pattern,
+                bpm,
+                beats_per_note,
+                volume,
+            } => {
+                let id = id.trim();
+                if id.is_empty() || self.procedural_loops.contains_key(id) {
+                    return Ok(());
+                }
+                const SAMPLE_RATE: u32 = 44_100;
+                let waveform = parse_synth_waveform(&waveform);
+                let samples = generate_loop_pattern(
+                    waveform,
+                    &pattern,
+                    bpm,
+                    beats_per_note,
+                    volume,
+                    SAMPLE_RATE,
+                )?;
+                let clip =
+                    self.audio
+                        .backend_mut()
+                        .load_clip("script-loop", &samples, 1, SAMPLE_RATE)?;
+                let source = self.audio.backend_mut().spawn_source(&AudioSourceDesc {
+                    clip,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    looping: true,
+                    position: None,
+                    auto_play: true,
+                    bus: "Music".to_string(),
+                    spatial_mode: SpatialMode::Direct,
+                    shape: AudioSourceShape::Point,
+                    attenuation: AttenuationModel::default(),
+                    priority: 96,
+                    virtualization: VirtualizationPolicy::Virtualize,
+                    category: VoiceCategory::Music,
+                    critical: false,
+                    doppler_scale: 0.0,
+                    spread: 1.0,
+                    use_hrtf: false,
+                })?;
+                self.procedural_loops.insert(id.to_string(), (source, clip));
+            }
+            VargAudioCommand::StopLoop { id } => {
+                if let Some((source, clip)) = self.procedural_loops.remove(id.trim()) {
+                    let _ = self.audio.backend_mut().destroy_source(source);
+                    let _ = self.audio.backend_mut().unload_clip(clip);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "audio"))]
+    fn apply_varg_audio_command(&mut self, _command: VargAudioCommand) -> EngineResult<()> {
+        Err(EngineError::config(
+            "script audio requires the runtime `audio` feature",
+        ))
     }
 
     fn varg_scene_context(&self, entity: engine_ecs::Entity) -> VargSceneContext {
@@ -840,6 +1034,27 @@ impl<R: RenderDevice> RuntimeServices<R> {
             _ => {}
         }
         false
+    }
+
+    /// Processes a winit device event for relative input such as raw mouse motion.
+    #[cfg(feature = "runtime-game")]
+    pub fn process_winit_device_event(&mut self, event: &winit::event::DeviceEvent) {
+        use engine_platform::InputEvent;
+        use winit::event::DeviceEvent;
+
+        if self.input_capture.mouse
+            && let DeviceEvent::MouseMotion { delta } = event
+        {
+            self.input.apply_event(InputEvent::MouseDelta {
+                x: delta.0 as f32,
+                y: delta.1 as f32,
+            });
+        }
+    }
+
+    /// Returns the latest script-requested input capture state.
+    pub fn input_capture(&self) -> RuntimeInputCapture {
+        self.input_capture
     }
 
     /// Sets the project root used by runtime backends to resolve relative files.
@@ -1651,12 +1866,33 @@ impl<R: RenderDevice> RuntimeServices<R> {
             }
         }
         self.audio.update(dt);
+        self.cleanup_finished_transient_audio();
         let diagnostics = self.audio.diagnostics();
         self.stats.audio_sources = diagnostics.logical_sources;
         self.stats.audio_physical_voices = diagnostics.physical_voices;
         self.stats.audio_virtual_voices = diagnostics.virtual_voices;
         self.stats.audio_underruns = diagnostics.underruns;
         Ok(())
+    }
+
+    #[cfg(feature = "audio")]
+    fn cleanup_finished_transient_audio(&mut self) {
+        let mut index = 0;
+        while index < self.transient_audio.len() {
+            let (source, _) = self.transient_audio[index];
+            let finished = self
+                .audio
+                .backend()
+                .playback_state(source)
+                .is_ok_and(|state| state != engine_audio::PlaybackState::Playing);
+            if finished {
+                let (source, clip) = self.transient_audio.swap_remove(index);
+                let _ = self.audio.backend_mut().destroy_source(source);
+                let _ = self.audio.backend_mut().unload_clip(clip);
+            } else {
+                index += 1;
+            }
+        }
     }
 }
 
@@ -1682,6 +1918,102 @@ fn parse_audio_source_shape(source: &AudioSourceComponentData) -> AudioSourceSha
         },
         _ => AudioSourceShape::Point,
     }
+}
+
+#[cfg(feature = "audio")]
+fn parse_synth_waveform(value: &str) -> Waveform {
+    match value.to_ascii_lowercase().as_str() {
+        "square" => Waveform::Square,
+        "saw" | "sawtooth" => Waveform::Sawtooth,
+        "triangle" | "tri" => Waveform::Triangle,
+        "noise" | "white_noise" | "white-noise" => Waveform::Noise,
+        _ => Waveform::Sine,
+    }
+}
+
+#[cfg(feature = "audio")]
+fn generate_loop_pattern(
+    waveform: Waveform,
+    pattern: &str,
+    bpm: f32,
+    beats_per_note: f32,
+    volume: f32,
+    sample_rate: u32,
+) -> EngineResult<Vec<f32>> {
+    let bpm = bpm.clamp(30.0, 300.0);
+    let beats_per_note = beats_per_note.clamp(0.0625, 8.0);
+    let volume = volume.clamp(0.0, 1.0);
+    let note_seconds = 60.0 / bpm * beats_per_note;
+    let note_samples = (note_seconds * sample_rate as f32).round().max(1.0) as usize;
+    let tokens = pattern
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '|')
+        .filter(|token| !token.trim().is_empty())
+        .take(128)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(EngineError::config(
+            "Audio.startLoop pattern must contain at least one note or rest",
+        ));
+    }
+
+    let mut samples = Vec::with_capacity(note_samples.saturating_mul(tokens.len()));
+    for token in tokens {
+        if is_rest_token(token) {
+            samples.resize(samples.len() + note_samples, 0.0);
+            continue;
+        }
+        let frequency = parse_note_frequency(token).ok_or_else(|| {
+            EngineError::config(format!("unsupported Audio.startLoop note `{token}`"))
+        })?;
+        let mut note = generate_tone(waveform, frequency, note_seconds, volume, sample_rate);
+        note.resize(note_samples, 0.0);
+        samples.extend(note.into_iter().take(note_samples));
+    }
+    Ok(samples)
+}
+
+#[cfg(feature = "audio")]
+fn is_rest_token(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "r" | "rest" | "-" | "_" | "0"
+    )
+}
+
+#[cfg(feature = "audio")]
+fn parse_note_frequency(token: &str) -> Option<f32> {
+    if let Ok(frequency) = token.parse::<f32>() {
+        return (frequency > 0.0).then_some(frequency.clamp(20.0, 20_000.0));
+    }
+
+    let token = token.trim();
+    let mut chars = token.chars();
+    let note = chars.next()?.to_ascii_uppercase();
+    let base = match note {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let mut semitone = base;
+    let mut rest = chars.as_str();
+    if let Some(stripped) = rest.strip_prefix('#') {
+        semitone += 1;
+        rest = stripped;
+    } else if let Some(stripped) = rest.strip_prefix('b') {
+        semitone -= 1;
+        rest = stripped;
+    }
+    let octave = rest.parse::<i32>().ok()?;
+    let midi = (octave + 1) * 12 + semitone;
+    let frequency = 440.0 * 2.0_f32.powf((midi as f32 - 69.0) / 12.0);
+    frequency
+        .is_finite()
+        .then_some(frequency.clamp(20.0, 20_000.0))
 }
 
 #[cfg(feature = "audio")]
@@ -2161,24 +2493,183 @@ fn build_script_ui_draw_list(commands: &[VargUiCommand]) -> GuiDrawList {
                 let mut cursor_x = *x;
                 for ch in text.chars() {
                     if ch.is_whitespace() {
-                        cursor_x += 5.0;
+                        cursor_x += 6.0;
                         continue;
                     }
-                    let width = if ch.is_ascii_punctuation() { 3.0 } else { 6.0 };
-                    push_gui_quad(
-                        &mut draw_list,
-                        cursor_x,
-                        *y,
-                        width,
-                        10.0,
-                        [1.0, 1.0, 1.0, 1.0],
-                    );
-                    cursor_x += width + 2.0;
+                    push_gui_text_glyph(&mut draw_list, cursor_x, *y, ch, [1.0, 1.0, 1.0, 1.0]);
+                    cursor_x += glyph_advance(ch);
                 }
             }
         }
     }
     draw_list
+}
+
+fn push_gui_text_glyph(draw_list: &mut GuiDrawList, x: f32, y: f32, ch: char, color: [f32; 4]) {
+    let pixel = 1.5;
+    let rows = glyph_rows(ch);
+    for (row, bits) in rows.iter().enumerate() {
+        for col in 0..5 {
+            if bits & (1 << (4 - col)) != 0 {
+                push_gui_quad(
+                    draw_list,
+                    x + col as f32 * pixel,
+                    y + row as f32 * pixel,
+                    pixel,
+                    pixel,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+fn glyph_advance(ch: char) -> f32 {
+    match ch {
+        '.' | ',' | ':' | ';' | '!' | '|' => 5.0,
+        '/' | '-' => 7.0,
+        _ => 9.0,
+    }
+}
+
+fn glyph_rows(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        ':' => [
+            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
+        ],
+        ',' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000,
+        ],
+        '!' => [
+            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
+        '?' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '/' => [
+            0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+        ],
+        '+' => [
+            0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
+        ],
+        _ => [
+            0b11111, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100,
+        ],
+    }
 }
 
 fn push_gui_quad(
@@ -2468,6 +2959,30 @@ pub fn smoke_runtime_min() -> EngineResult<u64> {
     Ok(services.frame_index())
 }
 
+/// Applies runtime input capture state to a winit window.
+#[cfg(feature = "runtime-game")]
+pub fn apply_winit_input_capture(
+    window: &winit::window::Window,
+    capture: RuntimeInputCapture,
+) -> Result<(), String> {
+    use winit::window::CursorGrabMode;
+
+    if capture.mouse {
+        window.focus_window();
+        window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+            .map_err(|error| format!("cursor grab: {error}"))?;
+        window.set_cursor_visible(false);
+    } else {
+        window
+            .set_cursor_grab(CursorGrabMode::None)
+            .map_err(|error| format!("cursor release: {error}"))?;
+        window.set_cursor_visible(true);
+    }
+    Ok(())
+}
+
 /// Converts a winit physical key to an engine KeyCode.
 #[cfg(feature = "runtime-game")]
 fn convert_winit_key_static(key: winit::keyboard::PhysicalKey) -> Option<engine_platform::KeyCode> {
@@ -2547,7 +3062,7 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
     };
     use winit::{
         application::ApplicationHandler,
-        event::{ElementState, WindowEvent},
+        event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
         event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
         window::{Window, WindowId},
     };
@@ -2565,6 +3080,7 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
         single_step: bool,
         project_name: String,
         target_frame_time: Duration,
+        applied_input_capture: Option<RuntimeInputCapture>,
     }
 
     impl ApplicationHandler for GameApp {
@@ -2630,10 +3146,7 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                     }
                 }
                 WindowEvent::Resized(size) => {
-                    #[cfg(feature = "wgpu")]
-                    if let Some(services) = self.services.as_mut() {
-                        services.renderer.resize_surface(size.width, size.height);
-                    }
+                    self.resize_surface(size.width, size.height);
                     let title = format!(
                         "Aster Runtime - {}x{}",
                         size.width.max(1),
@@ -2643,7 +3156,11 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                         window.set_title(&title);
                     }
                 }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    self.sync_surface_to_window();
+                }
                 WindowEvent::RedrawRequested => {
+                    self.sync_surface_to_window();
                     let Some(services) = self.services.as_mut() else {
                         return;
                     };
@@ -2654,6 +3171,16 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                         eprintln!("runtime error: {error}");
                         event_loop.exit();
                         return;
+                    }
+                    if let Some(window) = &self.window {
+                        let capture = services.input_capture();
+                        if self.applied_input_capture != Some(capture) {
+                            if let Err(error) = apply_winit_input_capture(window, capture) {
+                                eprintln!("runtime input capture error: {error}");
+                            } else {
+                                self.applied_input_capture = Some(capture);
+                            }
+                        }
                     }
                     self.single_step = false;
                     if let Some(window) = &self.window {
@@ -2687,6 +3214,34 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
+
+        fn device_event(
+            &mut self,
+            _event_loop: &ActiveEventLoop,
+            _device_id: DeviceId,
+            event: DeviceEvent,
+        ) {
+            if let Some(services) = self.services.as_mut() {
+                services.process_winit_device_event(&event);
+            }
+        }
+    }
+
+    impl GameApp {
+        fn resize_surface(&mut self, width: u32, height: u32) {
+            #[cfg(feature = "wgpu")]
+            if let Some(services) = self.services.as_mut() {
+                services.renderer.resize_surface(width, height);
+            }
+        }
+
+        fn sync_surface_to_window(&mut self) {
+            let Some(window) = self.window.as_ref() else {
+                return;
+            };
+            let size = window.inner_size();
+            self.resize_surface(size.width, size.height);
+        }
     }
 
     let project = load_runtime_project(project)?;
@@ -2702,6 +3257,7 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
         single_step: false,
         project_name,
         target_frame_time,
+        applied_input_capture: None,
     };
     event_loop
         .run_app(&mut app)
@@ -3096,14 +3652,17 @@ mod tests {
             },
         ]);
 
-        assert_eq!(draw_list.vertices.len(), 16);
-        assert_eq!(draw_list.indices.len(), 24);
-        assert_eq!(draw_list.commands.len(), 4);
+        assert!(draw_list.vertices.len() > 16);
+        assert_eq!(draw_list.vertices.len() % 4, 0);
+        assert_eq!(draw_list.indices.len(), draw_list.commands.len() * 6);
+        assert!(draw_list.commands.len() > 4);
         assert_eq!(draw_list.commands[0].scissor, [8, 10, 24, 12]);
         assert_eq!(draw_list.commands[0].index_offset, 0);
         assert_eq!(draw_list.commands[0].index_count, 6);
         assert_eq!(draw_list.vertices[0].color, 0xffbf8040);
         assert_eq!(draw_list.vertices[4].pos, [40.0, 12.0]);
+        assert_eq!(draw_list.vertices[4].color, 0xffffffff);
+        assert_eq!(draw_list.commands[1].scissor, [40, 12, 2, 2]);
     }
 
     #[test]
@@ -3357,6 +3916,103 @@ mod tests {
     }
 
     #[test]
+    fn varg_script_can_spawn_scene_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("spawner.varg"),
+            r#"script Spawner {
+    func update(_ dt: Float) {
+        scene.spawnBox("Runtime Platform", "Platform", Vec3(4.0, 0.0, 8.0), Vec3(2.0, 0.5, 2.0), "")
+        scene.spawnSphere("Runtime Crystal", "Collectible", Vec3(4.0, 1.2, 8.0), 0.35, "scripts/bobber.varg")
+    }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scripts.join("bobber.varg"),
+            r#"script Bobber {
+    func update(_ dt: Float) {
+        position.y += 0.0
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let spawner = services.scene.create_object("Spawner").unwrap();
+        services
+            .scene
+            .upsert_component(
+                spawner,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/spawner.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let platform = services
+            .scene
+            .objects()
+            .into_iter()
+            .find(|(_, object)| object.name == "Runtime Platform")
+            .map(|(entity, _)| entity)
+            .expect("platform spawned");
+        let crystal = services
+            .scene
+            .objects()
+            .into_iter()
+            .find(|(_, object)| object.name == "Runtime Crystal")
+            .map(|(entity, _)| entity)
+            .expect("crystal spawned");
+
+        let platform_object = services.scene.object(platform).unwrap();
+        assert_eq!(platform_object.tag, "Platform");
+        assert!(platform_object.components.iter().any(|component| matches!(
+            component,
+            ComponentData::MeshRenderer(mesh) if mesh.builtin_mesh.as_deref() == Some("debug/cube")
+        )));
+        assert!(platform_object.components.iter().any(|component| matches!(
+            component,
+            ComponentData::Collider(collider) if collider.shape == "box"
+        )));
+        assert_eq!(
+            services
+                .scene
+                .transforms()
+                .local(platform)
+                .unwrap()
+                .translation,
+            Vec3::new(4.0, 0.0, 8.0)
+        );
+        assert_eq!(
+            services.scene.transforms().local(platform).unwrap().scale,
+            Vec3::new(2.0, 0.5, 2.0)
+        );
+
+        let crystal_object = services.scene.object(crystal).unwrap();
+        assert_eq!(crystal_object.tag, "Collectible");
+        assert!(crystal_object.components.iter().any(|component| matches!(
+            component,
+            ComponentData::MeshRenderer(mesh) if mesh.builtin_mesh.as_deref() == Some("debug/sphere")
+        )));
+        assert!(crystal_object.components.iter().any(|component| matches!(
+            component,
+            ComponentData::Collider(collider) if collider.shape == "sphere"
+        )));
+        assert!(crystal_object.components.iter().any(|component| matches!(
+            component,
+            ComponentData::Script(script) if script.source == "scripts/bobber.varg"
+        )));
+    }
+
+    #[test]
     fn varg_script_can_query_scene_tags_distance_and_destroy_self() {
         let root = tempfile::tempdir().unwrap();
         let scripts = root.path().join("scripts");
@@ -3518,6 +4174,102 @@ mod tests {
 
         assert_eq!(services.audio_bindings.len(), 1);
         assert_eq!(services.audio.diagnostics().acoustics_sources, 1);
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn varg_script_can_play_procedural_tone() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("sfx.varg"),
+            r#"script Sfx {
+    func update(_ dt: Float) {
+        if state.played == 0 {
+            Audio.playTone("square", 660.0, 0.08, 0.25)
+            state.played = 1
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Sfx").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/sfx.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(services.audio.diagnostics().loaded_clips, 1);
+        assert_eq!(services.audio.diagnostics().logical_sources, 1);
+        assert_eq!(services.transient_audio.len(), 1);
+
+        services
+            .tick_game_frame(Duration::from_millis(100), false)
+            .unwrap();
+
+        assert_eq!(services.audio.diagnostics().loaded_clips, 0);
+        assert_eq!(services.audio.diagnostics().logical_sources, 0);
+        assert!(services.transient_audio.is_empty());
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn varg_script_can_start_and_stop_procedural_bgm_loop() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("bgm.varg"),
+            r#"script Bgm {
+    func start() {
+        Audio.startLoop("main", "triangle", "C4 E4 G4 R", 120.0, 0.5, 0.18)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Bgm").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/bgm.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(services.audio.diagnostics().loaded_clips, 1);
+        assert_eq!(services.audio.diagnostics().logical_sources, 1);
+        assert_eq!(services.audio.diagnostics().physical_voices, 1);
+        assert!(services.procedural_loops.contains_key("main"));
+
+        services
+            .apply_varg_audio_command(VargAudioCommand::StopLoop {
+                id: "main".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(services.audio.diagnostics().loaded_clips, 0);
+        assert_eq!(services.audio.diagnostics().logical_sources, 0);
+        assert!(services.procedural_loops.is_empty());
     }
 
     #[cfg(feature = "physics")]
@@ -3723,6 +4475,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn varg_script_mouse_capture_request_updates_runtime_state() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("capture.varg"),
+            r#"script Capture {
+    func update(_ dt: Float) {
+        Input.captureMouse(true)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Player").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/capture.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(
+            services.input_capture(),
+            RuntimeInputCapture { mouse: true }
+        );
     }
 
     #[test]

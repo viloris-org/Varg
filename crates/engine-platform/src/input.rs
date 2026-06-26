@@ -67,6 +67,13 @@ pub enum InputEvent {
         /// Y position.
         y: f32,
     },
+    /// Relative mouse motion in logical pixels.
+    MouseDelta {
+        /// Horizontal motion.
+        x: f32,
+        /// Vertical motion.
+        y: f32,
+    },
     /// Mouse wheel delta in logical scroll units.
     MouseWheel {
         /// Horizontal scroll.
@@ -238,6 +245,10 @@ impl InputState {
                     self.mouse_delta.1 += y - previous_y;
                 }
                 self.cursor_position = Some((x, y));
+            }
+            InputEvent::MouseDelta { x, y } => {
+                self.mouse_delta.0 += x;
+                self.mouse_delta.1 += y;
             }
             InputEvent::MouseWheel { x, y } => {
                 self.wheel_delta.0 += x;

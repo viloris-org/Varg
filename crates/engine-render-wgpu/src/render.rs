@@ -931,15 +931,17 @@ impl WgpuRenderDevice {
             true,
         );
         self.encode_gpu_particle_render(encoder);
-        encode_grid_pass(
-            encoder,
-            &hdr.color_view,
-            hdr.depth_view.as_ref(),
-            &self.grid_pipeline,
-            &self.grid_bind_group,
-            &self.grid_vertex_buffer,
-            self.grid_vertex_count,
-        );
+        if self.editor_grid_enabled {
+            encode_grid_pass(
+                encoder,
+                &hdr.color_view,
+                hdr.depth_view.as_ref(),
+                &self.grid_pipeline,
+                &self.grid_bind_group,
+                &self.grid_vertex_buffer,
+                self.grid_vertex_count,
+            );
+        }
     }
 
     pub(crate) fn ensure_surface_depth(&mut self) {
