@@ -132,6 +132,68 @@ pub struct VargScript {
     hooks: HashMap<String, Vec<RuntimeStatement>>,
 }
 
+/// Compiled declarative behavior tree summary from a `.varg` behavior declaration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VargBehavior {
+    /// Behavior declaration name.
+    pub name: String,
+    /// Root behavior node.
+    pub root: VargBehaviorNode,
+}
+
+/// Declarative behavior tree node.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VargBehaviorNode {
+    /// Execute children in order until one fails.
+    Sequence {
+        /// Optional author-facing node name.
+        name: Option<String>,
+        /// Child nodes.
+        children: Vec<VargBehaviorNode>,
+    },
+    /// Execute children in order until one succeeds.
+    Selector {
+        /// Optional author-facing node name.
+        name: Option<String>,
+        /// Child nodes.
+        children: Vec<VargBehaviorNode>,
+    },
+    /// Execute child nodes in parallel.
+    Parallel {
+        /// Optional author-facing node name.
+        name: Option<String>,
+        /// Child nodes.
+        children: Vec<VargBehaviorNode>,
+    },
+    /// Pure condition expression.
+    Condition {
+        /// Varg condition expression source after `when`.
+        expression: String,
+    },
+    /// Declarative action call.
+    Action {
+        /// Varg action expression source after `action`.
+        expression: String,
+    },
+    /// Invert child result.
+    Invert {
+        /// Child node.
+        child: Box<VargBehaviorNode>,
+    },
+    /// Force child result to success.
+    Succeed {
+        /// Child node.
+        child: Box<VargBehaviorNode>,
+    },
+    /// Repeat a child node.
+    Repeat {
+        /// Optional repeat count. `None` means unbounded.
+        count: Option<u32>,
+        /// Child node.
+        child: Box<VargBehaviorNode>,
+    },
+}
+
 /// Per-invocation context passed to the Varg script runtime.
 #[derive(Clone, Debug)]
 pub struct VargRuntimeContext {
@@ -149,6 +211,8 @@ pub struct VargRuntimeContext {
     pub exported_values: HashMap<String, serde_json::Value>,
     /// Persistent script state keyed by state variable name.
     pub state: HashMap<String, serde_json::Value>,
+    /// Read-only scene facts exposed to migrated declarative gameplay APIs.
+    pub scene: VargSceneContext,
 }
 
 /// Result of executing one lifecycle hook.
@@ -160,6 +224,46 @@ pub struct VargRuntimeOutput {
     pub state: HashMap<String, serde_json::Value>,
     /// Log entries emitted by `log(...)`.
     pub logs: Vec<String>,
+    /// Whether the script requested deferred destruction of its owning entity.
+    pub destroy_self: bool,
+}
+
+/// Read-only scene facts available to one script invocation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VargSceneContext {
+    /// User-visible name of the entity this script is attached to.
+    pub entity_name: String,
+    /// User-visible tag of the entity this script is attached to.
+    pub entity_tag: String,
+    /// Local positions keyed by user-visible object name.
+    pub positions_by_name: HashMap<String, Vec3>,
+    /// Local positions grouped by tag.
+    pub positions_by_tag: HashMap<String, Vec<Vec3>>,
+}
+
+impl VargSceneContext {
+    /// Returns true when the owning entity has the requested tag.
+    pub fn entity_has_tag(&self, tag: &str) -> bool {
+        self.entity_tag == tag
+    }
+
+    /// Returns the distance from the owning entity position to the first object
+    /// with the given name.
+    pub fn distance_to_name(&self, origin: Vec3, name: &str) -> Option<f32> {
+        self.positions_by_name
+            .get(name)
+            .map(|target| (*target - origin).length())
+    }
+
+    /// Returns the nearest distance from the owning entity position to objects
+    /// with the given tag.
+    pub fn distance_to_tag(&self, origin: Vec3, tag: &str) -> Option<f32> {
+        self.positions_by_tag
+            .get(tag)?
+            .iter()
+            .map(|target| (*target - origin).length())
+            .reduce(f32::min)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -221,6 +325,7 @@ enum RuntimeStatement {
     Break,
     Continue,
     Wait(Expression),
+    DestroySelf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +482,51 @@ pub fn compile_script_source(
     (Some(script), diagnostics)
 }
 
+/// Compiles a `.varg` behavior declaration into a declarative behavior tree IR.
+pub fn compile_behavior_source(
+    path: impl AsRef<Path>,
+    source: &str,
+) -> (Option<VargBehavior>, Vec<VargDiagnostic>) {
+    let (ast, mut diagnostics) = parse_source(path, source);
+    let Some(ast) = ast else {
+        return (None, diagnostics);
+    };
+    let Some(declaration) = ast
+        .declarations
+        .iter()
+        .find(|declaration| declaration.kind == "behavior")
+    else {
+        diagnostics.push(VargDiagnostic {
+            code: "VARG5000".to_string(),
+            severity: VargDiagnosticSeverity::Error,
+            line: Some(1),
+            column: Some(1),
+            message: "logic file does not contain a behavior declaration".to_string(),
+            expected: "`behavior Name { ... }`".to_string(),
+            suggestion: "Add a behavior declaration or compile a file that contains one."
+                .to_string(),
+            blocking: true,
+            source_line: source.lines().next().map(str::to_string),
+        });
+        return (None, diagnostics);
+    };
+
+    match parse_behavior_declaration(
+        source,
+        declaration
+            .name
+            .clone()
+            .unwrap_or_else(|| "UnnamedBehavior".to_string()),
+        declaration.line,
+    ) {
+        Ok(behavior) => (Some(behavior), diagnostics),
+        Err(error) => {
+            diagnostics.push(error);
+            (None, diagnostics)
+        }
+    }
+}
+
 /// Parses a `.vscene` world file into the native scene file structure.
 ///
 /// This is the preferred load path for Varg scenes. It parses the authoring
@@ -489,6 +639,7 @@ impl VargScript {
             transform: context.transform,
             state: context.state,
             logs: Vec::new(),
+            destroy_self: false,
         };
         let Some(statements) = self.hooks.get(hook) else {
             return output;
@@ -500,10 +651,12 @@ impl VargScript {
             total_time: context.total_time,
             frame_index: context.frame_index,
             exported_values: &context.exported_values,
+            scene: &context.scene,
             transform: &mut output.transform,
             state: &mut output.state,
             locals: HashMap::new(),
             logs: &mut output.logs,
+            destroy_self: &mut output.destroy_self,
             should_return: false,
             should_break: false,
             should_continue: false,
@@ -812,6 +965,15 @@ struct FunctionSignature {
     params: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct BehaviorBlock {
+    kind: String,
+    name: Option<String>,
+    repeat_count: Option<u32>,
+    line: usize,
+    children: Vec<VargBehaviorNode>,
+}
+
 fn strip_line_comment(line: &str) -> &str {
     line.split_once("//").map_or(line, |(before, _)| before)
 }
@@ -862,6 +1024,267 @@ fn parse_quoted(value: &str) -> Option<String> {
     let value = value.strip_prefix('"')?;
     let end = value.find('"')?;
     Some(value[..end].to_string())
+}
+
+fn parse_behavior_declaration(
+    source: &str,
+    name: String,
+    declaration_line: usize,
+) -> Result<VargBehavior, VargDiagnostic> {
+    let mut stack: Vec<BehaviorBlock> = Vec::new();
+    let mut root_children = Vec::new();
+    let mut inside_behavior = false;
+    let mut behavior_depth = 0isize;
+
+    for (line_index, raw_line) in source.lines().enumerate() {
+        let line = line_index + 1;
+        let without_comment = strip_line_comment(raw_line);
+        let trimmed = without_comment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !inside_behavior {
+            if line == declaration_line {
+                inside_behavior = true;
+                behavior_depth =
+                    trimmed.matches('{').count() as isize - trimmed.matches('}').count() as isize;
+            }
+            continue;
+        }
+
+        if line == declaration_line {
+            continue;
+        }
+
+        if trimmed == "}" {
+            if let Some(block) = stack.pop() {
+                let node = behavior_block_to_node(block)?;
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(node);
+                } else {
+                    root_children.push(node);
+                }
+            } else {
+                behavior_depth -= 1;
+                if behavior_depth <= 0 {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if let Some(block) = parse_behavior_block_header(trimmed, line, source)? {
+            stack.push(block);
+            behavior_depth += 1;
+            continue;
+        }
+
+        if let Some(expression) = trimmed.strip_prefix("when ") {
+            let node = VargBehaviorNode::Condition {
+                expression: expression.trim().to_string(),
+            };
+            if let Some(parent) = stack.last_mut() {
+                parent.children.push(node);
+            } else {
+                root_children.push(node);
+            }
+            continue;
+        }
+
+        if let Some(expression) = trimmed.strip_prefix("action ") {
+            let node = VargBehaviorNode::Action {
+                expression: expression.trim().to_string(),
+            };
+            if let Some(parent) = stack.last_mut() {
+                parent.children.push(node);
+            } else {
+                root_children.push(node);
+            }
+            continue;
+        }
+
+        return Err(behavior_error(
+            source,
+            line,
+            1,
+            "VARG5001",
+            "unsupported behavior statement",
+            "`selector`, `sequence`, `parallel`, `repeat`, `invert`, `succeed`, `when`, or `action`",
+            "Rewrite this line using declarative behavior tree syntax.",
+        ));
+    }
+
+    if let Some(block) = stack.last() {
+        return Err(behavior_error(
+            source,
+            block.line,
+            1,
+            "VARG5002",
+            "unclosed behavior block",
+            "Every behavior node block must be closed with `}`.",
+            "Add a closing brace for this behavior node.",
+        ));
+    }
+
+    let root = match root_children.len() {
+        0 => {
+            return Err(behavior_error(
+                source,
+                declaration_line,
+                1,
+                "VARG5003",
+                "behavior declaration has no nodes",
+                "At least one `when`, `action`, `selector`, `sequence`, or `parallel` node.",
+                "Add a root behavior node.",
+            ));
+        }
+        1 => root_children.remove(0),
+        _ => VargBehaviorNode::Parallel {
+            name: Some("root".to_string()),
+            children: root_children,
+        },
+    };
+
+    Ok(VargBehavior { name, root })
+}
+
+fn parse_behavior_block_header(
+    trimmed: &str,
+    line: usize,
+    source: &str,
+) -> Result<Option<BehaviorBlock>, VargDiagnostic> {
+    if !trimmed.ends_with('{') {
+        return Ok(None);
+    }
+    let before_brace = trimmed.trim_end_matches('{').trim();
+    let mut parts = before_brace.split_whitespace();
+    let Some(kind) = parts.next() else {
+        return Ok(None);
+    };
+    if !matches!(
+        kind,
+        "selector" | "sequence" | "parallel" | "repeat" | "invert" | "succeed"
+    ) {
+        return Ok(None);
+    }
+
+    let mut repeat_count = None;
+    let name = match kind {
+        "repeat" => match parts.next() {
+            Some("forever") | None => None,
+            Some(value) => {
+                repeat_count = Some(value.parse::<u32>().map_err(|_| {
+                    behavior_error(
+                        source,
+                        line,
+                        1,
+                        "VARG5004",
+                        "repeat count must be a positive integer or `forever`",
+                        "`repeat 3 { ... }` or `repeat forever { ... }`",
+                        "Use an integer repeat count, or omit it for an unbounded repeat.",
+                    )
+                })?);
+                None
+            }
+        },
+        _ => {
+            let rest = before_brace[kind.len()..].trim();
+            if rest.is_empty() {
+                None
+            } else {
+                parse_quoted(rest).or_else(|| Some(rest.to_string()))
+            }
+        }
+    };
+
+    Ok(Some(BehaviorBlock {
+        kind: kind.to_string(),
+        name,
+        repeat_count,
+        line,
+        children: Vec::new(),
+    }))
+}
+
+fn behavior_block_to_node(block: BehaviorBlock) -> Result<VargBehaviorNode, VargDiagnostic> {
+    match block.kind.as_str() {
+        "sequence" => Ok(VargBehaviorNode::Sequence {
+            name: block.name,
+            children: block.children,
+        }),
+        "selector" => Ok(VargBehaviorNode::Selector {
+            name: block.name,
+            children: block.children,
+        }),
+        "parallel" => Ok(VargBehaviorNode::Parallel {
+            name: block.name,
+            children: block.children,
+        }),
+        "invert" => {
+            let child = single_behavior_child(&block)?;
+            Ok(VargBehaviorNode::Invert {
+                child: Box::new(child),
+            })
+        }
+        "succeed" => {
+            let child = single_behavior_child(&block)?;
+            Ok(VargBehaviorNode::Succeed {
+                child: Box::new(child),
+            })
+        }
+        "repeat" => {
+            let child = single_behavior_child(&block)?;
+            Ok(VargBehaviorNode::Repeat {
+                count: block.repeat_count,
+                child: Box::new(child),
+            })
+        }
+        _ => unreachable!("behavior block kind validated before push"),
+    }
+}
+
+fn single_behavior_child(block: &BehaviorBlock) -> Result<VargBehaviorNode, VargDiagnostic> {
+    if block.children.len() == 1 {
+        return Ok(block.children[0].clone());
+    }
+    Err(VargDiagnostic {
+        code: "VARG5005".to_string(),
+        severity: VargDiagnosticSeverity::Error,
+        line: Some(block.line),
+        column: Some(1),
+        message: format!("`{}` behavior node requires exactly one child", block.kind),
+        expected: format!("`{} {{ <one child node> }}`", block.kind),
+        suggestion: "Wrap multiple children in a `sequence`, `selector`, or `parallel` node."
+            .to_string(),
+        blocking: true,
+        source_line: None,
+    })
+}
+
+fn behavior_error(
+    source: &str,
+    line: usize,
+    column: usize,
+    code: &str,
+    message: &str,
+    expected: &str,
+    suggestion: &str,
+) -> VargDiagnostic {
+    VargDiagnostic {
+        code: code.to_string(),
+        severity: VargDiagnosticSeverity::Error,
+        line: Some(line),
+        column: Some(column),
+        message: message.to_string(),
+        expected: expected.to_string(),
+        suggestion: suggestion.to_string(),
+        blocking: true,
+        source_line: source
+            .lines()
+            .nth(line.saturating_sub(1))
+            .map(str::to_string),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1041,6 +1464,8 @@ fn compile_vscene_object(
     let mut camera_role = None;
     let mut components = Vec::new();
     let mut transform = Transform::IDENTITY;
+    let mut mesh_renderer_child = None;
+    let mut material_child = None;
 
     if block.kind == "camera" {
         tag = "MainCamera".to_string();
@@ -1055,10 +1480,8 @@ fn compile_vscene_object(
                 &mut components,
                 ComponentData::Camera(compile_camera_component(child)),
             ),
-            "material" => upsert_component(
-                &mut components,
-                ComponentData::MeshRenderer(compile_mesh_renderer_component(Some(child))),
-            ),
+            "mesh" | "geometry" => mesh_renderer_child = Some(child),
+            "material" => material_child = Some(child),
             "rigidbody" => {
                 components.push(ComponentData::Rigidbody(compile_rigidbody_component(child)))
             }
@@ -1072,7 +1495,7 @@ fn compile_vscene_object(
                     child,
                     "VSCENE2001",
                     &format!("unsupported object child block `{}`", child.kind),
-                    "`transform`, `perspective`, `material`, `rigidbody`, `collider`, `script`, or `light`",
+                    "`transform`, `perspective`, `mesh`, `geometry`, `material`, `rigidbody`, `collider`, `script`, or `light`",
                     "Use a supported component block or extend the .vscene compiler.",
                 ));
             }
@@ -1080,13 +1503,19 @@ fn compile_vscene_object(
     }
 
     if block.properties.contains_key("mesh")
-        && !components
-            .iter()
-            .any(|component| matches!(component, ComponentData::MeshRenderer(_)))
+        || block.properties.contains_key("geometry")
+        || block.properties.contains_key("material")
+        || mesh_renderer_child.is_some()
+        || material_child.is_some()
     {
-        components.push(ComponentData::MeshRenderer(
-            compile_mesh_renderer_component(None),
-        ));
+        upsert_component(
+            &mut components,
+            ComponentData::MeshRenderer(compile_mesh_renderer_component(
+                block,
+                mesh_renderer_child,
+                material_child,
+            )),
+        );
     }
 
     Ok(SerializedGameObject {
@@ -1131,20 +1560,84 @@ fn compile_camera_component(block: &VsceneBlock) -> CameraComponentData {
     }
 }
 
-fn compile_mesh_renderer_component(material: Option<&VsceneBlock>) -> MeshRendererComponentData {
-    let builtin = material
-        .and_then(|block| string_property(block, "builtin"))
+fn compile_mesh_renderer_component(
+    object: &VsceneBlock,
+    mesh: Option<&VsceneBlock>,
+    material: Option<&VsceneBlock>,
+) -> MeshRendererComponentData {
+    let builtin_material = material
+        .and_then(vscene_material_builtin)
+        .or_else(|| string_property(object, "material"))
         .unwrap_or_else(|| "debug/default".to_string());
     MeshRendererComponentData {
         mesh: None,
-        builtin_mesh: Some("debug/cube".to_string()),
+        builtin_mesh: Some(
+            vscene_mesh_builtin(object, mesh).unwrap_or_else(|| "debug/cube".to_string()),
+        ),
         material: MaterialRef {
             asset: None,
-            builtin: Some(builtin),
+            builtin: Some(builtin_material),
         },
         casts_shadows: true,
         receive_shadows: true,
     }
+}
+
+fn vscene_mesh_builtin(object: &VsceneBlock, mesh: Option<&VsceneBlock>) -> Option<String> {
+    mesh.and_then(vscene_mesh_builtin_from_block)
+        .or_else(|| string_property(object, "mesh").and_then(|value| normalize_vscene_mesh(&value)))
+        .or_else(|| {
+            string_property(object, "geometry").and_then(|value| normalize_vscene_mesh(&value))
+        })
+        .or_else(|| call_property(object, "mesh").and_then(vscene_mesh_builtin_from_call))
+        .or_else(|| call_property(object, "geometry").and_then(vscene_mesh_builtin_from_call))
+}
+
+fn vscene_mesh_builtin_from_block(block: &VsceneBlock) -> Option<String> {
+    string_property(block, "builtin")
+        .or_else(|| string_property(block, "type").and_then(|value| normalize_vscene_mesh(&value)))
+        .or_else(|| string_property(block, "kind").and_then(|value| normalize_vscene_mesh(&value)))
+        .or_else(|| string_property(block, "path").map(|value| format!("model:{value}")))
+        .or_else(|| call_property(block, "type").and_then(vscene_mesh_builtin_from_call))
+        .or_else(|| call_property(block, "kind").and_then(vscene_mesh_builtin_from_call))
+}
+
+fn normalize_vscene_mesh(value: &str) -> Option<String> {
+    let normalized = match value {
+        "box" | "cube" | "primitive.box" | "debug/cube" => "debug/cube".to_string(),
+        "sphere" | "primitive.sphere" | "debug/sphere" => "debug/sphere".to_string(),
+        "plane" | "primitive.plane" | "debug/plane" => "debug/plane".to_string(),
+        "cylinder" | "primitive.cylinder" | "debug/cylinder" => "debug/cylinder".to_string(),
+        other if other.starts_with("debug/") => other.to_string(),
+        other if other.starts_with("model:") => other.to_string(),
+        other if other.ends_with(".gltf") || other.ends_with(".glb") => format!("model:{other}"),
+        _ => return None,
+    };
+    Some(normalized)
+}
+
+fn vscene_mesh_builtin_from_call(value: &VsceneValue) -> Option<String> {
+    let VsceneValue::Call { function, args } = value else {
+        return None;
+    };
+    match function.as_str() {
+        "Box" | "Cube" | "primitive.box" => Some("debug/cube".to_string()),
+        "Sphere" | "primitive.sphere" => Some("debug/sphere".to_string()),
+        "Plane" | "primitive.plane" => Some("debug/plane".to_string()),
+        "Cylinder" | "primitive.cylinder" => Some("debug/cylinder".to_string()),
+        "Model" => args
+            .get("path")
+            .and_then(vscene_value_string)
+            .map(|path| format!("model:{path}")),
+        _ => None,
+    }
+}
+
+fn vscene_material_builtin(block: &VsceneBlock) -> Option<String> {
+    string_property(block, "builtin")
+        .or_else(|| string_property(block, "name"))
+        .or_else(|| string_property(block, "type"))
+        .or_else(|| string_property(block, "kind"))
 }
 
 fn compile_rigidbody_component(block: &VsceneBlock) -> RigidbodyComponentData {
@@ -1300,6 +1793,20 @@ fn string_property(block: &VsceneBlock, key: &str) -> Option<String> {
 fn identifier_property(block: &VsceneBlock, key: &str) -> Option<String> {
     match block.properties.get(key)? {
         VsceneValue::Identifier(value) | VsceneValue::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn call_property<'a>(block: &'a VsceneBlock, key: &str) -> Option<&'a VsceneValue> {
+    match block.properties.get(key)? {
+        value @ VsceneValue::Call { .. } => Some(value),
+        _ => None,
+    }
+}
+
+fn vscene_value_string(value: &VsceneValue) -> Option<String> {
+    match value {
+        VsceneValue::String(value) | VsceneValue::Identifier(value) => Some(value.clone()),
         _ => None,
     }
 }
@@ -1693,10 +2200,12 @@ struct RuntimeEnvironment<'a> {
     total_time: f32,
     frame_index: u64,
     exported_values: &'a HashMap<String, serde_json::Value>,
+    scene: &'a VargSceneContext,
     transform: &'a mut Transform,
     state: &'a mut HashMap<String, serde_json::Value>,
     locals: HashMap<String, serde_json::Value>,
     logs: &'a mut Vec<String>,
+    destroy_self: &'a mut bool,
     /// When true, the current function should return.
     should_return: bool,
     /// When true, the current loop should break.
@@ -1888,6 +2397,10 @@ impl RuntimeEnvironment<'_> {
                     }
                 }
             }
+            RuntimeStatement::DestroySelf => {
+                *self.destroy_self = true;
+                self.should_return = true;
+            }
         }
     }
 
@@ -2054,6 +2567,40 @@ impl RuntimeEnvironment<'_> {
 
     fn call_number(&self, function: &str, args: &[Expression]) -> f32 {
         match function {
+            "entity.hasTag" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .is_some_and(|tag| self.scene.entity_has_tag(&tag)) as u8 as f32
+            }
+            "scene.distanceTo" | "distanceTo" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|name| {
+                        self.scene
+                            .distance_to_name(self.transform.translation, &name)
+                    })
+                    .unwrap_or(0.0)
+            }
+            "scene.distanceToTag" | "distanceToTag" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|tag| self.scene.distance_to_tag(self.transform.translation, &tag))
+                    .unwrap_or(0.0)
+            }
+            "playerDistance" | "scene.playerDistance" => self
+                .scene
+                .distance_to_tag(self.transform.translation, "Player")
+                .or_else(|| {
+                    self.scene
+                        .distance_to_name(self.transform.translation, "Player")
+                })
+                .unwrap_or(0.0),
             "sin" | "Math.sin" => self.unary_math(args, f32::sin),
             "cos" | "Math.cos" => self.unary_math(args, f32::cos),
             "tan" | "Math.tan" => self.unary_math(args, f32::tan),
@@ -2089,6 +2636,25 @@ impl RuntimeEnvironment<'_> {
                 from + (to - from) * t
             }
             _ => 0.0,
+        }
+    }
+
+    fn eval_string(&self, expression: &Expression) -> Option<String> {
+        match expression {
+            Expression::String(value) => Some(value.clone()),
+            Expression::Variable(name) => self
+                .locals
+                .get(name)
+                .or_else(|| self.state.get(name))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            Expression::Member(owner, field) => self
+                .state
+                .get(owner)
+                .and_then(|value| value.get(field))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            _ => None,
         }
     }
 
@@ -2244,6 +2810,9 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
     if let Some(content) = function_args(line, "wait") {
         return Some(RuntimeStatement::Wait(parse_expression(content)?));
     }
+    if line.trim() == "entity.destroy()" || line.trim() == "destroySelf()" {
+        return Some(RuntimeStatement::DestroySelf);
+    }
     if let Some(content) = function_args(line, "log") {
         return parse_string_literal(content).map(RuntimeStatement::Log);
     }
@@ -2370,6 +2939,24 @@ fn parse_condition_expression(condition: &str) -> Option<ConditionExpression> {
             lhs: parse_expression(lhs)?,
             op,
             rhs: parse_expression(rhs)?,
+        });
+    }
+    if parse_expression_call(condition).is_some_and(|(function, _)| {
+        matches!(
+            function,
+            "entity.hasTag"
+                | "scene.distanceTo"
+                | "distanceTo"
+                | "scene.distanceToTag"
+                | "distanceToTag"
+                | "playerDistance"
+                | "scene.playerDistance"
+        )
+    }) {
+        return Some(ConditionExpression::Compare {
+            lhs: parse_expression(condition)?,
+            op: CompareOp::NotEqual,
+            rhs: Expression::Number(0.0),
         });
     }
     if is_truthy_condition_source(condition) {
@@ -2677,15 +3264,6 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
             "Use `entity.translate(Vec3(...))`, `position = Vec3(...)`, or `position.x/y/z` assignment in the MVP runtime."
                 .to_string(),
             "For transform-only motion, replace velocity mutation with `position.y += jumpForce * dt` or `entity.translate(Vec3(0, jumpForce * dt, 0))`."
-                .to_string(),
-        );
-    }
-
-    if trimmed.contains(".destroy(") || trimmed.ends_with(".destroy()") {
-        return (
-            "unsupported entity API `destroy`".to_string(),
-            "The MVP runtime does not expose entity creation or destruction APIs yet.".to_string(),
-            "Mark intent in `state.*` for now, for example `state.shouldDestroy = 1`, and handle destruction outside the script runtime."
                 .to_string(),
         );
     }
@@ -3173,6 +3751,77 @@ mod tests {
     }
 
     #[test]
+    fn compiles_declarative_scene_geometry_concepts_to_vscene_mesh_renderers() {
+        let source = r##"scene GeometryMigration {
+    entity BoxActor {
+        mesh: Box(size: Vec3(1, 2, 3))
+        material {
+            builtin: "debug/red"
+        }
+    }
+
+    entity SphereActor {
+        geometry {
+            type: sphere
+        }
+        material: "debug/blue"
+    }
+
+    entity PlaneActor {
+        mesh: plane
+    }
+
+    entity ModelActor {
+        geometry {
+            path: "models/ship.gltf"
+        }
+    }
+}
+"##;
+
+        let (file, diagnostics) =
+            compile_vscene_source_to_scene_file("scenes/geometry.vscene", source);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let file = file.unwrap();
+        assert_eq!(file.objects.len(), 4);
+
+        let mesh_for = |name: &str| {
+            file.objects
+                .iter()
+                .find(|record| record.object.name == name)
+                .and_then(|record| {
+                    record
+                        .object
+                        .components
+                        .iter()
+                        .find_map(|component| match component {
+                            ComponentData::MeshRenderer(mesh) => Some(mesh),
+                            _ => None,
+                        })
+                })
+                .expect("object should have mesh renderer")
+        };
+
+        let box_mesh = mesh_for("BoxActor");
+        assert_eq!(box_mesh.builtin_mesh.as_deref(), Some("debug/cube"));
+        assert_eq!(box_mesh.material.builtin.as_deref(), Some("debug/red"));
+
+        let sphere_mesh = mesh_for("SphereActor");
+        assert_eq!(sphere_mesh.builtin_mesh.as_deref(), Some("debug/sphere"));
+        assert_eq!(sphere_mesh.material.builtin.as_deref(), Some("debug/blue"));
+
+        assert_eq!(
+            mesh_for("PlaneActor").builtin_mesh.as_deref(),
+            Some("debug/plane")
+        );
+        assert_eq!(
+            mesh_for("ModelActor").builtin_mesh.as_deref(),
+            Some("model:models/ship.gltf")
+        );
+    }
+
+    #[test]
     fn rejects_scene_imports() {
         let diagnostics = diagnose_source("scenes/main.vscene", "import \"scripts/combat.varg\"\n");
 
@@ -3332,6 +3981,7 @@ mod tests {
             frame_index: 1,
             exported_values: HashMap::new(),
             state: HashMap::new(),
+            scene: VargSceneContext::default(),
         };
         let output = script.run_hook("update", context);
         assert_eq!(
@@ -3351,6 +4001,7 @@ mod tests {
             frame_index: 2,
             exported_values: HashMap::new(),
             state: output.state,
+            scene: VargSceneContext::default(),
         };
         let output = script.run_hook("update", context);
         assert_eq!(
@@ -3403,6 +4054,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3454,6 +4106,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
         assert_eq!(
@@ -3479,6 +4132,7 @@ mod tests {
                 frame_index: 2,
                 exported_values: HashMap::new(),
                 state: output.state,
+                scene: VargSceneContext::default(),
             },
         );
         assert_eq!(
@@ -3533,6 +4187,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
         assert_eq!(
@@ -3565,6 +4220,7 @@ mod tests {
                 frame_index: 2,
                 exported_values: HashMap::new(),
                 state: output.state,
+                scene: VargSceneContext::default(),
             },
         );
         assert_eq!(
@@ -3581,6 +4237,199 @@ mod tests {
                 .and_then(|value| value.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn runtime_supports_migrated_declarative_entity_queries_and_destroy() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/hazard.varg",
+            r#"script Hazard {
+    func update(_ dt: Float) {
+        if entity.hasTag("Enemy") && scene.distanceTo("Player") <= 5.0 {
+            state.nearPlayer = 1
+        }
+
+        if playerDistance() <= 5.0 {
+            state.playerDistanceMatched = 1
+        }
+
+        if scene.distanceToTag("Treasure") < 3.0 {
+            entity.destroy()
+        }
+
+        state.afterDestroy = 1
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut scene = VargSceneContext {
+            entity_name: "EnemyA".to_string(),
+            entity_tag: "Enemy".to_string(),
+            ..VargSceneContext::default()
+        };
+        scene
+            .positions_by_name
+            .insert("Player".to_string(), Vec3::new(3.0, 0.0, 4.0));
+        scene
+            .positions_by_tag
+            .insert("Player".to_string(), vec![Vec3::new(3.0, 0.0, 4.0)]);
+        scene
+            .positions_by_tag
+            .insert("Treasure".to_string(), vec![Vec3::new(1.0, 0.0, 0.0)]);
+
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene,
+            },
+        );
+
+        assert_eq!(
+            output
+                .state
+                .get("nearPlayer")
+                .and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            output
+                .state
+                .get("playerDistanceMatched")
+                .and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert!(output.destroy_self);
+        assert!(!output.state.contains_key("afterDestroy"));
+    }
+
+    #[test]
+    fn compiles_behavior_declaration_to_varg_behavior_ir() {
+        let (behavior, diagnostics) = compile_behavior_source(
+            "scripts/enemy_ai.varg",
+            r#"behavior EnemyAI {
+    selector {
+        sequence "chase branch" {
+            when playerDistance() < 10
+            action chase("Player", speed: 4.0)
+        }
+
+        repeat 3 {
+            action patrol(points: ["A", "B", "C"], speed: 2.0)
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let behavior = behavior.expect("behavior should compile");
+        assert_eq!(behavior.name, "EnemyAI");
+        let VargBehaviorNode::Selector { children, .. } = behavior.root else {
+            panic!("expected selector root");
+        };
+        assert_eq!(children.len(), 2);
+        match &children[0] {
+            VargBehaviorNode::Sequence { name, children } => {
+                assert_eq!(name.as_deref(), Some("chase branch"));
+                assert_eq!(
+                    children,
+                    &vec![
+                        VargBehaviorNode::Condition {
+                            expression: "playerDistance() < 10".to_string()
+                        },
+                        VargBehaviorNode::Action {
+                            expression: "chase(\"Player\", speed: 4.0)".to_string()
+                        }
+                    ]
+                );
+            }
+            other => panic!("expected sequence, got {other:#?}"),
+        }
+        match &children[1] {
+            VargBehaviorNode::Repeat { count, child } => {
+                assert_eq!(*count, Some(3));
+                assert_eq!(
+                    **child,
+                    VargBehaviorNode::Action {
+                        expression: "patrol(points: [\"A\", \"B\", \"C\"], speed: 2.0)".to_string()
+                    }
+                );
+            }
+            other => panic!("expected repeat, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn compiles_behavior_decorators() {
+        let (behavior, diagnostics) = compile_behavior_source(
+            "scripts/decorators.varg",
+            r#"behavior Decorators {
+    sequence {
+        invert {
+            when entity.hasTag("Frozen")
+        }
+        succeed {
+            action idle()
+        }
+        repeat forever {
+            action wait(1.0)
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let behavior = behavior.unwrap();
+        let VargBehaviorNode::Sequence { children, .. } = behavior.root else {
+            panic!("expected sequence root");
+        };
+        assert!(matches!(children[0], VargBehaviorNode::Invert { .. }));
+        assert!(matches!(children[1], VargBehaviorNode::Succeed { .. }));
+        assert!(matches!(
+            children[2],
+            VargBehaviorNode::Repeat { count: None, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_behavior_declaration() {
+        let (behavior, diagnostics) = compile_behavior_source(
+            "scripts/empty.varg",
+            r#"behavior Empty {
+}
+"#,
+        );
+
+        assert!(behavior.is_none());
+        assert_eq!(diagnostics[0].code, "VARG5003");
+    }
+
+    #[test]
+    fn rejects_decorator_with_multiple_children() {
+        let (behavior, diagnostics) = compile_behavior_source(
+            "scripts/bad.varg",
+            r#"behavior Bad {
+    invert {
+        when entity.hasTag("Frozen")
+        action idle()
+    }
+}
+"#,
+        );
+
+        assert!(behavior.is_none());
+        assert_eq!(diagnostics[0].code, "VARG5005");
     }
 
     #[test]
@@ -3648,6 +4497,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3686,6 +4536,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3724,6 +4575,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3761,6 +4613,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3801,6 +4654,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3842,6 +4696,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3882,6 +4737,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3924,6 +4780,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -3964,6 +4821,7 @@ mod tests {
                 frame_index: 7,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -4004,6 +4862,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: HashMap::new(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -4027,6 +4886,7 @@ mod tests {
                     frame_index: 30,
                     exported_values: HashMap::new(),
                     state: state.clone(),
+                    scene: VargSceneContext::default(),
                 },
             );
             state = output.state;
@@ -4051,6 +4911,7 @@ mod tests {
                     frame_index: 70,
                     exported_values: HashMap::new(),
                     state: state.clone(),
+                    scene: VargSceneContext::default(),
                 },
             );
             state = output.state;
@@ -4099,6 +4960,7 @@ mod tests {
                 frame_index: 1,
                 exported_values: exported.clone(),
                 state: HashMap::new(),
+                scene: VargSceneContext::default(),
             },
         );
 
@@ -4121,6 +4983,7 @@ mod tests {
                     frame_index: 32,
                     exported_values: exported.clone(),
                     state: state.clone(),
+                    scene: VargSceneContext::default(),
                 },
             );
             state = output.state;

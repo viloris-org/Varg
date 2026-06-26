@@ -53,7 +53,8 @@ use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
 use engine_script_varg::{
-    VargRuntimeContext, VargScript, compile_script_source, compile_vscene_source_to_scene,
+    VargRuntimeContext, VargSceneContext, VargScript, compile_script_source,
+    compile_vscene_source_to_scene,
 };
 
 /// Explicit runtime services. There is no hidden global mutable state.
@@ -564,6 +565,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 }
             };
             let transform = self.scene.transforms().local(entity).unwrap_or_default();
+            let scene_context = self.varg_scene_context(entity);
             let mut output = compiled.run_hook(
                 hook,
                 VargRuntimeContext {
@@ -574,6 +576,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     frame_index: self.time.frame_index,
                     exported_values: script.exported_values.clone(),
                     state: script.state.clone(),
+                    scene: scene_context,
                 },
             );
             if once {
@@ -585,6 +588,17 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 .transforms_mut()
                 .set_local(entity, output.transform);
             self.apply_varg_script_state(entity, &script.source, output.state);
+            if output.destroy_self {
+                if let Err(error) = self.scene.destroy_deferred(entity) {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "script".to_string(),
+                        level: "error".to_string(),
+                        message: format!("varg destroy error: {error}"),
+                        file: Some(script_path.clone()),
+                        line: None,
+                    });
+                }
+            }
             for message in output.logs {
                 self.diagnostics.push(RuntimeDiagnostic {
                     source: "script".to_string(),
@@ -595,6 +609,27 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 });
             }
         }
+    }
+
+    fn varg_scene_context(&self, entity: engine_ecs::Entity) -> VargSceneContext {
+        let mut context = VargSceneContext::default();
+        if let Some(object) = self.scene.object(entity) {
+            context.entity_name = object.name.clone();
+            context.entity_tag = object.tag.clone();
+        }
+        for (candidate, object) in self.scene.iter_objects() {
+            if let Some(transform) = self.scene.transforms().local(candidate) {
+                context
+                    .positions_by_name
+                    .insert(object.name.clone(), transform.translation);
+                context
+                    .positions_by_tag
+                    .entry(object.tag.clone())
+                    .or_default()
+                    .push(transform.translation);
+            }
+        }
+        context
     }
 
     fn load_varg_script(&mut self, path: &Path) -> EngineResult<&VargScript> {
@@ -3106,6 +3141,69 @@ mod tests {
                 .get("lateTicks")
                 .and_then(|value| value.as_f64()),
             Some(2.0)
+        );
+    }
+
+    #[test]
+    fn varg_script_can_query_scene_tags_distance_and_destroy_self() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("enemy.varg"),
+            r#"script Enemy {
+    func update(_ dt: Float) {
+        if entity.hasTag("Enemy") && playerDistance() <= 5.0 {
+            state.sawPlayer = 1
+        }
+
+        if scene.distanceToTag("Hazard") < 2.0 {
+            entity.destroy()
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+
+        let player = services.scene.create_object("Player").unwrap();
+        services.scene.object_mut(player).unwrap().tag = "Player".to_string();
+        let mut player_transform = engine_core::math::Transform::default();
+        player_transform.translation = engine_core::math::Vec3::new(3.0, 0.0, 4.0);
+        services
+            .scene
+            .transforms_mut()
+            .set_local(player, player_transform);
+
+        let hazard = services.scene.create_object("Spike").unwrap();
+        services.scene.object_mut(hazard).unwrap().tag = "Hazard".to_string();
+        let mut hazard_transform = engine_core::math::Transform::default();
+        hazard_transform.translation = engine_core::math::Vec3::new(1.0, 0.0, 0.0);
+        services
+            .scene
+            .transforms_mut()
+            .set_local(hazard, hazard_transform);
+
+        let enemy = services.scene.create_object("Enemy").unwrap();
+        services.scene.object_mut(enemy).unwrap().tag = "Enemy".to_string();
+        services
+            .scene
+            .upsert_component(
+                enemy,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/enemy.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(
+            services.scene.object(enemy).is_none(),
+            "enemy should be destroyed at the frame-safe destroy point"
         );
     }
 
