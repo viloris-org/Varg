@@ -1029,6 +1029,7 @@ impl AiModel for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolDefinition;
 
     #[test]
     fn thinking_type_format_supports_enabling_and_disabling() {
@@ -1155,6 +1156,59 @@ mod tests {
         assert_eq!(response.content, "hello");
         assert_eq!(response.thinking, "checking");
     }
+
+    #[test]
+    fn stub_provider_with_tools_produces_scene_command_and_file_operations() {
+        let stub = StubProvider::new("stub-v1");
+        let request = AiRequest::single_turn(
+            "test".to_owned(),
+            serde_json::json!({}),
+            "create a test entity".to_owned(),
+        )
+        .with_tools(vec![
+            ToolDefinition {
+                name: "scene_command".into(),
+                description: "Edit scene".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "write_file".into(),
+                description: "Write file".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "complete".into(),
+                description: "Done".into(),
+                parameters: serde_json::json!({}),
+            },
+        ]);
+        let response = stub.chat(request).unwrap();
+
+        assert!(!response.tool_calls.is_empty());
+        let names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+        assert!(names.contains(&"scene_command"), "stub must produce scene_command");
+        assert!(names.contains(&"write_file"), "stub must produce write_file");
+        assert!(names.contains(&"complete"), "stub must produce complete");
+
+        // Verify scene_command payload structure
+        let scene_cmd = response.tool_calls.iter().find(|tc| tc.name == "scene_command").unwrap();
+        assert_eq!(scene_cmd.arguments["op"], "CreateEntity");
+        assert_eq!(scene_cmd.arguments["args"]["name"], "StubTestEntity");
+    }
+
+    #[test]
+    fn stub_provider_without_tools_falls_back_to_text_response() {
+        let stub = StubProvider::new("stub-v1");
+        let request = AiRequest::single_turn(
+            "test".to_owned(),
+            serde_json::json!({}),
+            "create a test".to_owned(),
+        );
+        let response = stub.chat(request).unwrap();
+
+        assert!(response.tool_calls.is_empty());
+        assert!(response.content.contains("create_file"));
+    }
 }
 
 // ─── Stub Provider ───────────────────────────────────────────────────────────
@@ -1186,25 +1240,101 @@ impl AiModel for StubProvider {
         request: AiRequest,
         on_delta: &mut dyn FnMut(AiStreamDelta),
     ) -> EngineResult<AiResponse> {
-        // Generate a deterministic stub response based on the request
+        // Generate a deterministic stub response that produces real tool calls
+        // exercising the scene_command and file operation paths.
         let user_message = request
             .messages
             .last()
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
-        let response_text = format!(
-            "I'll create a simple test file in the workspace.\n\n```json\n{{\"operations\": [{{\"operation\": \"create_file\", \"path\": \"test_stub.txt\", \"content\": \"Stub provider generated this file for Quest testing.\\nUser request: {}\\n\"}}}}```",
-            user_message.chars().take(100).collect::<String>()
+        let has_tools = !request.tools.is_empty();
+        let tool_names: Vec<&str> = request
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+
+        let text = format!(
+            "I'll set up a test scene in the workspace. Creating a test entity and a small script. [stub: {}]",
+            user_message.chars().take(80).collect::<String>()
         );
+        on_delta(AiStreamDelta::Text(text.clone()));
 
-        on_delta(AiStreamDelta::Text(response_text.clone()));
+        if has_tools {
+            // Produce native tool calls matching the AgentSession code path
+            let mut tool_calls = Vec::new();
 
-        Ok(AiResponse {
-            content: response_text,
-            thinking: String::new(),
-            tool_calls: Vec::new(),
-        })
+            // scene_command: CreateEntity if available
+            if tool_names.contains(&"scene_command") {
+                tool_calls.push(ToolCall {
+                    id: "stub_sc_1".to_owned(),
+                    name: "scene_command".to_owned(),
+                    arguments: serde_json::json!({
+                        "op": "CreateEntity",
+                        "args": {
+                            "name": "StubTestEntity",
+                            "position": [0.0, 1.0, 0.0],
+                            "rotation_degrees": [0.0, 0.0, 0.0],
+                            "scale": [1.0, 1.0, 1.0]
+                        }
+                    }),
+                });
+            }
+
+            // create_object as a fallback scene creation tool
+            if tool_names.contains(&"create_object") && !tool_names.contains(&"scene_command") {
+                tool_calls.push(ToolCall {
+                    id: "stub_co_1".to_owned(),
+                    name: "create_object".to_owned(),
+                    arguments: serde_json::json!({
+                        "name": "StubTestObject",
+                        "position": [0.0, 1.0, 0.0]
+                    }),
+                });
+            }
+
+            // write_file for a test script
+            if tool_names.contains(&"write_file") {
+                tool_calls.push(ToolCall {
+                    id: "stub_wf_1".to_owned(),
+                    name: "write_file".to_owned(),
+                    arguments: serde_json::json!({
+                        "path": "scripts/stub_test.aster",
+                        "content": "fn on_start() {\n    // Stub-generated test script\n    log(\"hello from stub\");\n}\n"
+                    }),
+                });
+            }
+
+            // complete to finish the Quest
+            if tool_names.contains(&"complete") {
+                tool_calls.push(ToolCall {
+                    id: "stub_done".to_owned(),
+                    name: "complete".to_owned(),
+                    arguments: serde_json::json!({
+                        "summary": "Stub provider completed: created test entity and script."
+                    }),
+                });
+            }
+
+            Ok(AiResponse {
+                content: text,
+                thinking: String::new(),
+                tool_calls,
+            })
+        } else {
+            // Legacy text-only fallback for non-tool Quest configs
+            let response_text = format!(
+                "I'll create a simple test file in the workspace.\n\n```json\n{{\"operations\": [{{\"operation\": \"create_file\", \"path\": \"test_stub.txt\", \"content\": \"Stub provider generated this file for Quest testing.\\nUser request: {}\\n\"}}}}```",
+                user_message.chars().take(100).collect::<String>()
+            );
+
+            Ok(AiResponse {
+                content: response_text,
+                thinking: String::new(),
+                tool_calls: Vec::new(),
+            })
+        }
     }
 }
 

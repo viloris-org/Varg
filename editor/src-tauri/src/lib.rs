@@ -172,9 +172,7 @@ fn copilot_provider_str(provider: &engine_editor::CopilotProvider) -> EngineResu
         engine_editor::CopilotProvider::Mimo => Ok("mimo"),
         engine_editor::CopilotProvider::DeepSeek => Ok("deepseek"),
         engine_editor::CopilotProvider::Glm => Ok("glm"),
-        engine_editor::CopilotProvider::Stub => Err(EngineError::config(
-            "Quest execution requires a configured AI provider.",
-        )),
+        engine_editor::CopilotProvider::Stub => Ok("stub"),
     }
 }
 
@@ -1487,11 +1485,7 @@ impl EditorHost {
             engine_editor::CopilotProvider::Mimo => "mimo",
             engine_editor::CopilotProvider::DeepSeek => "deepseek",
             engine_editor::CopilotProvider::Glm => "glm",
-            engine_editor::CopilotProvider::Stub => {
-                return Err(EngineError::config(
-                    "Quest creation requires a configured AI provider because the Quest spec and execution plan are AI-generated. Go to Settings → Copilot to configure an API key, OAuth provider, Ollama, or a custom endpoint.",
-                ));
-            }
+            engine_editor::CopilotProvider::Stub => "stub",
         };
         let codex_oauth = if provider_str == "codex_oauth" {
             Some(self.ensure_codex_oauth()?)
@@ -4526,11 +4520,7 @@ fn on_update(entity, dt) {
             engine_editor::CopilotProvider::Mimo => "mimo",
             engine_editor::CopilotProvider::DeepSeek => "deepseek",
             engine_editor::CopilotProvider::Glm => "glm",
-            engine_editor::CopilotProvider::Stub => {
-                return Err(EngineError::config(
-                    "Copilot is in stub mode. Go to Settings → Copilot to configure a real provider.",
-                ));
-            }
+            engine_editor::CopilotProvider::Stub => "stub",
         };
 
         let codex_oauth = if provider_str == "codex_oauth" {
@@ -8411,14 +8401,15 @@ mod tests {
         ChangedFile, DesktopEnvironment, EditorHost, QuestApplyDecision, QuestApplyPolicy,
         QuestProject, QuestReview, QuestReviewMetrics, QuestStatus, SoloQuestRunner,
         ValidationResult, asset_meta_path_for_source, copilot_execution_summary,
-        extract_codex_account_id, model_detection_config, normalize_relative_path,
-        parse_generated_quest_response, project_fingerprint, quest,
+        diff_workspace_snapshots, extract_codex_account_id, model_detection_config,
+        normalize_relative_path, parse_generated_quest_response, project_fingerprint, quest,
         quest_review_actions_for_result, resolve_existing_relative_path,
         resolve_writable_relative_path, should_continue_copilot,
         transaction_groups_from_changed_files, validate_quest_workspace, validations_failed,
     };
     use base64::Engine as _;
     use engine_editor::{CopilotProvider, FileEditorStore};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
 
@@ -9408,5 +9399,205 @@ mod tests {
                 .iter()
                 .any(|decision| decision["kind"] == "export")
         );
+    }
+
+    #[test]
+    fn quest_apply_rejects_file_not_present_in_review_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/real.rs"), "real\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/real.rs".to_owned(),
+            additions: 1,
+            deletions: 0,
+            status: "modified".to_owned(),
+            diff: "diff".to_owned(),
+        }];
+        let (id, _workspace_root) =
+            create_reviewable_quest(&mut host, &project_root, changed_files);
+
+        let error = host
+            .handle(
+                "quest/apply",
+                &serde_json::json!({
+                    "id": id,
+                    "files": ["src/real.rs", "src/fake.rs"]
+                }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not present in the review bundle"));
+    }
+
+    #[test]
+    fn quest_apply_rejects_empty_file_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/main.rs"), "old\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/main.rs".to_owned(),
+            additions: 1,
+            deletions: 0,
+            status: "modified".to_owned(),
+            diff: "diff".to_owned(),
+        }];
+        let (id, _workspace_root) =
+            create_reviewable_quest(&mut host, &project_root, changed_files);
+
+        let error = host
+            .handle(
+                "quest/apply",
+                &serde_json::json!({ "id": id, "files": [] }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn quest_apply_rejects_path_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/main.rs"), "old\n").unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "../../etc/passwd".to_owned(),
+            additions: 1,
+            deletions: 0,
+            status: "added".to_owned(),
+            diff: "diff".to_owned(),
+        }];
+        let (id, _workspace_root) =
+            create_reviewable_quest(&mut host, &project_root, changed_files);
+
+        let result = host.handle("quest/apply", &serde_json::json!({ "id": id }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn quest_rollback_rejects_unknown_rollback_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let changed_files = vec![ChangedFile {
+            path: "src/main.rs".to_owned(),
+            additions: 1,
+            deletions: 0,
+            status: "modified".to_owned(),
+            diff: "diff".to_owned(),
+        }];
+        let (id, _workspace_root) =
+            create_reviewable_quest(&mut host, &project_root, changed_files);
+
+        let error = host
+            .handle(
+                "quest/rollback",
+                &serde_json::json!({ "id": id, "rollback_id": "nonexistent" }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not linked"));
+    }
+
+    #[test]
+    fn normalize_relative_path_rejects_symlink_like_paths() {
+        // Parent traversal
+        assert!(normalize_relative_path("../../etc/shadow").is_err());
+        // Absolute paths
+        assert!(normalize_relative_path("/etc/passwd").is_err());
+        // Empty
+        assert!(normalize_relative_path("").is_err());
+        // CurDir only
+        assert!(normalize_relative_path("././.").is_err());
+        // Valid path
+        assert!(normalize_relative_path("src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn diff_workspace_snapshots_handles_no_change_execution() {
+        let before = BTreeMap::from([
+            ("src/main.rs".to_owned(), b"fn main() {}".to_vec()),
+            ("Cargo.toml".to_owned(), b"[package]".to_vec()),
+        ]);
+        let after = before.clone();
+
+        let changed = diff_workspace_snapshots(&before, &after);
+        assert!(changed.is_empty(), "no-change execution should produce empty diff");
+    }
+
+    #[test]
+    fn diff_workspace_snapshots_handles_binary_hash_only_entries() {
+        // Simulate two large files represented as hash-only entries
+        let hash_a = b"__BINARY_HASH__\x01\x02\x03\x04\x05\x06\x07\x08";
+        let hash_b = b"__BINARY_HASH__\x11\x12\x13\x14\x15\x16\x17\x18";
+        let before = BTreeMap::from([
+            ("models/player.amdl".to_owned(), hash_a.to_vec()),
+        ]);
+        // Same hash = no change
+        let after_same = BTreeMap::from([
+            ("models/player.amdl".to_owned(), hash_a.to_vec()),
+        ]);
+        assert!(diff_workspace_snapshots(&before, &after_same).is_empty());
+
+        // Different hash = modified
+        let after_diff = BTreeMap::from([
+            ("models/player.amdl".to_owned(), hash_b.to_vec()),
+        ]);
+        let changed = diff_workspace_snapshots(&before, &after_diff);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].status, "modified");
+
+        // Missing file = deleted
+        let after_deleted = BTreeMap::new();
+        let changed = diff_workspace_snapshots(&after_deleted, &before);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].status, "added");
+    }
+
+    #[test]
+    fn quest_apply_rejects_when_not_in_review_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let mut host = host_with_quest_root(temp.path());
+        let created = host
+            .quest_store
+            .create(
+                "Non-review apply".to_owned(),
+                "Try apply on draft".to_owned(),
+                "# Non-review apply\n\n## Goal\n\nReject.".to_owned(),
+                quest_project(&project_root),
+            )
+            .unwrap();
+
+        let error = host
+            .handle(
+                "quest/apply",
+                &serde_json::json!({ "id": created.record.id }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("review"));
+    }
+
+    #[test]
+    fn project_fingerprint_changes_when_file_is_modified() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(project_root.join("a.txt"), "before").unwrap();
+
+        let before = project_fingerprint(&project_root).unwrap();
+
+        fs::write(project_root.join("a.txt"), "after").unwrap();
+        let after = project_fingerprint(&project_root).unwrap();
+
+        assert_ne!(before, after, "fingerprint must change when file content changes");
     }
 }

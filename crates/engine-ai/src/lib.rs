@@ -200,6 +200,12 @@ impl AiRequest {
             tools: Vec::new(),
         }
     }
+
+    /// Adds tool definitions to this request.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
 }
 
 /// Response returned by an AI model.
