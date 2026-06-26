@@ -3,17 +3,10 @@
 
 //! Asset database, registry, manifest, dependency, import, and reload primitives.
 
-pub mod amdl;
 pub mod registry;
 pub mod resource_trait;
 pub mod resource_types;
 
-pub use amdl::{
-    AMDL_HEADER, AmdlColliderDecl, AmdlColliderShape, AmdlDiagnostic, AmdlDocument, AmdlLodDecl,
-    AmdlMaterialDecl, AmdlMeshDecl, AmdlMeshSource, AmdlModelDecl, AmdlParserError,
-    AmdlPrimitiveKind, AmdlRigidbodyDecl, AmdlRigidbodyMode, AmdlSocketDecl, AmdlValidator,
-    AmdlValue, compile_amdl, diagnose_amdl, parse_amdl,
-};
 pub use registry::ResourceTypeRegistry;
 pub use resource_trait::{Resource, ResourceHandle as TypedResourceHandle};
 pub use resource_types::{
@@ -378,6 +371,60 @@ impl MaterialFormat {
         ensure_schema("material", parsed.version)?;
         Ok(parsed)
     }
+
+    /// Parses a native Varg material asset.
+    pub fn from_vasset(input: &str) -> Result<Self, AssetError> {
+        let mut shader = AssetGuid::from_u128(0);
+        let mut parameters = HashMap::new();
+
+        for raw_line in input.lines() {
+            let line = raw_line
+                .split_once("//")
+                .map_or(raw_line, |(line, _)| line)
+                .trim();
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim().trim_end_matches(',');
+                match key {
+                    "shader" => {
+                        shader = parse_vasset_shader(value)?;
+                    }
+                    "roughness" | "metallic" => {
+                        let parsed = value.parse::<f32>().map_err(|source| AssetError::Parse {
+                            format: "vasset material",
+                            diagnostic: AssetDiagnostic::new(format!(
+                                "invalid {key} value `{value}`: {source}"
+                            )),
+                        })?;
+                        parameters.insert(key.to_string(), parsed);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(Self {
+            version: CURRENT_SCHEMA_VERSION,
+            shader,
+            textures: HashMap::new(),
+            parameters,
+        })
+    }
+}
+
+fn parse_vasset_shader(value: &str) -> Result<AssetGuid, AssetError> {
+    let value = value.trim_matches('"');
+    if value.eq_ignore_ascii_case("pbr") || value.eq_ignore_ascii_case("builtin/pbr") {
+        return Ok(AssetGuid::from_u128(0));
+    }
+    u128::from_str_radix(value, 16)
+        .map(AssetGuid::from_u128)
+        .map_err(|source| AssetError::Parse {
+            format: "vasset material",
+            diagnostic: AssetDiagnostic::new(format!(
+                "shader must be `pbr`, `builtin/pbr`, or a 128-bit hex GUID: {source}"
+            )),
+        })
 }
 
 /// Decoded texture payload ready for a render backend upload.
@@ -2072,7 +2119,6 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
         .map(str::to_ascii_lowercase)?;
     match extension.as_str() {
         "png" | "jpg" | "jpeg" => Some((ResourceKind::Texture, "image")),
-        "amdl" => Some((ResourceKind::Model, "amdl")),
         "gltf" | "glb" => Some((ResourceKind::Model, "gltf")),
         "wgsl" | "glsl" => Some((ResourceKind::Shader, "shader-source")),
         "wav" | "ogg" => Some((ResourceKind::Audio, "audio")),
@@ -2473,14 +2519,11 @@ fn discover_asset_dependencies(
         path: path.to_path_buf(),
         source,
     })?;
-    let material = if importer == "material-toml" {
-        MaterialFormat::from_toml(&text)
-    } else {
-        MaterialFormat::from_json(&text)
-    }
-    .map_err(EngineError::from)?;
+    let material = parse_material_format(&text, importer).map_err(EngineError::from)?;
     let mut dependencies = material.textures.values().copied().collect::<Vec<_>>();
-    dependencies.push(material.shader);
+    if material.shader != AssetGuid::from_u128(0) {
+        dependencies.push(material.shader);
+    }
     dependencies.sort();
     dependencies.dedup();
     Ok(dependencies)
@@ -2751,57 +2794,12 @@ fn import_cubemap_payload(path: &Path, importer: &str, bytes: &[u8]) -> Imported
 #[cfg(feature = "importers")]
 fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
     let mut diagnostics = Vec::new();
-    let (payload, summary) = if importer == "amdl" {
-        match std::str::from_utf8(bytes)
-            .map_err(|error| error.to_string())
-            .and_then(|source| {
-                compile_amdl(source).map_err(|diagnostics| {
-                    diagnostics
-                        .into_iter()
-                        .map(|diagnostic| diagnostic.message)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                })
-            }) {
-            Ok(document) => match serde_json::to_vec(&document) {
-                Ok(encoded) => {
-                    let model_count = document.models.len();
-                    (
-                        Arc::from(encoded),
-                        format!(
-                            "Aster model declaration imported by {importer}: {model_count} models"
-                        ),
-                    )
-                }
-                Err(error) => {
-                    diagnostics.push(
-                        AssetDiagnostic::new(format!("Aster model encode failed: {error}"))
-                            .with_path(path),
-                    );
-                    (
-                        Arc::from(bytes),
-                        format!("{} bytes model source imported by {importer}", bytes.len()),
-                    )
-                }
-            },
-            Err(error) => {
-                diagnostics.push(
-                    AssetDiagnostic::new(format!("Aster model parse failed: {error}"))
-                        .with_path(path),
-                );
-                (
-                    Arc::from(bytes),
-                    format!("{} bytes model source imported by {importer}", bytes.len()),
-                )
-            }
-        }
-    } else if path
+    let (payload, summary) = if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
-        })
-    {
+        }) {
         match import_gltf_model(path) {
             Ok(model) => {
                 let primitive_count = model.meshes.len();
@@ -2946,21 +2944,12 @@ fn import_gltf_model(path: &Path) -> EngineResult<ModelResource> {
 #[cfg(feature = "importers")]
 fn import_material_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
     let mut diagnostics = Vec::new();
-    let material = if importer == "material-toml" {
-        std::str::from_utf8(bytes)
-            .map_err(|error| AssetError::Parse {
-                format: "material",
-                diagnostic: AssetDiagnostic::new(error.to_string()).with_path(path),
-            })
-            .and_then(MaterialFormat::from_toml)
-    } else {
-        std::str::from_utf8(bytes)
-            .map_err(|error| AssetError::Parse {
-                format: "material",
-                diagnostic: AssetDiagnostic::new(error.to_string()).with_path(path),
-            })
-            .and_then(MaterialFormat::from_json)
-    };
+    let material = std::str::from_utf8(bytes)
+        .map_err(|error| AssetError::Parse {
+            format: "material",
+            diagnostic: AssetDiagnostic::new(error.to_string()).with_path(path),
+        })
+        .and_then(|text| parse_material_format(text, importer));
     let summary = match material {
         Ok(material) => format!(
             "material imported by {importer}: {} textures, {} parameters",
@@ -2979,6 +2968,14 @@ fn import_material_payload(path: &Path, importer: &str, bytes: &[u8]) -> Importe
         bytes: Arc::from(bytes),
         summary,
         diagnostics,
+    }
+}
+
+fn parse_material_format(input: &str, importer: &str) -> Result<MaterialFormat, AssetError> {
+    match importer {
+        "material-toml" => MaterialFormat::from_toml(input),
+        "vasset" => MaterialFormat::from_vasset(input),
+        _ => MaterialFormat::from_json(input),
     }
 }
 

@@ -350,10 +350,9 @@ Do not use long prompts to carry:
 
 Do use examples to teach:
 
-- `.amdl` structure and idioms;
-- `.ascn` scene composition;
-- `.abv` behavior patterns;
-- `.as` runtime hooks;
+- `.varg` script and authoring idioms;
+- `.vscene` scene composition;
+- `.vasset` asset/material declarations;
 - common diagnostics and fixes;
 - project-specific conventions.
 
@@ -363,7 +362,7 @@ Aster should maintain a structured Example Bank.
 
 Example organization:
 
-- by language: `.amdl`, `.ascn`, `.abv`, `.as`;
+- by language: `.varg`, `.vscene`, `.vasset`;
 - by task: player controller, patrol enemy, camera setup, light setup, audio source, destructible object, UI rule;
 - by concept: transforms, references, colliders, rigidbodies, materials, selectors, conditions, custom hooks;
 - by diagnostic: invalid syntax, missing asset, wrong field, unsupported action, unsafe script pattern.

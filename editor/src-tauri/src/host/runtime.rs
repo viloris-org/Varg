@@ -97,7 +97,7 @@ impl EditorHost {
                 .map(|root| PathBuf::from(root.as_str()))
                 .collect(),
             project.root.join(&project.manifest.asset_root),
-            project.scene.to_json(project.name())?,
+            project.scene.to_scene_file(project.name())?,
         ))
     }
 
@@ -122,7 +122,7 @@ impl EditorHost {
                 .map(|root| PathBuf::from(root.as_str()))
                 .collect(),
             project.root.join(&project.manifest.asset_root),
-            project.scene.to_json(project.name())?,
+            project.scene.to_scene_file(project.name())?,
         ))
     }
 

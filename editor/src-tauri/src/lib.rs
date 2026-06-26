@@ -457,8 +457,7 @@ fn resolve_writable_relative_path(root: &Path, path: &str) -> EngineResult<PathB
 fn is_text_project_file(extension: &str, file_name: &str) -> bool {
     matches!(
         extension,
-        "" | "amdl"
-            | "css"
+        "" | "css"
             | "html"
             | "json"
             | "js"
@@ -1362,7 +1361,6 @@ impl EditorHost {
             "project/reimport_asset" => self.project_reimport_asset(params),
             "project/read_file" => self.project_read_file(params),
             "project/read_project_file" => self.project_read_project_file(params),
-            "project/check_amdl" => self.project_check_amdl(params),
             "project/check_script" => self.project_check_script(params),
             "project/write_file" => self.project_write_file(params),
             "project/write_project_file" => self.project_write_project_file(params),
@@ -2085,14 +2083,14 @@ fn save_project_context_scene(context: &engine_editor::ProjectContext) -> Engine
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("Scene");
-    let json = context.scene.to_json(scene_name)?;
+    let source = engine_script_varg::serialize_scene_to_vscene(&context.scene, scene_name)?;
     if let Some(parent) = context.scene_path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    std::fs::write(&context.scene_path, json).map_err(|source| EngineError::Filesystem {
+    std::fs::write(&context.scene_path, source).map_err(|source| EngineError::Filesystem {
         path: context.scene_path.clone(),
         source,
     })
@@ -2259,7 +2257,7 @@ fn varg_scene_template(name: &str) -> String {
     camera "MainCamera" {{
         transform {{
             position: Vec3(0, 3, 8)
-            rotation: Euler(-20, 0, 0)
+            rotation: Vec3(-20, 0, 0)
         }}
 
         perspective {{
@@ -2271,10 +2269,15 @@ fn varg_scene_template(name: &str) -> String {
         primary: true
     }}
 
-    light "Sun" {{
-        kind: directional
-        intensity: 2.0
-        rotation: Euler(-45, 35, 0)
+    entity "Sun" {{
+        transform {{
+            rotation: Vec3(-45, 35, 0)
+        }}
+
+        light {{
+            type: directional
+            intensity: 2.0
+        }}
     }}
 
     entity "Ground" {{

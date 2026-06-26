@@ -1200,6 +1200,11 @@ pub fn register_core_commands(registry: &mut CommandRegistry) {
     }
 }
 
+fn scene_snapshot_json(scene: &engine_ecs::Scene, name: &str) -> EngineResult<String> {
+    serde_json::to_string_pretty(&scene.to_scene_file(name)?)
+        .map_err(|error| EngineError::other(format!("scene snapshot failed: {error}")))
+}
+
 /// Registers executable AI-agent commands.
 ///
 /// These commands have handler closures and can be invoked by an AI agent
@@ -1223,7 +1228,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 entity.handle().slot(),
                 entity.handle().generation().get()
             );
-            let snapshot = ctx.project.scene.to_json("after_create")?;
+            let snapshot = scene_snapshot_json(&ctx.project.scene, "after_create")?;
             Ok(UndoCommand::new(
                 "Create Empty",
                 format!("entity:{entity_id}"),
@@ -1257,7 +1262,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 "Create Camera",
                 format!("entity:{entity_id}"),
                 "",
-                ctx.project.scene.to_json("after_create_camera")?,
+                scene_snapshot_json(&ctx.project.scene, "after_create_camera")?,
             ))
         },
     );
@@ -1286,7 +1291,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 "Create Light",
                 format!("entity:{entity_id}"),
                 "",
-                ctx.project.scene.to_json("after_create_light")?,
+                scene_snapshot_json(&ctx.project.scene, "after_create_light")?,
             ))
         },
     );
@@ -1330,7 +1335,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 "Add Script",
                 format!("entity:{entity_id}"),
                 "",
-                ctx.project.scene.to_json("after_add_script")?,
+                scene_snapshot_json(&ctx.project.scene, "after_add_script")?,
             ))
         },
     );
@@ -1353,7 +1358,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 "Add Rigidbody",
                 format!("entity:{}", entity.handle().slot()),
                 "",
-                ctx.project.scene.to_json("after_add_rigidbody")?,
+                scene_snapshot_json(&ctx.project.scene, "after_add_rigidbody")?,
             ))
         },
     );
@@ -1376,7 +1381,7 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                 "Add Collider",
                 format!("entity:{}", entity.handle().slot()),
                 "",
-                ctx.project.scene.to_json("after_add_collider")?,
+                scene_snapshot_json(&ctx.project.scene, "after_add_collider")?,
             ))
         },
     );
@@ -1398,9 +1403,11 @@ pub fn register_ai_commands(registry: &mut CommandRegistry) {
                     path: scene_path.clone(),
                     source,
                 })?;
-            let after = ctx.project.scene.to_json("save")?;
+            let after = serde_json::to_string_pretty(&ctx.project.scene.to_scene_file("save")?)
+                .map_err(|error| EngineError::other(format!("scene snapshot failed: {error}")))?;
+            let source = engine_script_varg::serialize_scene_to_vscene(&ctx.project.scene, "save")?;
             let tmp_path = scene_path.with_extension("tmp");
-            fs::write(&tmp_path, &after).map_err(|source| EngineError::Filesystem {
+            fs::write(&tmp_path, &source).map_err(|source| EngineError::Filesystem {
                 path: tmp_path.clone(),
                 source,
             })?;
@@ -1680,7 +1687,7 @@ mod tests {
 
         let ctx = ProjectContext::open(&project_root).unwrap();
 
-        assert_eq!(ctx.manifest.name, "Aster Example");
+        assert_eq!(ctx.manifest.name, "Varg Example");
         assert!(ctx.scene.object_count() > 0);
         assert_eq!(ctx.root, project_root);
     }
@@ -1748,7 +1755,7 @@ mod tests {
             asset_imports: Vec::new(),
             scene_dirty: false,
             root: std::env::temp_dir(),
-            scene_path: std::env::temp_dir().join("main.aster_scene.json"),
+            scene_path: std::env::temp_dir().join("main.vscene"),
         };
 
         let ai_ctx = ctx.to_ai_context();

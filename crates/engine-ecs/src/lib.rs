@@ -24,14 +24,15 @@ pub use scene::{
     CameraComponentData, CameraRole, ColliderComponentData, ComponentData,
     FluidVolumeComponentData, GameObject, LifecycleStage, Light2DComponentData, LightComponentData,
     MaterialRef, MeshRendererComponentData, ObjectIdAllocator, Occluder2DComponentData,
-    ParticleEmitterComponentData, RigidbodyComponentData, Scene, SceneFile, SceneMode,
-    ScriptComponent, SkinnedMeshRendererComponentData, SkyboxComponentData, Sprite2DComponentData,
-    TileMap2DComponentData, WindZoneComponentData,
+    ParticleEmitterComponentData, RigidbodyComponentData, SCENE_FILE_VERSION, Scene, SceneFile,
+    SceneMode, ScriptComponent, SerializedGameObject, SkinnedMeshRendererComponentData,
+    SkyboxComponentData, Sprite2DComponentData, TileMap2DComponentData, WindZoneComponentData,
 };
 pub use schema::{
     BuildConfiguration, BuildRenderSettings, ComponentFieldKind, ComponentFieldSchema,
     ComponentSchema, ComponentSchemaRegistry, EditorPreferences, FormatDiagnostic, FormatVersion,
-    PrefabFile, ProjectManifest, SchemaEvolution,
+    PROJECT_MANIFEST_FILE_NAME, PrefabFile, ProjectManifest, SchemaEvolution,
+    project_manifest_path,
 };
 pub use transform::TransformHierarchy;
 pub use world::{Component, ComponentStorage, Entity, World};

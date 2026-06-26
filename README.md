@@ -3,7 +3,7 @@
 [![CI](https://github.com/viloris-org/Varg/actions/workflows/core.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/core.yml)
 [![Nightly](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml/badge.svg)](https://github.com/viloris-org/Varg/actions/workflows/nightly.yml)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL%202.0-blue.svg)](LICENSE)
-![Rust](https://img.shields.io/badge/Rust-1.78+-orange.svg)
+![Rust](https://img.shields.io/badge/Rust-1.96+-orange.svg)
 
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
@@ -28,7 +28,7 @@ bun install
 bun run dev:tauri
 ```
 
-> **Prerequisites:** [Rust ≥ 1.78](https://rustup.rs/), [Bun ≥ 1.0](https://bun.sh/),
+> **Prerequisites:** [Rust ≥ 1.96](https://rustup.rs/), [Bun ≥ 1.3.14](https://bun.sh/),
 > [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/).
 > Linux users: `sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev
 > libayatana-appindicator3-dev librsvg2-dev`

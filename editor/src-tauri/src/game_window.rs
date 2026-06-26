@@ -37,7 +37,7 @@ pub struct GameRuntimeSnapshot {
     project_root: PathBuf,
     script_roots: Vec<PathBuf>,
     asset_root: PathBuf,
-    scene_json: String,
+    scene_file: engine_ecs::SceneFile,
 }
 
 impl GameRuntimeSnapshot {
@@ -47,14 +47,14 @@ impl GameRuntimeSnapshot {
         project_root: PathBuf,
         script_roots: Vec<PathBuf>,
         asset_root: PathBuf,
-        scene_json: String,
+        scene_file: engine_ecs::SceneFile,
     ) -> Self {
         Self {
             config,
             project_root,
             script_roots,
             asset_root,
-            scene_json,
+            scene_file,
         }
     }
 
@@ -62,7 +62,7 @@ impl GameRuntimeSnapshot {
         self,
         renderer: WgpuRenderDevice,
     ) -> engine_core::EngineResult<RuntimeServices<WgpuRenderDevice>> {
-        let scene = engine_ecs::Scene::from_json(&self.scene_json)?;
+        let scene = engine_ecs::Scene::from_scene_file(self.scene_file)?;
         let mut runtime = RuntimeServices::with_renderer(self.config, renderer);
         runtime.set_project_root(self.project_root);
         runtime.set_script_roots(self.script_roots);
@@ -408,7 +408,7 @@ mod tests {
                 PathBuf::from("."),
                 vec![PathBuf::from("scripts")],
                 PathBuf::from("assets"),
-                scene.to_json("test").unwrap(),
+                scene.to_scene_file("test").unwrap(),
             ),
         );
         for _ in 0..20 {

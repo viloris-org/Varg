@@ -1,6 +1,9 @@
 //! Project, prefab, editor preference, and build configuration schemas.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use engine_core::{EngineError, EngineResult};
 
@@ -8,6 +11,8 @@ use crate::scene::{SCENE_FILE_VERSION, SceneFile};
 
 /// Current project manifest schema version.
 pub const PROJECT_MANIFEST_VERSION: u32 = 1;
+/// Canonical project manifest filename.
+pub const PROJECT_MANIFEST_FILE_NAME: &str = "Varg.toml";
 /// Current prefab schema version.
 pub const PREFAB_FILE_VERSION: u32 = 1;
 /// Current editor preferences schema version.
@@ -449,20 +454,20 @@ impl ProjectManifest {
     pub fn example() -> Self {
         Self {
             format: FormatVersion::new(PROJECT_MANIFEST_VERSION),
-            name: "Aster Example".to_string(),
+            name: "Varg Example".to_string(),
             asset_root: "assets".to_string(),
             script_roots: default_script_roots(),
-            default_scene: "scenes/example.aster_scene.json".to_string(),
+            default_scene: "scenes/example.vscene".to_string(),
             build_config: "build.runtime-min.toml".to_string(),
             evolution: SchemaEvolution::default(),
         }
     }
 
-    /// Loads a project manifest from `aster.project.toml` in the given project root.
+    /// Loads a project manifest from `Varg.toml` in the given project root.
     ///
     /// Returns a descriptive error when the file is missing or contains invalid TOML.
     pub fn load(project_root: &Path) -> EngineResult<Self> {
-        let manifest_path = project_root.join("aster.project.toml");
+        let manifest_path = project_manifest_path(project_root);
         let input =
             fs::read_to_string(&manifest_path).map_err(|source| EngineError::Filesystem {
                 path: manifest_path.clone(),
@@ -545,6 +550,11 @@ impl ProjectManifest {
             EngineError::other(format!("project manifest serialization failed: {error}"))
         })
     }
+}
+
+/// Returns the canonical project manifest path.
+pub fn project_manifest_path(project_root: &Path) -> PathBuf {
+    project_root.join(PROJECT_MANIFEST_FILE_NAME)
 }
 
 /// Prefab file format.
@@ -728,7 +738,7 @@ mod tests {
         let manifest = ProjectManifest::example();
 
         assert!(manifest.diagnostics().is_empty());
-        assert!(manifest.to_toml().unwrap().contains("Aster Example"));
+        assert!(manifest.to_toml().unwrap().contains("Varg Example"));
     }
 
     #[test]
@@ -752,22 +762,16 @@ mod tests {
 
     #[test]
     fn example_files_parse() {
-        let manifest = include_str!("../../../examples/project/aster.project.toml");
-        let scene = include_str!("../../../examples/project/scenes/example.aster_scene.json");
-        let prefab = include_str!("../../../examples/project/prefabs/player.aster_prefab.json");
+        let manifest = include_str!("../../../examples/project/Varg.toml");
         let preferences = include_str!("../../../examples/project/editor.preferences.toml");
         let build = include_str!("../../../examples/project/build.runtime-min.toml");
 
         let manifest = toml::from_str::<ProjectManifest>(manifest).unwrap();
-        let scene = serde_json::from_str::<SceneFile>(scene).unwrap();
-        let prefab = serde_json::from_str::<PrefabFile>(prefab).unwrap();
         let preferences = toml::from_str::<EditorPreferences>(preferences).unwrap();
         let build = toml::from_str::<BuildConfiguration>(build).unwrap();
 
         assert!(manifest.diagnostics().is_empty());
         assert_eq!(manifest.build_config, "build.runtime-min.toml");
-        assert_eq!(scene.objects.len(), 2);
-        assert!(prefab.diagnostics().is_empty());
         assert_eq!(preferences.theme, "system");
         assert!(build.diagnostics().is_empty());
         assert_eq!(build.render.frame_generation, "disabled");
@@ -781,7 +785,7 @@ mod tests {
 
         let manifest = ProjectManifest::load(&project_root).unwrap();
 
-        assert_eq!(manifest.name, "Aster Example");
+        assert_eq!(manifest.name, "Varg Example");
         assert_eq!(manifest.asset_root, "assets");
         assert_eq!(manifest.script_roots, vec!["scripts".to_string()]);
         assert_eq!(manifest.build_config, "build.runtime-min.toml");
@@ -792,14 +796,14 @@ mod tests {
     fn load_returns_error_for_missing_file() {
         let result = ProjectManifest::load(Path::new("/nonexistent/path"));
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("aster.project.toml"));
+        assert!(error.contains("Varg.toml"));
     }
 
     #[test]
     fn from_toml_applies_defaults_for_missing_optional_fields() {
         let minimal_toml = r#"
 name = "Minimal"
-default_scene = "scenes/main.json"
+default_scene = "scenes/main.vscene"
 
 [format]
 version = 1

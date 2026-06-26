@@ -23,7 +23,8 @@ use engine_core::{
 };
 use engine_ecs::{
     CameraComponentData, CameraRole, ComponentData, LightComponentData, MeshRendererComponentData,
-    ProjectManifest, Scene, world::Entity,
+    PROJECT_MANIFEST_FILE_NAME, ProjectManifest, Scene, SceneFile, project_manifest_path,
+    world::Entity,
 };
 use engine_i18n::Translations;
 use engine_render::{RenderTargetDesc, RenderWorld};
@@ -360,14 +361,17 @@ impl HubState {
         let mut manifest = ProjectManifest::example();
         manifest.name = plan.name.clone();
         manifest.asset_root = "assets".to_owned();
-        manifest.default_scene = "scenes/main.aster_scene.json".to_owned();
+        manifest.default_scene = "scenes/main.vscene".to_owned();
 
-        write_file(&plan.path.join("aster.project.toml"), &manifest.to_toml()?)?;
+        write_file(
+            &plan.path.join(PROJECT_MANIFEST_FILE_NAME),
+            &manifest.to_toml()?,
+        )?;
 
         let scene = scene_for_template(&plan.template_id)?;
         write_file(
             &plan.path.join(&manifest.default_scene),
-            &scene.to_json(&plan.name)?,
+            &engine_script_varg::serialize_scene_to_vscene(&scene, &plan.name)?,
         )?;
 
         Ok(())
@@ -445,7 +449,7 @@ impl HubState {
 pub struct ProjectContext {
     /// Project root path.
     pub root: PathBuf,
-    /// Parsed project manifest from `aster.project.toml`.
+    /// Parsed project manifest from `Varg.toml`.
     pub manifest: ProjectManifest,
     /// Editable scene graph loaded from the default scene file.
     pub scene: Scene,
@@ -463,11 +467,39 @@ pub struct ProjectContext {
     pub scene_path: PathBuf,
 }
 
+fn load_scene_from_path(path: &Path) -> EngineResult<Scene> {
+    let scene_text = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("vscene") {
+        return Err(EngineError::config(format!(
+            "expected native .vscene scene file, got {}",
+            path.display()
+        )));
+    }
+    let (scene, diagnostics) =
+        engine_script_varg::compile_vscene_source_to_scene(path, &scene_text);
+    if let Some(diagnostic) = diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.blocking)
+    {
+        return Err(EngineError::config(format!(
+            "{} at {}:{}: {}",
+            diagnostic.code,
+            diagnostic.line.unwrap_or(1),
+            diagnostic.column.unwrap_or(1),
+            diagnostic.message
+        )));
+    }
+    scene.ok_or_else(|| EngineError::config("native .vscene did not produce a scene"))
+}
+
 impl ProjectContext {
     /// Opens a project from `project_root` by loading its manifest, default scene, and asset root.
     pub fn open(project_root: impl Into<PathBuf>) -> EngineResult<Self> {
         let project_root = project_root.into();
-        let manifest_path = project_root.join("aster.project.toml");
+        let manifest_path = project_manifest_path(&project_root);
         let manifest_text =
             fs::read_to_string(&manifest_path).map_err(|source| EngineError::Filesystem {
                 path: manifest_path.clone(),
@@ -483,12 +515,7 @@ impl ProjectContext {
             )));
         }
         let scene_path = project_root.join(&manifest.default_scene);
-        let scene_text =
-            fs::read_to_string(&scene_path).map_err(|source| EngineError::Filesystem {
-                path: scene_path.clone(),
-                source,
-            })?;
-        let scene = Scene::from_json(&scene_text)?;
+        let scene = load_scene_from_path(&scene_path)?;
         let mut database = AssetDatabase::new(
             project_root.join(&manifest.asset_root),
             project_root.join("builtin"),
@@ -1026,8 +1053,8 @@ impl EditorShell {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Scene");
-        let json = project.scene.to_json(scene_name)?;
-        Self::write_scene_atomic(&project.scene_path.clone(), &json)?;
+        let source = engine_script_varg::serialize_scene_to_vscene(&project.scene, scene_name)?;
+        Self::write_scene_atomic(&project.scene_path.clone(), &source)?;
         project.scene_dirty = false;
         Ok(project.scene_path.display().to_string())
     }
@@ -1044,22 +1071,27 @@ impl EditorShell {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Scene");
-        let json = project.scene.to_json(scene_name)?;
-        Self::write_scene_atomic(path, &json)?;
+        if path.extension().and_then(|extension| extension.to_str()) != Some("vscene") {
+            return Err(EngineError::config(
+                "native scenes must be saved with a .vscene extension",
+            ));
+        }
+        let source = engine_script_varg::serialize_scene_to_vscene(&project.scene, scene_name)?;
+        Self::write_scene_atomic(path, &source)?;
         project.scene_path = path.to_path_buf();
         project.scene_dirty = false;
         Ok(path.display().to_string())
     }
 
-    /// Writes scene JSON atomically: `.tmp` file write → rename, with `.bak` backup.
-    fn write_scene_atomic(target: &Path, json: &str) -> EngineResult<()> {
+    /// Writes scene source atomically: `.tmp` file write → rename, with `.bak` backup.
+    fn write_scene_atomic(target: &Path, source_text: &str) -> EngineResult<()> {
         if target.exists() {
-            let bak_path = target.with_extension("json.bak");
+            let bak_path = target.with_extension("vscene.bak");
             let _ = fs::remove_file(&bak_path);
             let _ = fs::copy(target, &bak_path);
         }
-        let tmp_path = target.with_extension("json.tmp");
-        fs::write(&tmp_path, json).map_err(|source| EngineError::Filesystem {
+        let tmp_path = target.with_extension("vscene.tmp");
+        fs::write(&tmp_path, source_text).map_err(|source| EngineError::Filesystem {
             path: tmp_path.clone(),
             source,
         })?;
@@ -1083,11 +1115,7 @@ impl EditorShell {
         let Some(project) = self.project.as_mut() else {
             return Err(EngineError::config("no project is open"));
         };
-        let scene_text = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        project.scene = Scene::from_json(&scene_text)?;
+        project.scene = load_scene_from_path(path)?;
         project.scene_path = path.to_path_buf();
         project.scene_dirty = false;
         self.selection.clear();
@@ -1144,7 +1172,10 @@ impl EditorShell {
         let Some(project) = self.project.as_mut() else {
             return Err(EngineError::config("no project is open"));
         };
-        project.scene = Scene::from_json(snapshot)?;
+        let file = serde_json::from_str::<SceneFile>(snapshot).map_err(|error| {
+            EngineError::config(format!("scene snapshot parse failed: {error}"))
+        })?;
+        project.scene = Scene::from_scene_file(file)?;
         project.scene_dirty = true;
         Ok(())
     }
@@ -1158,7 +1189,8 @@ impl EditorShell {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Scene");
-        project.scene.to_json(scene_name)
+        serde_json::to_string_pretty(&project.scene.to_scene_file(scene_name)?)
+            .map_err(|error| EngineError::other(format!("scene snapshot failed: {error}")))
     }
 
     fn selected_entity(&self) -> EngineResult<Entity> {

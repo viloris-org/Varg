@@ -1269,7 +1269,7 @@ export default function CalmEditorPrototype({
   });
   const scriptAssets = useMemo(() => (
     projectAssets
-      .filter((asset) => /script|model/i.test(asset.kind) || /\.(varg|vscene|vasset|amdl|js|ts|lua)$/i.test(asset.path))
+      .filter((asset) => /script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path))
       .map((asset) => asset.path)
   ), [projectAssets]);
   const selectedEditorPath = selectedProjectFile?.path ?? selectedScript;
@@ -1816,9 +1816,7 @@ export default function CalmEditorPrototype({
     const lowerPath = selectedDiagnosticPath.toLowerCase();
     const checkMethod = lowerPath.endsWith('.varg') || lowerPath.endsWith('.vscene') || lowerPath.endsWith('.vasset')
       ? 'project/check_script'
-      : lowerPath.endsWith('.amdl')
-        ? 'project/check_amdl'
-        : null;
+      : null;
     if (!checkMethod) {
       setScriptDiagnostics([]);
       return;
@@ -2086,7 +2084,7 @@ export default function CalmEditorPrototype({
                   type="button"
                   className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]"
                   onClick={() => {
-                    if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|amdl|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
+                    if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
                   }}
                 >
                   <span className="grid size-7 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)]">

@@ -126,9 +126,7 @@ impl EditorHost {
         let Some(project) = self.shell.project() else {
             return Err(EngineError::config("no project open"));
         };
-        // Round-trip clone via JSON
-        let scene_json = project.scene.to_json(project.name())?;
-        engine_ecs::Scene::from_json(&scene_json)
+        engine_ecs::Scene::from_scene_file(project.scene.to_scene_file(project.name())?)
     }
 
     pub(crate) fn get_copilot_settings(&self, _params: &Value) -> EngineResult<Value> {

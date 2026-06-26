@@ -28,7 +28,9 @@ use engine_core::math::{Transform, Vec3};
 use engine_core::{EngineConfig, EngineError, EngineResult, FrameCounter, TimeState, logging};
 #[cfg(feature = "audio")]
 use engine_ecs::AudioSourceComponentData;
-use engine_ecs::{BuildConfiguration, ComponentData, ProjectManifest, Scene};
+use engine_ecs::{
+    BuildConfiguration, ComponentData, ProjectManifest, Scene, project_manifest_path,
+};
 #[cfg(feature = "physics")]
 use engine_ecs::{BuoyancyProbeSetComponentData, FluidVolumeComponentData};
 #[cfg(feature = "physics")]
@@ -50,7 +52,9 @@ use engine_render::{
 use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
-use engine_script_varg::{VargRuntimeContext, VargScript, compile_script_source};
+use engine_script_varg::{
+    VargRuntimeContext, VargScript, compile_script_source, compile_vscene_source_to_scene,
+};
 
 /// Explicit runtime services. There is no hidden global mutable state.
 #[derive(Debug)]
@@ -956,12 +960,22 @@ impl<R: RenderDevice> RuntimeServices<R> {
             ResourceKind::Material => {
                 let text = std::str::from_utf8(&cpu.bytes)
                     .map_err(|error| EngineError::other(error.to_string()))?;
-                let material = if importer == "material-toml" {
-                    MaterialFormat::from_toml(text)
-                } else {
-                    MaterialFormat::from_json(text)
+                let material = match importer {
+                    "material-toml" => MaterialFormat::from_toml(text),
+                    "vasset" => MaterialFormat::from_vasset(text),
+                    _ => MaterialFormat::from_json(text),
                 }
                 .map_err(EngineError::from)?;
+                let material_name = format!("asset:{:032x}", guid.as_u128());
+                let metallic = material.parameters.get("metallic").copied().unwrap_or(0.0);
+                let roughness = material.parameters.get("roughness").copied().unwrap_or(0.5);
+                self.renderer.register_material_params(
+                    &material_name,
+                    [1.0, 1.0, 1.0, 1.0],
+                    metallic,
+                    roughness,
+                    [0.0, 0.0, 0.0],
+                );
                 self.material_resources.insert(guid.as_asset_id(), material);
             }
             ResourceKind::Audio => {
@@ -1938,7 +1952,7 @@ pub struct RuntimeProject {
 pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimeProject> {
     let project = project.as_ref();
     let manifest_path = if project.is_dir() {
-        project.join("aster.project.toml")
+        project_manifest_path(project)
     } else {
         project.to_path_buf()
     };
@@ -1960,11 +1974,7 @@ pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimePr
         )));
     }
     let scene_path = root.join(&manifest.default_scene);
-    let scene_text = fs::read_to_string(&scene_path).map_err(|source| EngineError::Filesystem {
-        path: scene_path.clone(),
-        source,
-    })?;
-    let scene = Scene::from_json(&scene_text)?;
+    let scene = load_scene_from_path(&scene_path)?;
     let build_path = root.join(&manifest.build_config);
     let build_text = fs::read_to_string(&build_path).map_err(|source| EngineError::Filesystem {
         path: build_path.clone(),
@@ -1985,6 +1995,33 @@ pub fn load_runtime_project(project: impl AsRef<Path>) -> EngineResult<RuntimePr
         build,
         scene,
     })
+}
+
+fn load_scene_from_path(path: &Path) -> EngineResult<Scene> {
+    let scene_text = fs::read_to_string(path).map_err(|source| EngineError::Filesystem {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("vscene") {
+        return Err(EngineError::config(format!(
+            "expected native .vscene scene file, got {}",
+            path.display()
+        )));
+    }
+    let (scene, diagnostics) = compile_vscene_source_to_scene(path, &scene_text);
+    if let Some(diagnostic) = diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.blocking)
+    {
+        return Err(EngineError::config(format!(
+            "{} at {}:{}: {}",
+            diagnostic.code,
+            diagnostic.line.unwrap_or(1),
+            diagnostic.column.unwrap_or(1),
+            diagnostic.message
+        )));
+    }
+    scene.ok_or_else(|| EngineError::config("native .vscene did not produce a scene"))
 }
 
 /// Extracts the active scene into a minimal render queue.

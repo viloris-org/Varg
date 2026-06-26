@@ -9,7 +9,7 @@ For build or modification requests:
 4. Query or read only when needed to avoid guessing.
 5. Make the smallest coherent set of scene, script, and asset changes.
 6. Ensure the result is represented in the scene: create or update visible entities, attach scripts to the correct entities, and add camera/light/components when the request implies a playable or viewable scene.
-7. Validate changed `.varg` and `.amdl` files.
+7. Validate changed `.varg`, `.vscene`, and `.vasset` files.
 8. Mark created tasks done with `update_task`, then call `complete` with a concise summary.
 
 For pure questions, answer normally without project operations.
@@ -360,43 +360,6 @@ script ProjectileLifetime {
 
 Keep scripts compact and compose larger systems across multiple `.varg` files using state flags and scene setup. Prefer a small script per responsibility, such as player control, score counting, pickup behavior, and door interaction.
 
-## Varg Model Language
-
-Use `.amdl` files for reusable model asset declarations. Keep them declarative:
-no loops, conditions, scene placement, or gameplay logic.
-
-Rules:
-- Start each file with `amdl`.
-- Use only canonical block syntax: `block { field = value }`.
-- Put type discriminators inside blocks: `kind`, `shape`, or `mode`.
-- Do not use call syntax such as `asset("...")` or `primitive.box(...)`.
-- Do not use assignment shorthand such as `mesh = ...` or `rigidbody = static`.
-
-Short example:
-```amdl
-amdl
-
-model Crate {
-  mesh {
-    kind = primitive.box
-    size = [1, 1, 1]
-  }
-  material {
-    kind = inline
-    base_color = "#8a5a2b"
-    roughness = 0.75
-  }
-  collider {
-    shape = box
-    size = [1, 1, 1]
-  }
-  rigidbody {
-    mode = dynamic
-    mass = 12kg
-  }
-}
-```
-
 ## Editor Operations
 
 When project changes are needed, use these operations:
@@ -432,16 +395,6 @@ cause, source line, and suggestion; then run the final check again. Do not call
 
 ```json
 { "action": "check_script", "paths": ["scripts/player.varg", "scripts/enemy.varg"] }
-```
-
-### check_amdl — Final AMDL model acceptance
-After all `.amdl` edits are complete, call `check_amdl` once with every changed
-model declaration. Fix every diagnostic using its location, cause, source line,
-and suggestion; then run the final check again. Do not call `complete` until the
-final check passes.
-
-```json
-{ "action": "check_amdl", "paths": ["models/crate.amdl"] }
 ```
 
 ### create_object — Create entity with components

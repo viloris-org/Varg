@@ -564,30 +564,31 @@ impl EditorHost {
         project.rescan_assets()?;
 
         let asset_path = normalize_relative_path(path_str)?;
-        let guid = project
-            .database
-            .guid_for_path(&asset_path)
-            .map_err(EngineError::from)?;
+        let guid = project.database.guid_for_path(&asset_path).ok();
         let mut rows = Vec::new();
 
-        for dependency in project.database.dependencies().dependencies(guid) {
-            rows.push(asset_reference_row(
-                "dependency",
-                "Asset dependency",
-                resolve_asset_reference_label(project, dependency),
-            ));
-        }
-        for dependent in project.database.dependencies().dependents(guid) {
-            rows.push(asset_reference_row(
-                "dependent",
-                "Used by asset",
-                resolve_asset_reference_label(project, dependent),
-            ));
+        if let Some(guid) = guid {
+            for dependency in project.database.dependencies().dependencies(guid) {
+                rows.push(asset_reference_row(
+                    "dependency",
+                    "Asset dependency",
+                    resolve_asset_reference_label(project, dependency),
+                ));
+            }
+            for dependent in project.database.dependencies().dependents(guid) {
+                rows.push(asset_reference_row(
+                    "dependent",
+                    "Used by asset",
+                    resolve_asset_reference_label(project, dependent),
+                ));
+            }
         }
 
         for (_entity, object) in project.scene.objects() {
             for component in &object.components {
-                collect_component_asset_references(&mut rows, &object.name, component, guid);
+                if let Some(guid) = guid {
+                    collect_component_asset_references(&mut rows, &object.name, component, guid);
+                }
                 if let engine_ecs::ComponentData::Script(script) = component {
                     if script.source == path_str {
                         rows.push(asset_reference_row(
@@ -619,7 +620,7 @@ impl EditorHost {
         rows.dedup();
 
         Ok(serde_json::json!({
-            "guid": guid.to_string(),
+            "guid": guid.map(|guid| guid.to_string()),
             "path": asset_path.to_string_lossy(),
             "references": rows,
         }))
@@ -1005,33 +1006,6 @@ impl EditorHost {
             "valid": diagnostics.is_empty(),
             "diagnostics": diagnostics,
             "ast": ast,
-        }))
-    }
-
-    pub(crate) fn project_check_amdl(&mut self, params: &Value) -> EngineResult<Value> {
-        let path_str = params
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::config("missing 'path'"))?;
-        let source = params
-            .get("source")
-            .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::config("missing 'source'"))?;
-
-        let Some(project) = self.shell.project() else {
-            return Err(EngineError::config("no project open"));
-        };
-        let asset_root = project.root.join(&project.manifest.asset_root);
-        let _full_path = resolve_writable_relative_path(&asset_root, path_str)?;
-
-        let diagnostics = engine_assets::diagnose_amdl(source)
-            .into_iter()
-            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(Value::Null))
-            .collect::<Vec<_>>();
-
-        Ok(serde_json::json!({
-            "valid": diagnostics.is_empty(),
-            "diagnostics": diagnostics,
         }))
     }
 

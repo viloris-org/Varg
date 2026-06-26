@@ -11,12 +11,9 @@ fn load_runtime_project_loads_example() {
 
     let project = load_runtime_project(&project_path).expect("load example project");
 
-    assert_eq!(project.manifest.name, "Aster Example");
+    assert_eq!(project.manifest.name, "Varg Example");
     assert_eq!(project.manifest.asset_root, "assets");
-    assert_eq!(
-        project.manifest.default_scene,
-        "scenes/example.aster_scene.json"
-    );
+    assert_eq!(project.manifest.default_scene, "scenes/example.vscene");
     assert!(
         !project.scene.objects().is_empty(),
         "scene should have objects"
@@ -35,7 +32,7 @@ fn load_runtime_project_fails_for_missing_project() {
 fn load_runtime_project_fails_for_invalid_manifest() {
     let temp_dir = std::env::temp_dir().join("aster_test_invalid_manifest");
     let _ = std::fs::create_dir_all(&temp_dir);
-    let manifest_path = temp_dir.join("aster.project.toml");
+    let manifest_path = temp_dir.join("Varg.toml");
     std::fs::write(&manifest_path, "invalid toml content {{{").unwrap();
 
     let result = load_runtime_project(&temp_dir);

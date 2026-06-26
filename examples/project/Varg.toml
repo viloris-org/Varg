@@ -1,7 +1,7 @@
-name = "Aster Example"
+name = "Varg Example"
 asset_root = "assets"
 script_roots = ["scripts"]
-default_scene = "scenes/example.aster_scene.json"
+default_scene = "scenes/example.vscene"
 
 [format]
 version = 1

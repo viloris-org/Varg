@@ -1,0 +1,7 @@
+material new_material {
+    shader: "pbr"
+
+    baseColor: Color("#7aa2ff")
+    roughness: 0.7
+    metallic: 0.0
+}

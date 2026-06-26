@@ -1352,6 +1352,7 @@ dependencies = [
  "engine-i18n",
  "engine-physics",
  "engine-render",
+ "engine-script-varg",
  "serde",
  "serde_json",
  "toml 0.8.23",
@@ -1473,6 +1474,7 @@ name = "engine-script-varg"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "engine-ecs",
  "engine-platform",
  "serde",
  "serde_json",

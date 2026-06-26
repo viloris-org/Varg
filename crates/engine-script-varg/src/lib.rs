@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use engine_core::math::{Quat, Transform, Vec3};
+use engine_ecs::{
+    CameraComponentData, CameraRole, ColliderComponentData, ComponentData, GameObject,
+    LightComponentData, MaterialRef, MeshRendererComponentData, RigidbodyComponentData,
+    SCENE_FILE_VERSION, Scene, SceneFile, ScriptComponent, SerializedGameObject,
+};
 
 /// Varg source role inferred from extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,14 +377,14 @@ pub fn compile_script_source(
     (Some(script), diagnostics)
 }
 
-/// Compiles a `.vscene` world file into the existing scene JSON format.
+/// Parses a `.vscene` world file into the native scene file structure.
 ///
-/// This is the authoring bridge for agent-friendly scene source. Runtime and
-/// editor loading can continue to consume the stable scene JSON schema.
-pub fn compile_vscene_source_to_json(
+/// This is the preferred load path for Varg scenes. It parses the authoring
+/// source directly into the engine's typed ECS scene model.
+pub fn compile_vscene_source_to_scene_file(
     path: impl AsRef<Path>,
     source: &str,
-) -> (Option<String>, Vec<VargDiagnostic>) {
+) -> (Option<SceneFile>, Vec<VargDiagnostic>) {
     let path = path.as_ref();
     let (ast, mut diagnostics) = parse_source(path, source);
     if ast.is_none() {
@@ -406,7 +411,7 @@ pub fn compile_vscene_source_to_json(
     };
 
     match compile_vscene_scene(scene_block) {
-        Ok(json) => (Some(json), diagnostics),
+        Ok(file) => (Some(file), diagnostics),
         Err(mut error) => {
             error.source_line = source
                 .lines()
@@ -416,6 +421,58 @@ pub fn compile_vscene_source_to_json(
             (None, diagnostics)
         }
     }
+}
+
+/// Parses a `.vscene` world file directly into an executable ECS [`Scene`].
+pub fn compile_vscene_source_to_scene(
+    path: impl AsRef<Path>,
+    source: &str,
+) -> (Option<Scene>, Vec<VargDiagnostic>) {
+    let (file, mut diagnostics) = compile_vscene_source_to_scene_file(path, source);
+    let Some(file) = file else {
+        return (None, diagnostics);
+    };
+    match Scene::from_scene_file(file) {
+        Ok(scene) => (Some(scene), diagnostics),
+        Err(error) => {
+            diagnostics.push(VargDiagnostic {
+                code: "VSCENE9001".to_string(),
+                severity: VargDiagnosticSeverity::Error,
+                line: Some(1),
+                column: Some(1),
+                message: format!("scene construction failed: {error}"),
+                expected: "valid ECS scene".to_string(),
+                suggestion: "Check generated object IDs, hierarchy, and component data."
+                    .to_string(),
+                blocking: true,
+                source_line: source.lines().next().map(str::to_string),
+            });
+            (None, diagnostics)
+        }
+    }
+}
+
+/// Serializes an ECS [`Scene`] as native `.vscene` source.
+pub fn serialize_scene_to_vscene(
+    scene: &Scene,
+    name: impl AsRef<str>,
+) -> engine_core::EngineResult<String> {
+    serialize_scene_file_to_vscene(&scene.to_scene_file(name.as_ref())?)
+}
+
+/// Serializes a typed scene file as native `.vscene` source.
+pub fn serialize_scene_file_to_vscene(file: &SceneFile) -> engine_core::EngineResult<String> {
+    let mut output = String::new();
+    output.push_str("scene ");
+    output.push_str(&vscene_block_name(&file.name));
+    output.push_str(" {\n");
+
+    for record in &file.objects {
+        write_vscene_object(&mut output, record, 1)?;
+    }
+
+    output.push_str("}\n");
+    Ok(output)
 }
 
 impl VargScript {
@@ -931,16 +988,8 @@ fn parse_vscene_document(source: &str) -> Result<VsceneDocument, VargDiagnostic>
     Ok(document)
 }
 
-fn compile_vscene_scene(scene_block: &VsceneBlock) -> Result<String, VargDiagnostic> {
-    let mut file = serde_json::json!({
-        "version": 1,
-        "name": scene_block.name.clone().unwrap_or_else(|| "Scene".to_string()),
-        "objects": [],
-    });
-    let objects = file
-        .get_mut("objects")
-        .and_then(serde_json::Value::as_array_mut)
-        .expect("objects array exists");
+fn compile_vscene_scene(scene_block: &VsceneBlock) -> Result<SceneFile, VargDiagnostic> {
+    let mut objects = Vec::new();
     let mut next_id = 1_u64;
 
     for child in &scene_block.children {
@@ -970,50 +1019,54 @@ fn compile_vscene_scene(scene_block: &VsceneBlock) -> Result<String, VargDiagnos
         }
     }
 
-    serde_json::to_string_pretty(&file).map_err(|error| VargDiagnostic {
-        code: "VSCENE9000".to_string(),
-        severity: VargDiagnosticSeverity::Error,
-        line: Some(scene_block.line),
-        column: Some(1),
-        message: format!("scene JSON serialization failed: {error}"),
-        expected: "serializable scene document".to_string(),
-        suggestion: "Report this compiler bug with the source file.".to_string(),
-        blocking: true,
-        source_line: None,
+    Ok(SceneFile {
+        version: SCENE_FILE_VERSION,
+        name: scene_block
+            .name
+            .clone()
+            .unwrap_or_else(|| "Scene".to_string()),
+        objects,
     })
 }
 
 fn compile_vscene_object(
     block: &VsceneBlock,
     id: u64,
-) -> Result<serde_json::Value, VargDiagnostic> {
+) -> Result<SerializedGameObject, VargDiagnostic> {
     let name = block
         .name
         .clone()
         .unwrap_or_else(|| format!("{} {id}", block.kind));
     let mut tag = string_property(block, "tag").unwrap_or_else(|| "Untagged".to_string());
-    let mut camera_role = serde_json::Value::Null;
+    let mut camera_role = None;
     let mut components = Vec::new();
     let mut transform = Transform::IDENTITY;
 
     if block.kind == "camera" {
         tag = "MainCamera".to_string();
-        camera_role = serde_json::json!("Main");
-        components.push(compile_camera_component(block));
+        camera_role = Some(CameraRole::Main);
+        components.push(ComponentData::Camera(compile_camera_component(block)));
     }
 
     for child in &block.children {
         match child.kind.as_str() {
             "transform" => transform = compile_vscene_transform(child),
-            "perspective" => upsert_component(&mut components, compile_camera_component(child)),
+            "perspective" => upsert_component(
+                &mut components,
+                ComponentData::Camera(compile_camera_component(child)),
+            ),
             "material" => upsert_component(
                 &mut components,
-                compile_mesh_renderer_component(Some(child)),
+                ComponentData::MeshRenderer(compile_mesh_renderer_component(Some(child))),
             ),
-            "rigidbody" => components.push(compile_rigidbody_component(child)),
-            "collider" => components.push(compile_collider_component(child)),
-            "script" => components.push(compile_script_component(child)),
-            "light" => components.push(compile_light_component(child)),
+            "rigidbody" => {
+                components.push(ComponentData::Rigidbody(compile_rigidbody_component(child)))
+            }
+            "collider" => {
+                components.push(ComponentData::Collider(compile_collider_component(child)))
+            }
+            "script" => components.push(ComponentData::Script(compile_script_component(child))),
+            "light" => components.push(ComponentData::Light(compile_light_component(child))),
             _ => {
                 return Err(vscene_compile_error(
                     child,
@@ -1027,28 +1080,30 @@ fn compile_vscene_object(
     }
 
     if block.properties.contains_key("mesh")
-        && !components.iter().any(|component| {
-            component.get("type").and_then(serde_json::Value::as_str) == Some("MeshRenderer")
-        })
+        && !components
+            .iter()
+            .any(|component| matches!(component, ComponentData::MeshRenderer(_)))
     {
-        components.push(compile_mesh_renderer_component(None));
+        components.push(ComponentData::MeshRenderer(
+            compile_mesh_renderer_component(None),
+        ));
     }
 
-    Ok(serde_json::json!({
-        "object": {
-            "id": id,
-            "name": name,
-            "tag": tag,
-            "layer": 0,
-            "camera_role": camera_role,
-            "active": true,
-            "scripts": [],
-            "components": components,
+    Ok(SerializedGameObject {
+        object: GameObject {
+            id: engine_core::EntityId::from_u128(u128::from(id)),
+            name,
+            tag,
+            layer: 0,
+            camera_role,
+            active: true,
+            scripts: Vec::new(),
+            components,
         },
-        "local_transform": transform_json(transform),
-        "parent": null,
-        "sibling_index": id - 1,
-    }))
+        local_transform: transform,
+        parent: None,
+        sibling_index: (id - 1) as usize,
+    })
 }
 
 fn compile_vscene_transform(block: &VsceneBlock) -> Transform {
@@ -1065,103 +1120,86 @@ fn compile_vscene_transform(block: &VsceneBlock) -> Transform {
     transform
 }
 
-fn compile_camera_component(block: &VsceneBlock) -> serde_json::Value {
-    serde_json::json!({
-        "type": "Camera",
-        "data": {
-            "vertical_fov_degrees": number_property(block, "fov").unwrap_or(60.0),
-            "near": number_property(block, "near").unwrap_or(0.01),
-            "far": number_property(block, "far").unwrap_or(1000.0),
-            "aspect_ratio": null,
-            "primary": bool_property(block, "primary").unwrap_or(true),
-            "clear_color": vec3_json(Vec3::new(0.1, 0.1, 0.1)),
-        }
-    })
+fn compile_camera_component(block: &VsceneBlock) -> CameraComponentData {
+    CameraComponentData {
+        vertical_fov_degrees: number_property(block, "fov").unwrap_or(60.0),
+        near: number_property(block, "near").unwrap_or(0.01),
+        far: number_property(block, "far").unwrap_or(1000.0),
+        aspect_ratio: None,
+        primary: bool_property(block, "primary").unwrap_or(true),
+        clear_color: Vec3::new(0.1, 0.1, 0.1),
+    }
 }
 
-fn compile_mesh_renderer_component(material: Option<&VsceneBlock>) -> serde_json::Value {
+fn compile_mesh_renderer_component(material: Option<&VsceneBlock>) -> MeshRendererComponentData {
     let builtin = material
         .and_then(|block| string_property(block, "builtin"))
         .unwrap_or_else(|| "debug/default".to_string());
-    serde_json::json!({
-        "type": "MeshRenderer",
-        "data": {
-            "mesh": null,
-            "builtin_mesh": "debug/cube",
-            "material": {
-                "asset": null,
-                "builtin": builtin,
-            },
-            "casts_shadows": true,
-            "receive_shadows": true,
-        }
-    })
+    MeshRendererComponentData {
+        mesh: None,
+        builtin_mesh: Some("debug/cube".to_string()),
+        material: MaterialRef {
+            asset: None,
+            builtin: Some(builtin),
+        },
+        casts_shadows: true,
+        receive_shadows: true,
+    }
 }
 
-fn compile_rigidbody_component(block: &VsceneBlock) -> serde_json::Value {
-    serde_json::json!({
-        "type": "Rigidbody",
-        "data": {
-            "body_type": identifier_property(block, "mode").unwrap_or_else(|| "dynamic".to_string()),
-            "mass": number_property(block, "mass").unwrap_or(1.0),
-            "use_gravity": bool_property(block, "useGravity").unwrap_or(true),
-            "linear_damping": 0.0,
-            "angular_damping": 0.05,
-            "lock_position": [false, false, false],
-            "lock_rotation": [false, false, false],
-        }
-    })
+fn compile_rigidbody_component(block: &VsceneBlock) -> RigidbodyComponentData {
+    RigidbodyComponentData {
+        body_type: identifier_property(block, "mode").unwrap_or_else(|| "dynamic".to_string()),
+        mass: number_property(block, "mass").unwrap_or(1.0),
+        use_gravity: bool_property(block, "useGravity").unwrap_or(true),
+        linear_damping: 0.0,
+        angular_damping: 0.05,
+        lock_position: [false, false, false],
+        lock_rotation: [false, false, false],
+    }
 }
 
-fn compile_collider_component(block: &VsceneBlock) -> serde_json::Value {
-    serde_json::json!({
-        "type": "Collider",
-        "data": {
-            "shape": identifier_property(block, "shape").unwrap_or_else(|| "box".to_string()),
-            "size": vec3_json(vec3_property(block, "size").unwrap_or(Vec3::ONE)),
-            "is_trigger": bool_property(block, "isTrigger").unwrap_or(false),
-            "mask": u32::MAX,
-            "physics_material": "default",
-        }
-    })
+fn compile_collider_component(block: &VsceneBlock) -> ColliderComponentData {
+    ColliderComponentData {
+        shape: identifier_property(block, "shape").unwrap_or_else(|| "box".to_string()),
+        size: vec3_property(block, "size").unwrap_or(Vec3::ONE),
+        is_trigger: bool_property(block, "isTrigger").unwrap_or(false),
+        mask: u32::MAX,
+        physics_material: "default".to_string(),
+    }
 }
 
-fn compile_script_component(block: &VsceneBlock) -> serde_json::Value {
-    let mut exported = serde_json::Map::new();
+fn compile_script_component(block: &VsceneBlock) -> ScriptComponent {
+    let mut exported = HashMap::new();
     for (key, value) in &block.properties {
         if key == "source" {
             continue;
         }
         exported.insert(key.clone(), vscene_value_to_json(value));
     }
-    serde_json::json!({
-        "type": "Script",
-        "data": {
-            "source": string_property(block, "source").unwrap_or_default(),
-            "exported_values": exported,
-            "state": {},
-        }
-    })
+    ScriptComponent {
+        source: string_property(block, "source").unwrap_or_default(),
+        exported_values: exported,
+        state: HashMap::new(),
+    }
 }
 
-fn compile_light_component(block: &VsceneBlock) -> serde_json::Value {
-    serde_json::json!({
-        "type": "Light",
-        "data": {
-            "color": vec3_json(vec3_property(block, "color").unwrap_or(Vec3::ONE)),
-            "intensity": number_property(block, "intensity").unwrap_or(1.0),
-            "kind": identifier_property(block, "type").unwrap_or_else(|| "point".to_string()),
-            "range": number_property(block, "range").unwrap_or(10.0),
-            "spot_angle": number_property(block, "spotAngle").unwrap_or(30.0),
-        }
-    })
+fn compile_light_component(block: &VsceneBlock) -> LightComponentData {
+    LightComponentData {
+        color: vec3_property(block, "color").unwrap_or(Vec3::ONE),
+        intensity: number_property(block, "intensity").unwrap_or(1.0),
+        kind: identifier_property(block, "type").unwrap_or_else(|| "point".to_string()),
+        range: number_property(block, "range").unwrap_or(10.0),
+        spot_angle: number_property(block, "spotAngle").unwrap_or(30.0),
+    }
 }
 
-fn upsert_component(components: &mut Vec<serde_json::Value>, component: serde_json::Value) {
-    let component_type = component.get("type").and_then(serde_json::Value::as_str);
-    if let Some(existing) = components.iter_mut().find(|candidate| {
-        candidate.get("type").and_then(serde_json::Value::as_str) == component_type
-    }) {
+fn upsert_component(components: &mut Vec<ComponentData>, component: ComponentData) {
+    let component_type = component.type_id();
+    if let Some(existing) = components
+        .iter_mut()
+        .find(|candidate| candidate.type_id() == component_type)
+    {
         *existing = component;
     } else {
         components.push(component);
@@ -1290,19 +1328,6 @@ fn vscene_value_to_json(value: &VsceneValue) -> serde_json::Value {
     }
 }
 
-fn transform_json(transform: Transform) -> serde_json::Value {
-    serde_json::json!({
-        "translation": vec3_json(transform.translation),
-        "rotation": {
-            "x": transform.rotation.x,
-            "y": transform.rotation.y,
-            "z": transform.rotation.z,
-            "w": transform.rotation.w,
-        },
-        "scale": vec3_json(transform.scale),
-    })
-}
-
 fn vec3_json(value: Vec3) -> serde_json::Value {
     serde_json::json!({
         "x": value.x,
@@ -1328,6 +1353,274 @@ fn vscene_compile_error(
         suggestion: suggestion.to_string(),
         blocking: true,
         source_line: None,
+    }
+}
+
+fn write_vscene_object(
+    output: &mut String,
+    record: &SerializedGameObject,
+    indent: usize,
+) -> engine_core::EngineResult<()> {
+    let is_camera = record.object.camera_role == Some(CameraRole::Main)
+        || record
+            .object
+            .components
+            .iter()
+            .any(|component| matches!(component, ComponentData::Camera(_)));
+    write_indent(output, indent);
+    output.push_str(if is_camera { "camera " } else { "entity " });
+    output.push_str(&vscene_quoted(&record.object.name));
+    output.push_str(" {\n");
+
+    if !is_camera && record.object.tag != "Untagged" {
+        write_property(
+            output,
+            indent + 1,
+            "tag",
+            &vscene_quoted(&record.object.tag),
+        );
+    }
+
+    write_transform_block(output, indent + 1, record.local_transform);
+
+    for component in &record.object.components {
+        match component {
+            ComponentData::Camera(camera) => write_camera_block(output, indent + 1, camera),
+            ComponentData::MeshRenderer(mesh) => {
+                write_mesh_renderer_block(output, indent + 1, mesh)?
+            }
+            ComponentData::Rigidbody(rigidbody) => {
+                write_rigidbody_block(output, indent + 1, rigidbody);
+            }
+            ComponentData::Collider(collider) => write_collider_block(output, indent + 1, collider),
+            ComponentData::Script(script) => write_script_block(output, indent + 1, script),
+            ComponentData::Light(light) => write_light_block(output, indent + 1, light),
+            other => {
+                return Err(engine_core::EngineError::config(format!(
+                    "native .vscene writer does not support {} components yet",
+                    other.type_id()
+                )));
+            }
+        }
+    }
+
+    write_indent(output, indent);
+    output.push_str("}\n\n");
+    Ok(())
+}
+
+fn write_transform_block(output: &mut String, indent: usize, transform: Transform) {
+    write_indent(output, indent);
+    output.push_str("transform {\n");
+    write_property(
+        output,
+        indent + 1,
+        "position",
+        &vscene_vec3(transform.translation),
+    );
+    let (yaw, pitch, roll) = transform.rotation.to_euler_deg();
+    write_property(
+        output,
+        indent + 1,
+        "rotation",
+        &vscene_vec3(Vec3::new(pitch, yaw, roll)),
+    );
+    write_property(output, indent + 1, "scale", &vscene_vec3(transform.scale));
+    write_indent(output, indent);
+    output.push_str("}\n");
+}
+
+fn write_camera_block(output: &mut String, indent: usize, camera: &CameraComponentData) {
+    write_indent(output, indent);
+    output.push_str("perspective {\n");
+    write_property(
+        output,
+        indent + 1,
+        "fov",
+        &vscene_number(camera.vertical_fov_degrees),
+    );
+    write_property(output, indent + 1, "near", &vscene_number(camera.near));
+    write_property(output, indent + 1, "far", &vscene_number(camera.far));
+    write_indent(output, indent);
+    output.push_str("}\n");
+    write_property(
+        output,
+        indent,
+        "primary",
+        if camera.primary { "true" } else { "false" },
+    );
+}
+
+fn write_mesh_renderer_block(
+    output: &mut String,
+    indent: usize,
+    mesh: &MeshRendererComponentData,
+) -> engine_core::EngineResult<()> {
+    if mesh.mesh.is_some() {
+        return Err(engine_core::EngineError::config(
+            "native .vscene writer does not support asset mesh references yet",
+        ));
+    }
+    let builtin_mesh = mesh
+        .builtin_mesh
+        .as_deref()
+        .unwrap_or("debug/cube")
+        .to_string();
+    write_property(output, indent, "mesh", &builtin_mesh);
+    if let Some(builtin_material) = mesh.material.builtin.as_deref() {
+        write_indent(output, indent);
+        output.push_str("material {\n");
+        write_property(
+            output,
+            indent + 1,
+            "builtin",
+            &vscene_quoted(builtin_material),
+        );
+        write_indent(output, indent);
+        output.push_str("}\n");
+    }
+    Ok(())
+}
+
+fn write_rigidbody_block(output: &mut String, indent: usize, rigidbody: &RigidbodyComponentData) {
+    write_indent(output, indent);
+    output.push_str("rigidbody {\n");
+    write_property(output, indent + 1, "mode", &rigidbody.body_type);
+    write_property(output, indent + 1, "mass", &vscene_number(rigidbody.mass));
+    write_property(
+        output,
+        indent + 1,
+        "useGravity",
+        if rigidbody.use_gravity {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    write_indent(output, indent);
+    output.push_str("}\n");
+}
+
+fn write_collider_block(output: &mut String, indent: usize, collider: &ColliderComponentData) {
+    write_indent(output, indent);
+    output.push_str("collider {\n");
+    write_property(output, indent + 1, "shape", &collider.shape);
+    write_property(output, indent + 1, "size", &vscene_vec3(collider.size));
+    write_property(
+        output,
+        indent + 1,
+        "isTrigger",
+        if collider.is_trigger { "true" } else { "false" },
+    );
+    write_indent(output, indent);
+    output.push_str("}\n");
+}
+
+fn write_script_block(output: &mut String, indent: usize, script: &ScriptComponent) {
+    write_indent(output, indent);
+    output.push_str("script ");
+    output.push_str(&vscene_block_name(
+        script
+            .source
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.strip_suffix(".varg"))
+            .unwrap_or("Script"),
+    ));
+    output.push_str(" {\n");
+    write_property(output, indent + 1, "source", &vscene_quoted(&script.source));
+    let mut exported = script.exported_values.iter().collect::<Vec<_>>();
+    exported.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in exported {
+        write_property(output, indent + 1, key, &json_value_to_vscene(value));
+    }
+    write_indent(output, indent);
+    output.push_str("}\n");
+}
+
+fn write_light_block(output: &mut String, indent: usize, light: &LightComponentData) {
+    write_indent(output, indent);
+    output.push_str("light {\n");
+    write_property(output, indent + 1, "type", &light.kind);
+    write_property(output, indent + 1, "color", &vscene_vec3(light.color));
+    write_property(
+        output,
+        indent + 1,
+        "intensity",
+        &vscene_number(light.intensity),
+    );
+    write_property(output, indent + 1, "range", &vscene_number(light.range));
+    write_property(
+        output,
+        indent + 1,
+        "spotAngle",
+        &vscene_number(light.spot_angle),
+    );
+    write_indent(output, indent);
+    output.push_str("}\n");
+}
+
+fn write_property(output: &mut String, indent: usize, key: &str, value: &str) {
+    write_indent(output, indent);
+    output.push_str(key);
+    output.push_str(": ");
+    output.push_str(value);
+    output.push('\n');
+}
+
+fn write_indent(output: &mut String, indent: usize) {
+    for _ in 0..indent {
+        output.push_str("    ");
+    }
+}
+
+fn vscene_block_name(name: &str) -> String {
+    if is_vscene_identifier(name) {
+        name.to_string()
+    } else {
+        vscene_quoted(name)
+    }
+}
+
+fn vscene_quoted(value: &str) -> String {
+    format!("{:?}", value)
+}
+
+fn vscene_vec3(value: Vec3) -> String {
+    format!(
+        "Vec3({}, {}, {})",
+        vscene_number(value.x),
+        vscene_number(value.y),
+        vscene_number(value.z)
+    )
+}
+
+fn vscene_number(value: f32) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.1}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn json_value_to_vscene(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => vscene_quoted(value),
+        serde_json::Value::Object(object) => {
+            if let (Some(x), Some(y), Some(z)) = (object.get("x"), object.get("y"), object.get("z"))
+            {
+                return format!(
+                    "Vec3({}, {}, {})",
+                    json_value_to_vscene(x),
+                    json_value_to_vscene(y),
+                    json_value_to_vscene(z)
+                );
+            }
+            vscene_quoted(&value.to_string())
+        }
+        _ => vscene_quoted(&value.to_string()),
     }
 }
 
@@ -2811,7 +3104,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_vscene_to_scene_json() {
+    fn compiles_vscene_to_native_scene_file() {
         let source = r##"scene Example {
     camera "Main Camera" {
         transform {
@@ -2859,18 +3152,24 @@ mod tests {
 }
 "##;
 
-        let (json, diagnostics) = compile_vscene_source_to_json("scenes/example.vscene", source);
+        let (file, diagnostics) =
+            compile_vscene_source_to_scene_file("scenes/example.vscene", source);
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
-        let json = json.unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["name"], "Example");
-        assert_eq!(value["objects"].as_array().unwrap().len(), 2);
-        assert_eq!(value["objects"][1]["object"]["name"], "Player");
-        assert_eq!(
-            value["objects"][1]["object"]["components"][3]["data"]["source"],
-            "scripts/player_controller.varg"
-        );
+        let file = file.unwrap();
+        assert_eq!(file.name, "Example");
+        assert_eq!(file.objects.len(), 2);
+        assert_eq!(file.objects[1].object.name, "Player");
+        let script = file.objects[1]
+            .object
+            .components
+            .iter()
+            .find_map(|component| match component {
+                ComponentData::Script(script) => Some(script),
+                _ => None,
+            })
+            .expect("player should have script component");
+        assert_eq!(script.source, "scripts/player_controller.varg");
     }
 
     #[test]

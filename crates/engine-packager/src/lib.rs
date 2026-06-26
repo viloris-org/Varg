@@ -12,6 +12,7 @@ use std::{
 
 use engine_assets::{AssetDatabase, scan_project_assets};
 use engine_core::{EngineError, EngineResult};
+use engine_ecs::{PROJECT_MANIFEST_FILE_NAME, project_manifest_path};
 use runtime_min::load_runtime_project;
 use serde::{Deserialize, Serialize};
 
@@ -394,8 +395,8 @@ fn write_project_payload(
     asset_root: &str,
 ) -> EngineResult<engine_assets::ResourceManifestFormat> {
     copy_file(
-        project_root.join("aster.project.toml"),
-        destination.join("aster.project.toml"),
+        project_manifest_path(project_root),
+        destination.join(PROJECT_MANIFEST_FILE_NAME),
     )?;
     let asset_source = project_root.join(asset_root);
     let asset_dest = destination.join(asset_root);

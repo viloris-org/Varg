@@ -11,7 +11,7 @@ pub(crate) async fn select_project_location() -> Result<Option<String>, String> 
 #[tauri::command]
 pub(crate) async fn open_scene_dialog() -> Result<Option<String>, String> {
     let file = rfd::AsyncFileDialog::new()
-        .add_filter("Scene JSON", &["json", "scene"])
+        .add_filter("Varg Scene", &["vscene"])
         .pick_file()
         .await;
 
@@ -21,8 +21,8 @@ pub(crate) async fn open_scene_dialog() -> Result<Option<String>, String> {
 #[tauri::command]
 pub(crate) async fn save_scene_as_dialog() -> Result<Option<String>, String> {
     let file = rfd::AsyncFileDialog::new()
-        .add_filter("Scene JSON", &["json", "scene"])
-        .set_file_name("scene.json")
+        .add_filter("Varg Scene", &["vscene"])
+        .set_file_name("scene.vscene")
         .save_file()
         .await;
 

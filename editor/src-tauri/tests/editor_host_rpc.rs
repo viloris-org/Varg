@@ -263,10 +263,12 @@ fn project_creates_material_prefab_and_scene_assets() {
             &serde_json::json!({ "name": "new_material" }),
         )
         .expect("create material");
-    assert_eq!(material["path"], "materials/new_material.material.json");
+    assert_eq!(material["path"], "materials/new_material.vasset");
     let material_text =
-        std::fs::read_to_string(asset_root.join("materials/new_material.material.json")).unwrap();
-    engine_assets::MaterialFormat::from_json(&material_text).expect("material parses");
+        std::fs::read_to_string(asset_root.join("materials/new_material.vasset")).unwrap();
+    let diagnostics =
+        engine_script_varg::diagnose_source("materials/new_material.vasset", &material_text);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     let prefab = host
         .handle(
@@ -274,12 +276,12 @@ fn project_creates_material_prefab_and_scene_assets() {
             &serde_json::json!({ "name": "new_prefab" }),
         )
         .expect("create prefab");
-    assert_eq!(prefab["path"], "prefabs/new_prefab.prefab.json");
+    assert_eq!(prefab["path"], "prefabs/new_prefab.vscene");
     let prefab_text =
-        std::fs::read_to_string(asset_root.join("prefabs/new_prefab.prefab.json")).unwrap();
-    let parsed_prefab: engine_ecs::PrefabFile =
-        serde_json::from_str(&prefab_text).expect("prefab parses");
-    assert_eq!(parsed_prefab.name, "new_prefab");
+        std::fs::read_to_string(asset_root.join("prefabs/new_prefab.vscene")).unwrap();
+    let diagnostics =
+        engine_script_varg::diagnose_source("prefabs/new_prefab.vscene", &prefab_text);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     let scene = host
         .handle(
@@ -287,24 +289,30 @@ fn project_creates_material_prefab_and_scene_assets() {
             &serde_json::json!({ "name": "new_scene" }),
         )
         .expect("create scene");
-    assert_eq!(scene["path"], "scenes/new_scene.scene.json");
-    let scene_text =
-        std::fs::read_to_string(asset_root.join("scenes/new_scene.scene.json")).unwrap();
-    engine_ecs::Scene::from_json(&scene_text).expect("scene parses");
+    assert_eq!(scene["path"], "scenes/new_scene.vscene");
+    let scene_text = std::fs::read_to_string(asset_root.join("scenes/new_scene.vscene")).unwrap();
+    let (scene, diagnostics) =
+        engine_script_varg::compile_vscene_source_to_scene("scenes/new_scene.vscene", &scene_text);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    scene.expect("scene parses");
 
     let assets = host
         .handle("project/list_assets", &serde_json::json!({}))
         .expect("list assets");
     let asset_rows = assets["assets"].as_array().unwrap();
-    assert!(asset_rows.iter().any(|asset| asset["source_path"]
-        == "materials/new_material.material.json"
-        && asset["kind"] == "Material"));
-    assert!(asset_rows.iter().any(|asset| asset["source_path"]
-        == "prefabs/new_prefab.prefab.json"
-        && asset["kind"] == "Prefab"));
     assert!(asset_rows.iter().any(
-        |asset| asset["source_path"] == "scenes/new_scene.scene.json" && asset["kind"] == "Scene"
+        |asset| asset["source_path"] == "materials/new_material.vasset"
+            && asset["kind"] == "Material"
     ));
+    assert!(asset_rows.iter().any(
+        |asset| asset["source_path"] == "prefabs/new_prefab.vscene" && asset["kind"] == "Scene"
+    ));
+    assert!(
+        asset_rows
+            .iter()
+            .any(|asset| asset["source_path"] == "scenes/new_scene.vscene"
+                && asset["kind"] == "Scene")
+    );
 }
 
 #[test]

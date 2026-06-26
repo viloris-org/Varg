@@ -137,27 +137,15 @@ impl EditorHost {
         Ok(serde_json::json!({ "path": path }))
     }
 
-    /// Open a scene from an arbitrary JSON file path.
-    /// Reads the file, parses it as a scene, and replaces the current project's scene.
+    /// Open a scene from an arbitrary scene file path.
+    /// Reads a native `.vscene` file and replaces the current project's scene.
     pub(crate) fn shell_open_scene(&mut self, params: &Value) -> EngineResult<Value> {
         let path_str = params
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| EngineError::config("missing 'path'"))?;
         let path = std::path::PathBuf::from(path_str);
-
-        let text = std::fs::read_to_string(&path).map_err(|e| EngineError::Filesystem {
-            path: path.clone(),
-            source: e,
-        })?;
-        let new_scene = engine_ecs::Scene::from_json(&text)?;
-
-        let Some(project) = self.shell.project_mut() else {
-            return Err(EngineError::config("no project open"));
-        };
-        project.scene = new_scene;
-        project.scene_path = path.clone();
-        project.scene_dirty = false;
+        self.shell.load_scene(&path)?;
         self.bump_scene_version();
 
         self.console.push(engine_editor::ConsoleEntry {
@@ -666,7 +654,12 @@ impl EditorHost {
             if let Some(data_obj) = obj.get_mut("data").and_then(|d| d.as_object_mut()) {
                 if let Some(fields) = field_data.as_object() {
                     for (key, value) in fields {
-                        data_obj.insert(key.clone(), value.clone());
+                        let normalized_key = if comp_type == "Script" && key == "script" {
+                            "source"
+                        } else {
+                            key
+                        };
+                        data_obj.insert(normalized_key.to_string(), value.clone());
                     }
                 }
             }
@@ -709,7 +702,8 @@ impl EditorHost {
         let Some(project) = self.shell.project() else {
             return Err(EngineError::config("no project open"));
         };
-        project.scene.to_json(project.name())
+        serde_json::to_string_pretty(&project.scene.to_scene_file(project.name())?)
+            .map_err(|error| EngineError::other(format!("scene snapshot failed: {error}")))
     }
 
     /// Forward console entries from the shell's console service to our shared one.

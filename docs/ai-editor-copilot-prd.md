@@ -52,7 +52,7 @@ Editor AI is appropriate for:
 - "Add a light to this scene."
 - "Create a simple patrol behavior."
 - "Fix this one script error."
-- "Generate a small `.amdl` model declaration."
+- "Attach an imported model asset to the selected entity."
 - "Change this selected entity's transform."
 - "Show me which assets this object references."
 - "Run a targeted check and explain the result."
@@ -222,7 +222,7 @@ Useful tool classes:
 - file read;
 - file write under project roots;
 - Aster language validation;
-- AMDL validation;
+- Varg source validation;
 - asset reference query;
 - command registry execution;
 - trace read;
@@ -234,7 +234,7 @@ Arbitrary command execution is not an MVP default. If exposed, it must be clearl
 
 Editor AI must retrieve examples for new Aster languages.
 
-For `.amdl`, `.ascn`, `.abv`, and `.as` generation:
+For `.varg`, `.vscene`, and `.vasset` generation:
 
 - include short task-relevant examples;
 - include allowed syntax or schema summary;

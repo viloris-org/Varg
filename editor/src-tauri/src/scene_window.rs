@@ -127,7 +127,7 @@ pub struct SceneRuntimeSnapshot {
     project_root: PathBuf,
     script_roots: Vec<PathBuf>,
     asset_root: PathBuf,
-    scene_json: String,
+    scene_file: engine_ecs::SceneFile,
 }
 
 impl SceneRuntimeSnapshot {
@@ -136,14 +136,14 @@ impl SceneRuntimeSnapshot {
         project_root: PathBuf,
         script_roots: Vec<PathBuf>,
         asset_root: PathBuf,
-        scene_json: String,
+        scene_file: engine_ecs::SceneFile,
     ) -> Self {
         Self {
             config,
             project_root,
             script_roots,
             asset_root,
-            scene_json,
+            scene_file,
         }
     }
 
@@ -151,7 +151,7 @@ impl SceneRuntimeSnapshot {
         self,
         renderer: WgpuRenderDevice,
     ) -> engine_core::EngineResult<RuntimeServices<WgpuRenderDevice>> {
-        let scene = engine_ecs::Scene::from_json(&self.scene_json)?;
+        let scene = engine_ecs::Scene::from_scene_file(self.scene_file)?;
         let mut runtime = RuntimeServices::with_renderer(self.config, renderer);
         runtime.set_project_root(self.project_root);
         runtime.set_script_roots(self.script_roots);
@@ -843,7 +843,7 @@ impl RawSceneApp {
             }
             SceneCommand::Show => {
                 self.visible = true;
-                self.request_temporal_accumulation();
+                self.restore_surface_after_show();
             }
             SceneCommand::Hide => {
                 self.visible = false;
@@ -886,6 +886,24 @@ impl RawSceneApp {
                     .resize_surface(viewport.width, viewport.height);
             }
         }
+        self.request_temporal_accumulation();
+    }
+
+    fn restore_surface_after_show(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.renderer.resize_surface(self.width, self.height);
+            if let Some(viewport) = self.viewport {
+                runtime.renderer.set_surface_viewport(Some(
+                    engine_render_wgpu::SurfaceViewportRect::new(
+                        viewport.x.max(0) as u32,
+                        viewport.y.max(0) as u32,
+                        viewport.width,
+                        viewport.height,
+                    ),
+                ));
+            }
+        }
+        self.last_frame = Instant::now() - EDITOR_TARGET_FRAME_DT;
         self.request_temporal_accumulation();
     }
 
@@ -1623,7 +1641,7 @@ mod tests {
                 PathBuf::from("."),
                 vec![PathBuf::from("scripts")],
                 PathBuf::from("assets"),
-                scene.to_json("test").unwrap(),
+                scene.to_scene_file("test").unwrap(),
             ),
             SceneCameraState::default(),
         );

@@ -1,5 +1,5 @@
 // ─── Regex-Based Syntax Highlighting ────────────────────────────────────────
-// Simple tokenizer for Varg, Python, and Aster model declarations. Returns HTML with <span class="token-*"> wrappers.
+// Simple tokenizer for Varg and Python. Returns HTML with <span class="token-*"> wrappers.
 
 // ─── Token Types ───────────────────────────────────────────────────────────
 
@@ -44,24 +44,6 @@ const PY_RULES: TokenRule[] = [
   { pattern: PY_KEYWORDS, className: 'text-[#D4D4D8] font-medium' },
   { pattern: PY_NUMBER, className: 'text-[#F78C6C]' },
   { pattern: PY_OPERATOR, className: 'text-[#A1A1AA]' },
-];
-
-// ─── Aster Model Language ──────────────────────────────────────────────────
-
-const AMDL_KEYWORDS = /\b(amdl|model|mesh|material|collider|rigidbody|socket|lod|metadata|kind|shape|mode|path|asset|ref|inline|primitive|box|sphere|capsule|cylinder|plane|static|dynamic|kinematic|true|false)\b/g;
-const AMDL_CONSTRUCTORS = /\bprimitive\.[A-Za-z_][A-Za-z0-9_-]*\b/g;
-const AMDL_STRING = /"(?:[^"\\]|\\.)*"/g;
-const AMDL_NUMBER = /-?\b\d+(?:\.\d+)?(?:[a-zA-Z_%]+)?\b/g;
-const AMDL_COMMENT_SINGLE = /\/\/[^\n]*|#[^\n]*/g;
-const AMDL_OPERATOR = /[=\[\]{},.]/g;
-
-const AMDL_RULES: TokenRule[] = [
-  { pattern: AMDL_COMMENT_SINGLE, className: 'text-[#546E7A] italic' },
-  { pattern: AMDL_STRING, className: 'text-[#C3E88D]' },
-  { pattern: AMDL_CONSTRUCTORS, className: 'text-[#82AAFF]' },
-  { pattern: AMDL_KEYWORDS, className: 'text-[#D4D4D8] font-medium' },
-  { pattern: AMDL_NUMBER, className: 'text-[#F78C6C]' },
-  { pattern: AMDL_OPERATOR, className: 'text-[#A1A1AA]' },
 ];
 
 // ─── Common HTML escaping ───────────────────────────────────────────────────
@@ -135,23 +117,17 @@ export function highlightPython(source: string): string {
   return source.split('\n').map(line => tokenizeLine(line, PY_RULES)).join('\n');
 }
 
-export function highlightAmdl(source: string): string {
-  return source.split('\n').map(line => tokenizeLine(line, AMDL_RULES)).join('\n');
-}
-
-export type EditorLanguage = 'varg' | 'python' | 'amdl';
+export type EditorLanguage = 'varg' | 'python';
 
 export function highlightCode(source: string, language: EditorLanguage): string {
   switch (language) {
     case 'varg': return highlightVarg(source);
     case 'python': return highlightPython(source);
-    case 'amdl': return highlightAmdl(source);
   }
 }
 
 export function detectLanguage(filePath: string): EditorLanguage | null {
   if (filePath.endsWith('.varg') || filePath.endsWith('.vscene') || filePath.endsWith('.vasset')) return 'varg';
   if (filePath.endsWith('.py')) return 'python';
-  if (filePath.endsWith('.amdl')) return 'amdl';
   return null;
 }
