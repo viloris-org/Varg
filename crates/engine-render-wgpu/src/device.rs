@@ -257,6 +257,7 @@ pub struct WgpuRenderDevice {
     pub(crate) next_gui_texture: u64,
     pub(crate) gui_textures: HashMap<u64, Handle>,
     pub(crate) gui_pipeline: wgpu::RenderPipeline,
+    pub(crate) surface_gui_pipeline: wgpu::RenderPipeline,
     pub(crate) gui_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) gui_sampler: wgpu::Sampler,
     pub(crate) gui_uniform: wgpu::Buffer,
@@ -264,6 +265,7 @@ pub struct WgpuRenderDevice {
     pub(crate) gui_index_buffer: wgpu::Buffer,
     pub(crate) gui_vertex_capacity: usize,
     pub(crate) gui_index_capacity: usize,
+    pub(crate) pending_surface_gui: Option<engine_render::GuiDrawList>,
     pub(crate) submitted_worlds: u64,
     pub(crate) grid_pipeline: wgpu::RenderPipeline,
     pub(crate) grid_bind_group: wgpu::BindGroup,
@@ -496,5 +498,10 @@ impl WgpuRenderDevice {
     /// Returns the pixel dimensions of the preview offscreen render target.
     pub fn preview_target_size(&self) -> (u32, u32) {
         self.preview_target.size()
+    }
+
+    /// Queues a GUI draw list to composite over the next surface frame.
+    pub fn set_next_surface_gui(&mut self, draw_list: engine_render::GuiDrawList) {
+        self.pending_surface_gui = Some(draw_list);
     }
 }

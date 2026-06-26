@@ -81,8 +81,7 @@ fn select_lod(object: &RenderObject, distance: f32) -> String {
 fn sphere_visible(camera: &RenderCamera, object: &RenderObject, aspect: f32) -> bool {
     let eye = camera.transform.translation;
     let forward = camera_forward(camera);
-    let up = rotate(camera.transform.rotation, Vec3::new(0.0, 1.0, 0.0)).normalized();
-    let right = cross(forward, up).normalized();
+    let (right, up) = camera_basis(camera, forward);
     let scaled_center = Vec3::new(
         object.bounds.center.x * object.transform.scale.x,
         object.bounds.center.y * object.transform.scale.y,
@@ -127,6 +126,27 @@ fn camera_forward(camera: &RenderCamera) -> Vec3 {
         return (target - camera.transform.translation).normalized();
     }
     rotate(camera.transform.rotation, Vec3::new(0.0, 0.0, -1.0)).normalized()
+}
+
+fn camera_basis(camera: &RenderCamera, forward: Vec3) -> (Vec3, Vec3) {
+    let preferred_up = if camera.look_at_target.is_some() {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        rotate(camera.transform.rotation, Vec3::new(0.0, 1.0, 0.0)).normalized()
+    };
+    let fallback_up = if forward.y.abs() > 0.99 {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let up_seed = if cross(forward, preferred_up).length_squared() > 1e-8 {
+        preferred_up
+    } else {
+        fallback_up
+    };
+    let right = cross(forward, up_seed).normalized();
+    let up = cross(right, forward).normalized();
+    (right, up)
 }
 
 fn rotate(rotation: engine_core::math::Quat, vector: Vec3) -> Vec3 {
@@ -202,5 +222,27 @@ mod tests {
         let result = select_visibility(&world, 16.0 / 9.0);
         assert_eq!(result.visible_indices, [0]);
         assert_eq!(result.selected_meshes, ["far"]);
+    }
+
+    #[test]
+    fn keeps_orbit_camera_visible_when_looking_nearly_straight_down() {
+        let camera = RenderCamera {
+            transform: Transform {
+                translation: Vec3::new(0.0, 20.0, 0.01),
+                ..Transform::IDENTITY
+            },
+            look_at_target: Some(Vec3::ZERO),
+            ..camera()
+        };
+        let world = RenderWorld {
+            camera: Some(camera),
+            objects: vec![object(Vec3::ZERO)],
+            ..RenderWorld::default()
+        };
+
+        let result = select_visibility(&world, 16.0 / 9.0);
+
+        assert_eq!(result.visible_indices, [0]);
+        assert_eq!(result.culled_objects, 0);
     }
 }

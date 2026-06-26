@@ -1320,6 +1320,83 @@ export default function AiPanel({
     inputRef.current?.focus();
   }, [updateQueuedPrompts]);
 
+  const applyTaskUpdates = useCallback((updates?: CopilotTaskUpdate[]) => {
+    if (!updates || updates.length === 0) return;
+    if (taskHideTimerRef.current !== null) {
+      window.clearTimeout(taskHideTimerRef.current);
+      taskHideTimerRef.current = null;
+    }
+    setTaskCardVisible(true);
+    setTaskCardCollapsed(false);
+    setCopilotTasks(current => {
+      let next = [...current];
+      for (const update of updates) {
+        const id = update.id?.trim();
+        if (!id) continue;
+        const existingIndex = next.findIndex(task => task.id === id);
+        if (existingIndex >= 0) {
+          const existing = next[existingIndex];
+          next[existingIndex] = {
+            ...existing,
+            title: update.title?.trim() || existing.title,
+            done: typeof update.done === 'boolean' ? update.done : existing.done,
+          };
+        } else {
+          next.push({
+            id,
+            title: update.title?.trim() || id,
+            done: Boolean(update.done),
+          });
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const executeApproved = useCallback(async (approvedSet?: Set<number>) => {
+    const indices = Array.from(approvedSet ?? approved);
+    if (indices.length === 0) return;
+
+    setStatus('executing');
+    setWorkspaceView('chat');
+
+    try {
+      const result = await rpc<ApplyResult>('copilot/apply', {
+        approved_indices: indices,
+        approval_mode: approvalMode,
+      });
+
+      setStatus('complete');
+      setPlan(null);
+
+      const summary = result.summary || `${t('ai_applied_ops').replace('{count}', String(result.operations_performed))}`;
+      setCompletedBundle({
+        summary,
+        operationsPerformed: result.operations_performed,
+        traceEntries: result.trace_entries,
+        consoleEntries: result.console_entries,
+        undoAvailable: Boolean(result.undo_available),
+        undoLabel: result.undo_label ?? null,
+      });
+      addMessage('assistant', summary);
+      applyTaskUpdates(result.task_updates);
+      if (result.needs_continuation && continuationDepthRef.current < 4) {
+        continuationDepthRef.current += 1;
+        setPendingContinuation(result.continuation_reason ?? 'Continue the original task.');
+        addMessage('system', t('ai_continuing'));
+      } else {
+        setWorkspaceView('changes');
+      }
+
+      // Immediately refresh viewport and scene tree
+      onSceneChanged?.();
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
+      setStatus('error');
+      addMessage('assistant', t('ai_execution_failed'), [{ type: 'error', data: msg }]);
+    }
+  }, [approved, addMessage, applyTaskUpdates, approvalMode, onSceneChanged, t]);
+
   // ── Submit ──
 
   const submitPrompt = useCallback(async (
@@ -1496,7 +1573,7 @@ export default function AiPanel({
       setInterruptRequested(false);
       cancelRef.current = null;
     }
-  }, [entityDetails, addMessage, approvalMode, thinkingEffort, selectedKnowledgeIds, applyTaskUpdates]);
+  }, [entityDetails, addMessage, approvalMode, thinkingEffort, selectedKnowledgeIds, applyTaskUpdates, executeApproved]);
 
   const queueOrSubmitPrompt = useCallback((prompt: string) => {
     const trimmed = prompt.trim();
@@ -1533,52 +1610,6 @@ export default function AiPanel({
     queueOrSubmitPrompt(contextualRequest.prompt);
     onContextualRequestConsumed?.(contextualRequest.id);
   }, [contextualRequest, onContextualRequestConsumed, queueOrSubmitPrompt]);
-
-  // ── Execute ──
-
-  const executeApproved = useCallback(async (approvedSet?: Set<number>) => {
-    const indices = Array.from(approvedSet ?? approved);
-    if (indices.length === 0) return;
-
-    setStatus('executing');
-    setWorkspaceView('chat');
-
-    try {
-      const result = await rpc<ApplyResult>('copilot/apply', {
-        approved_indices: indices,
-        approval_mode: approvalMode,
-      });
-
-      setStatus('complete');
-      setPlan(null);
-
-      const summary = result.summary || `${t('ai_applied_ops').replace('{count}', String(result.operations_performed))}`;
-      setCompletedBundle({
-        summary,
-        operationsPerformed: result.operations_performed,
-        traceEntries: result.trace_entries,
-        consoleEntries: result.console_entries,
-        undoAvailable: Boolean(result.undo_available),
-        undoLabel: result.undo_label ?? null,
-      });
-      addMessage('assistant', summary);
-      applyTaskUpdates(result.task_updates);
-      if (result.needs_continuation && continuationDepthRef.current < 4) {
-        continuationDepthRef.current += 1;
-        setPendingContinuation(result.continuation_reason ?? 'Continue the original task.');
-        addMessage('system', t('ai_continuing'));
-      } else {
-        setWorkspaceView('changes');
-      }
-
-      // Immediately refresh viewport and scene tree
-      onSceneChanged?.();
-    } catch (err: any) {
-      const msg = typeof err === 'string' ? err : err.message || 'Unknown error';
-      setStatus('error');
-      addMessage('assistant', t('ai_execution_failed'), [{ type: 'error', data: msg }]);
-    }
-  }, [approved, addMessage, onSceneChanged, approvalMode]);
 
   const undoLastAiEdit = useCallback(async () => {
     setStatus('executing');
@@ -1736,39 +1767,6 @@ export default function AiPanel({
     () => knowledgeEntries.filter(entry => selectedKnowledgeIds.has(entry.id)),
     [knowledgeEntries, selectedKnowledgeIds],
   );
-
-  const applyTaskUpdates = useCallback((updates?: CopilotTaskUpdate[]) => {
-    if (!updates || updates.length === 0) return;
-    if (taskHideTimerRef.current !== null) {
-      window.clearTimeout(taskHideTimerRef.current);
-      taskHideTimerRef.current = null;
-    }
-    setTaskCardVisible(true);
-    setTaskCardCollapsed(false);
-    setCopilotTasks(current => {
-      let next = [...current];
-      for (const update of updates) {
-        const id = update.id?.trim();
-        if (!id) continue;
-        const existingIndex = next.findIndex(task => task.id === id);
-        if (existingIndex >= 0) {
-          const existing = next[existingIndex];
-          next[existingIndex] = {
-            ...existing,
-            title: update.title?.trim() || existing.title,
-            done: typeof update.done === 'boolean' ? update.done : existing.done,
-          };
-        } else {
-          next.push({
-            id,
-            title: update.title?.trim() || id,
-            done: Boolean(update.done),
-          });
-        }
-      }
-      return next;
-    });
-  }, []);
 
   useEffect(() => {
     if (!taskCardVisible || copilotTasks.length === 0 || !copilotTasks.every(task => task.done)) return;

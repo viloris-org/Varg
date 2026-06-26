@@ -2508,6 +2508,10 @@ impl WgpuRenderDevice {
             },
         );
 
+        let surface_gui_format = surface_state
+            .as_ref()
+            .map(|(_, config)| config.format)
+            .unwrap_or_else(|| to_wgpu_format(format));
         let (surface, surface_config) = surface_state
             .map(|(surface, config)| (Some(surface), Some(config)))
             .unwrap_or((None, None));
@@ -2664,6 +2668,43 @@ impl WgpuRenderDevice {
             multiview_mask: None,
             cache: None,
         });
+        let surface_gui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aster surface gui pipeline"),
+            layout: Some(&gui_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &gui_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuGuiVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Uint32
+                    ],
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &gui_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_gui_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let gui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("aster gui sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2746,6 +2787,7 @@ impl WgpuRenderDevice {
             next_gui_texture: 1,
             gui_textures: HashMap::new(),
             gui_pipeline,
+            surface_gui_pipeline,
             gui_bind_group_layout,
             gui_sampler,
             gui_uniform,
@@ -2753,6 +2795,7 @@ impl WgpuRenderDevice {
             gui_index_buffer,
             gui_vertex_capacity,
             gui_index_capacity,
+            pending_surface_gui: None,
             submitted_worlds: 0,
             grid_pipeline,
             grid_bind_group,

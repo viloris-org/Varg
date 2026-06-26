@@ -10,9 +10,9 @@ use crate::{
 };
 use engine_core::{EngineError, EngineResult};
 use engine_render::{
-    BufferDesc, BufferHandle, GuiDrawList, GuiTextureId, ImageDesc, ImageHandle, RenderApi,
-    RenderDevice, RenderFrame, RenderGraph, RenderMaterialTextures, RenderPerformanceMetrics,
-    RenderTarget, RenderTargetDesc, RenderWorld,
+    BufferDesc, BufferHandle, GuiDrawCmd, GuiDrawList, GuiTextureId, ImageDesc, ImageHandle,
+    RenderApi, RenderDevice, RenderFrame, RenderGraph, RenderMaterialTextures,
+    RenderPerformanceMetrics, RenderTarget, RenderTargetDesc, RenderWorld,
 };
 use wgpu::util::DeviceExt;
 
@@ -153,6 +153,18 @@ impl RenderDevice for WgpuRenderDevice {
                 enable_ssgi,
                 enable_bloom,
             );
+            if let Some(draw_list) = self.pending_surface_gui.take() {
+                let bind_groups = self.prepare_gui_draw_list(&draw_list, sw, sh)?;
+                self.encode_prepared_gui_draw_list(
+                    &mut encoder,
+                    &draw_list,
+                    &bind_groups,
+                    &output_view,
+                    sw,
+                    sh,
+                    Some(surface_viewport),
+                );
+            }
             self.encode_gpu_timestamps_end(&mut encoder, gpu_timestamps);
 
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -666,127 +678,27 @@ impl RenderDevice for WgpuRenderDevice {
         {
             return Ok(());
         }
-        if draw_list.vertices.len() > self.gui_vertex_capacity {
-            self.gui_vertex_capacity = draw_list.vertices.len().next_power_of_two();
-            self.gui_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("aster gui vertices"),
-                size: (self.gui_vertex_capacity * std::mem::size_of::<GpuGuiVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if draw_list.indices.len() > self.gui_index_capacity {
-            self.gui_index_capacity = draw_list.indices.len().next_power_of_two();
-            self.gui_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("aster gui indices"),
-                size: (self.gui_index_capacity * std::mem::size_of::<u32>()) as u64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        let vertices: Vec<GpuGuiVertex> = draw_list
-            .vertices
-            .iter()
-            .map(|vertex| GpuGuiVertex {
-                position: vertex.pos,
-                uv: vertex.uv,
-                color: vertex.color,
-            })
-            .collect();
-        self.queue
-            .write_buffer(&self.gui_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        self.queue.write_buffer(
-            &self.gui_index_buffer,
-            0,
-            bytemuck::cast_slice(&draw_list.indices),
-        );
-
         let (width, height) = self.default_target.size();
-        self.queue.write_buffer(
-            &self.gui_uniform,
-            0,
-            bytemuck::bytes_of(&GuiUniform {
-                screen_size: [width as f32, height as f32],
-                _pad: [0.0; 2],
-            }),
-        );
-        let target = self
-            .targets
-            .get(&self.default_target.handle)
-            .ok_or_else(|| EngineError::invalid_handle("default GUI target is missing"))?;
-        let mut bind_groups = Vec::with_capacity(draw_list.commands.len());
-        for command in &draw_list.commands {
-            let view = self
-                .gui_textures
-                .get(&command.texture.0)
-                .and_then(|handle| self.images.get(handle))
-                .map_or(&self.default_texture_view, |image| &image.view);
-            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("aster gui draw bind group"),
-                layout: &self.gui_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.gui_uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.gui_sampler),
-                    },
-                ],
-            }));
-        }
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("aster gui encoder"),
             });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("aster gui pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.color_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.gui_pipeline);
-        pass.set_vertex_buffer(0, self.gui_vertex_buffer.slice(..));
-        pass.set_index_buffer(self.gui_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        for (command, bind_group) in draw_list.commands.iter().zip(&bind_groups) {
-            let [x, y, command_width, command_height] = command.scissor;
-            let x = x.min(width);
-            let y = y.min(height);
-            let scissor_width = command_width.min(width.saturating_sub(x));
-            let scissor_height = command_height.min(height.saturating_sub(y));
-            let end = command.index_offset.saturating_add(command.index_count);
-            if scissor_width == 0 || scissor_height == 0 || end as usize > draw_list.indices.len() {
-                continue;
-            }
-            pass.set_scissor_rect(x, y, scissor_width, scissor_height);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.draw_indexed(command.index_offset..end, 0, 0..1);
-        }
-        drop(pass);
+        let bind_groups = self.prepare_gui_draw_list(draw_list, width, height)?;
+        let target = self
+            .targets
+            .get(&self.default_target.handle)
+            .ok_or_else(|| EngineError::invalid_handle("default GUI target is missing"))?;
+        self.encode_prepared_gui_draw_list(
+            &mut encoder,
+            draw_list,
+            &bind_groups,
+            &target.color_view,
+            width,
+            height,
+            None,
+        );
         self.queue.submit(Some(encoder.finish()));
-        self.latest_draw_calls = self
-            .latest_draw_calls
-            .saturating_add(draw_list.commands.len() as u32);
-        self.latest_triangles = self
-            .latest_triangles
-            .saturating_add(draw_list.indices.len() as u64 / 3);
         Ok(())
     }
 
@@ -1073,4 +985,166 @@ impl RenderDevice for WgpuRenderDevice {
         self.active_skybox_cubemap = None;
         self.active_ibl_cubemap = None;
     }
+}
+
+impl WgpuRenderDevice {
+    fn prepare_gui_draw_list(
+        &mut self,
+        draw_list: &GuiDrawList,
+        width: u32,
+        height: u32,
+    ) -> EngineResult<Vec<wgpu::BindGroup>> {
+        if draw_list.vertices.len() > self.gui_vertex_capacity {
+            self.gui_vertex_capacity = draw_list.vertices.len().next_power_of_two();
+            self.gui_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster gui vertices"),
+                size: (self.gui_vertex_capacity * std::mem::size_of::<GpuGuiVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if draw_list.indices.len() > self.gui_index_capacity {
+            self.gui_index_capacity = draw_list.indices.len().next_power_of_two();
+            self.gui_index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("aster gui indices"),
+                size: (self.gui_index_capacity * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+
+        let vertices: Vec<GpuGuiVertex> = draw_list
+            .vertices
+            .iter()
+            .map(|vertex| GpuGuiVertex {
+                position: vertex.pos,
+                uv: vertex.uv,
+                color: vertex.color,
+            })
+            .collect();
+        self.queue
+            .write_buffer(&self.gui_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        self.queue.write_buffer(
+            &self.gui_index_buffer,
+            0,
+            bytemuck::cast_slice(&draw_list.indices),
+        );
+        self.queue.write_buffer(
+            &self.gui_uniform,
+            0,
+            bytemuck::bytes_of(&GuiUniform {
+                screen_size: [width as f32, height as f32],
+                _pad: [0.0; 2],
+            }),
+        );
+
+        let mut bind_groups = Vec::with_capacity(draw_list.commands.len());
+        for command in &draw_list.commands {
+            let view = self
+                .gui_textures
+                .get(&command.texture.0)
+                .and_then(|handle| self.images.get(handle))
+                .map_or(&self.default_texture_view, |image| &image.view);
+            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("aster gui draw bind group"),
+                layout: &self.gui_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.gui_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.gui_sampler),
+                    },
+                ],
+            }));
+        }
+        Ok(bind_groups)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_prepared_gui_draw_list(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        draw_list: &GuiDrawList,
+        bind_groups: &[wgpu::BindGroup],
+        output_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        viewport: Option<Option<SurfaceViewportRect>>,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("aster gui pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let surface_overlay = viewport.is_some();
+        if let Some(Some(rect)) = viewport {
+            pass.set_viewport(
+                rect.x as f32,
+                rect.y as f32,
+                rect.width as f32,
+                rect.height as f32,
+                0.0,
+                1.0,
+            );
+        }
+        pass.set_pipeline(if surface_overlay {
+            &self.surface_gui_pipeline
+        } else {
+            &self.gui_pipeline
+        });
+        pass.set_vertex_buffer(0, self.gui_vertex_buffer.slice(..));
+        pass.set_index_buffer(self.gui_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        for (command, bind_group) in draw_list.commands.iter().zip(bind_groups) {
+            let Some(scissor) = gui_scissor(command, width, height, viewport.flatten()) else {
+                continue;
+            };
+            let end = command.index_offset.saturating_add(command.index_count);
+            if end as usize > draw_list.indices.len() {
+                continue;
+            }
+            pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw_indexed(command.index_offset..end, 0, 0..1);
+        }
+        drop(pass);
+    }
+}
+
+fn gui_scissor(
+    command: &GuiDrawCmd,
+    width: u32,
+    height: u32,
+    viewport: Option<SurfaceViewportRect>,
+) -> Option<[u32; 4]> {
+    let [mut x, mut y, mut w, mut h] = command.scissor;
+    x = x.min(width);
+    y = y.min(height);
+    w = w.min(width.saturating_sub(x));
+    h = h.min(height.saturating_sub(y));
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if let Some(rect) = viewport {
+        x = x.saturating_add(rect.x);
+        y = y.saturating_add(rect.y);
+    }
+    Some([x, y, w, h])
 }
