@@ -762,6 +762,12 @@ pub trait RenderDevice {
     /// Submits a GUI draw list for rendering.
     fn draw_gui(&mut self, draw_list: &GuiDrawList) -> EngineResult<()>;
 
+    /// Queues a GUI draw list to composite over the next presented surface frame.
+    ///
+    /// Backends without a surface overlay path may ignore this and rely on
+    /// [`RenderDevice::draw_gui`] for offscreen composition.
+    fn queue_surface_gui(&mut self, _draw_list: GuiDrawList) {}
+
     /// Uploads a mesh to the GPU with vertex data and indices.
     ///
     /// The default implementation is a no-op; backends that support mesh

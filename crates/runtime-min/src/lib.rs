@@ -43,17 +43,18 @@ use engine_physics::{
 use engine_platform::GamepadProvider;
 use engine_platform::{ActionMap, InputState};
 use engine_render::{
-    AntiAliasingMode, BatteryPolicy, FrameGenerationKind, HeadlessRenderDevice, ImageHandle,
-    PresentStrategy, RenderApi, RenderDevice, RenderFrame, RenderGraph, RenderGraphBuilder,
-    RenderPerformanceConfig, RenderPlatformClass, RenderQualityMode, RenderScalingContext,
-    RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy, UpscalerKind,
+    AntiAliasingMode, BatteryPolicy, FrameGenerationKind, GuiDrawCmd, GuiDrawList, GuiTextureId,
+    GuiVertex, HeadlessRenderDevice, ImageHandle, PresentStrategy, RenderApi, RenderDevice,
+    RenderFrame, RenderGraph, RenderGraphBuilder, RenderPerformanceConfig, RenderPlatformClass,
+    RenderQualityMode, RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState,
+    UiCompositionPolicy, UpscalerKind,
 };
 #[cfg(feature = "asset-import")]
 use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
 use engine_script_varg::{
-    VargRuntimeContext, VargSceneContext, VargScript, compile_script_source,
+    VargRuntimeContext, VargSceneContext, VargScript, VargUiCommand, compile_script_source,
     compile_vscene_source_to_scene,
 };
 #[cfg(feature = "audio")]
@@ -88,6 +89,8 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     pub render_scaling_selection: Option<engine_render::RenderScalingSelection>,
     /// Diagnostics emitted by runtime subsystems.
     pub diagnostics: Vec<RuntimeDiagnostic>,
+    /// UI draw commands emitted by scripts during the latest game frame.
+    pub ui_commands: Vec<VargUiCommand>,
     #[cfg(feature = "physics")]
     /// Physics world used by runtime-game.
     pub physics: PhysicsWorld,
@@ -275,6 +278,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
             render_scaling_settings: RenderScalingSettings::default(),
             render_scaling_selection: None,
             diagnostics: Vec::new(),
+            ui_commands: Vec::new(),
             #[cfg(feature = "physics")]
             physics: PhysicsWorld::new(RapierPhysicsBackend::new()),
             #[cfg(feature = "runtime-game")]
@@ -383,6 +387,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.time.update(dt);
         self.stats.frame_time_seconds = self.time.delta_seconds;
         self.stats.physics_steps = 0;
+        self.ui_commands.clear();
         let should_simulate = !self.paused || single_step;
 
         // ── script startup ───────────────────────────────────────────
@@ -430,11 +435,18 @@ impl<R: RenderDevice> RuntimeServices<R> {
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
         };
+        let ui_draw_list = build_script_ui_draw_list(&self.ui_commands);
+        if !ui_draw_list.commands.is_empty() {
+            self.renderer.queue_surface_gui(ui_draw_list.clone());
+        }
         self.renderer.submit_render_world_with_graph(
             &self.render_world,
             &self.render_graph,
             frame,
         )?;
+        if !ui_draw_list.commands.is_empty() {
+            self.renderer.draw_gui(&ui_draw_list)?;
+        }
         self.renderer.record_frame_time(dt * 1000.0);
         let render_metrics = self.renderer.performance_metrics();
 
@@ -614,6 +626,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     line: None,
                 });
             }
+            self.ui_commands.extend(output.ui_commands);
         }
     }
 
@@ -2132,6 +2145,110 @@ pub fn render_scaling_settings_from_build(build: &BuildConfiguration) -> RenderS
     apply_runtime_scaling_env(settings)
 }
 
+fn build_script_ui_draw_list(commands: &[VargUiCommand]) -> GuiDrawList {
+    let mut draw_list = GuiDrawList::default();
+    for command in commands {
+        match command {
+            VargUiCommand::Rect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } => push_gui_quad(&mut draw_list, *x, *y, *width, *height, *color),
+            VargUiCommand::Label { text, x, y, .. } => {
+                let mut cursor_x = *x;
+                for ch in text.chars() {
+                    if ch.is_whitespace() {
+                        cursor_x += 5.0;
+                        continue;
+                    }
+                    let width = if ch.is_ascii_punctuation() { 3.0 } else { 6.0 };
+                    push_gui_quad(
+                        &mut draw_list,
+                        cursor_x,
+                        *y,
+                        width,
+                        10.0,
+                        [1.0, 1.0, 1.0, 1.0],
+                    );
+                    cursor_x += width + 2.0;
+                }
+            }
+        }
+    }
+    draw_list
+}
+
+fn push_gui_quad(
+    draw_list: &mut GuiDrawList,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+) {
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let base = draw_list.vertices.len() as u32;
+    let color = pack_gui_color(color);
+    draw_list.vertices.extend([
+        GuiVertex {
+            pos: [x, y],
+            uv: [0.0, 0.0],
+            color,
+        },
+        GuiVertex {
+            pos: [x + width, y],
+            uv: [1.0, 0.0],
+            color,
+        },
+        GuiVertex {
+            pos: [x + width, y + height],
+            uv: [1.0, 1.0],
+            color,
+        },
+        GuiVertex {
+            pos: [x, y + height],
+            uv: [0.0, 1.0],
+            color,
+        },
+    ]);
+    let index_offset = draw_list.indices.len() as u32;
+    draw_list
+        .indices
+        .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    draw_list.commands.push(GuiDrawCmd {
+        texture: GuiTextureId(0),
+        scissor: gui_scissor_for_rect(x, y, width, height),
+        index_offset,
+        index_count: 6,
+    });
+}
+
+fn pack_gui_color(color: [f32; 4]) -> u32 {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    channel(color[0])
+        | (channel(color[1]) << 8)
+        | (channel(color[2]) << 16)
+        | (channel(color[3]) << 24)
+}
+
+fn gui_scissor_for_rect(x: f32, y: f32, width: f32, height: f32) -> [u32; 4] {
+    let left = x.floor().max(0.0) as u32;
+    let top = y.floor().max(0.0) as u32;
+    let right = (x + width).ceil().max(left as f32) as u32;
+    let bottom = (y + height).ceil().max(top as f32) as u32;
+    [
+        left,
+        top,
+        right.saturating_sub(left).max(1),
+        bottom.saturating_sub(top).max(1),
+    ]
+}
+
 fn apply_runtime_scaling_env(mut settings: RenderScalingSettings) -> RenderScalingSettings {
     if let Ok(value) = std::env::var("ASTER_UPSCALER") {
         settings.preferred_upscaler = Some(parse_upscaler(&value));
@@ -2961,6 +3078,35 @@ mod tests {
     }
 
     #[test]
+    fn script_ui_commands_build_gui_draw_list() {
+        let draw_list = build_script_ui_draw_list(&[
+            VargUiCommand::Rect {
+                id: "panel".to_string(),
+                x: 8.0,
+                y: 10.0,
+                width: 24.0,
+                height: 12.0,
+                color: [0.25, 0.5, 0.75, 1.0],
+            },
+            VargUiCommand::Label {
+                id: "label".to_string(),
+                text: "Hi!".to_string(),
+                x: 40.0,
+                y: 12.0,
+            },
+        ]);
+
+        assert_eq!(draw_list.vertices.len(), 16);
+        assert_eq!(draw_list.indices.len(), 24);
+        assert_eq!(draw_list.commands.len(), 4);
+        assert_eq!(draw_list.commands[0].scissor, [8, 10, 24, 12]);
+        assert_eq!(draw_list.commands[0].index_offset, 0);
+        assert_eq!(draw_list.commands[0].index_count, 6);
+        assert_eq!(draw_list.vertices[0].color, 0xffbf8040);
+        assert_eq!(draw_list.vertices[4].pos, [40.0, 12.0]);
+    }
+
+    #[test]
     fn varg_script_start_and_update_can_move_transform() {
         let root = tempfile::tempdir().unwrap();
         let scripts = root.path().join("scripts");
@@ -3025,6 +3171,65 @@ mod tests {
             script.state.get("ticks").and_then(|value| value.as_f64()),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn varg_script_ui_commands_are_collected_per_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("hud.varg"),
+            r#"script Hud {
+    func update(_ dt: Float) {
+        ui.rect("panel", 8.0, 8.0, 160.0, 40.0, 0.0, 0.0, 0.0, 0.7)
+        ui.label("score", "Score: 10", 16.0, 20.0)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Hud").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/hud.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(
+            services.ui_commands,
+            vec![
+                VargUiCommand::Rect {
+                    id: "panel".to_string(),
+                    x: 8.0,
+                    y: 8.0,
+                    width: 160.0,
+                    height: 40.0,
+                    color: [0.0, 0.0, 0.0, 0.7],
+                },
+                VargUiCommand::Label {
+                    id: "score".to_string(),
+                    text: "Score: 10".to_string(),
+                    x: 16.0,
+                    y: 20.0,
+                },
+            ]
+        );
+
+        services.paused = true;
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+        assert!(services.ui_commands.is_empty());
     }
 
     #[test]

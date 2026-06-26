@@ -224,8 +224,41 @@ pub struct VargRuntimeOutput {
     pub state: HashMap<String, serde_json::Value>,
     /// Log entries emitted by `log(...)`.
     pub logs: Vec<String>,
+    /// UI draw commands emitted by `ui.*(...)` calls during this hook.
+    pub ui_commands: Vec<VargUiCommand>,
     /// Whether the script requested deferred destruction of its owning entity.
     pub destroy_self: bool,
+}
+
+/// A retained UI draw request emitted by Varg scripts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VargUiCommand {
+    /// Draws text at a screen-space position.
+    Label {
+        /// Stable script-provided widget id.
+        id: String,
+        /// Text to draw.
+        text: String,
+        /// Screen-space x position in pixels.
+        x: f32,
+        /// Screen-space y position in pixels.
+        y: f32,
+    },
+    /// Draws a flat colored rectangle in screen space.
+    Rect {
+        /// Stable script-provided widget id.
+        id: String,
+        /// Screen-space x position in pixels.
+        x: f32,
+        /// Screen-space y position in pixels.
+        y: f32,
+        /// Width in pixels.
+        width: f32,
+        /// Height in pixels.
+        height: f32,
+        /// RGBA color in linear float channels.
+        color: [f32; 4],
+    },
 }
 
 /// Read-only scene facts available to one script invocation.
@@ -326,6 +359,20 @@ enum RuntimeStatement {
     Continue,
     Wait(Expression),
     DestroySelf,
+    UiLabel {
+        id: Expression,
+        text: Expression,
+        x: Expression,
+        y: Expression,
+    },
+    UiRect {
+        id: Expression,
+        x: Expression,
+        y: Expression,
+        width: Expression,
+        height: Expression,
+        color: [Expression; 4],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -639,6 +686,7 @@ impl VargScript {
             transform: context.transform,
             state: context.state,
             logs: Vec::new(),
+            ui_commands: Vec::new(),
             destroy_self: false,
         };
         let Some(statements) = self.hooks.get(hook) else {
@@ -656,6 +704,7 @@ impl VargScript {
             state: &mut output.state,
             locals: HashMap::new(),
             logs: &mut output.logs,
+            ui_commands: &mut output.ui_commands,
             destroy_self: &mut output.destroy_self,
             should_return: false,
             should_break: false,
@@ -2268,6 +2317,7 @@ struct RuntimeEnvironment<'a> {
     state: &'a mut HashMap<String, serde_json::Value>,
     locals: HashMap<String, serde_json::Value>,
     logs: &'a mut Vec<String>,
+    ui_commands: &'a mut Vec<VargUiCommand>,
     destroy_self: &'a mut bool,
     /// When true, the current function should return.
     should_return: bool,
@@ -2463,6 +2513,36 @@ impl RuntimeEnvironment<'_> {
             RuntimeStatement::DestroySelf => {
                 *self.destroy_self = true;
                 self.should_return = true;
+            }
+            RuntimeStatement::UiLabel { id, text, x, y } => {
+                self.ui_commands.push(VargUiCommand::Label {
+                    id: self.eval_string(id).unwrap_or_default(),
+                    text: self.eval_display_string(text),
+                    x: self.eval_number(x),
+                    y: self.eval_number(y),
+                });
+            }
+            RuntimeStatement::UiRect {
+                id,
+                x,
+                y,
+                width,
+                height,
+                color,
+            } => {
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: self.eval_string(id).unwrap_or_default(),
+                    x: self.eval_number(x),
+                    y: self.eval_number(y),
+                    width: self.eval_number(width).max(0.0),
+                    height: self.eval_number(height).max(0.0),
+                    color: [
+                        self.eval_number(&color[0]).clamp(0.0, 1.0),
+                        self.eval_number(&color[1]).clamp(0.0, 1.0),
+                        self.eval_number(&color[2]).clamp(0.0, 1.0),
+                        self.eval_number(&color[3]).clamp(0.0, 1.0),
+                    ],
+                });
             }
         }
     }
@@ -2721,6 +2801,11 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
+    fn eval_display_string(&self, expression: &Expression) -> String {
+        self.eval_string(expression)
+            .unwrap_or_else(|| self.eval_number(expression).to_string())
+    }
+
     fn unary_math(&self, args: &[Expression], op: impl FnOnce(f32) -> f32) -> f32 {
         args.first()
             .map(|arg| op(self.eval_number(arg)))
@@ -2881,6 +2966,35 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
     }
     if let Some(content) = method_args(line, "entity.translate") {
         return parse_expression(content).map(RuntimeStatement::Translate);
+    }
+    if let Some(content) = method_args(line, "ui.label") {
+        let args = split_top_level_commas(content);
+        if args.len() == 4 {
+            return Some(RuntimeStatement::UiLabel {
+                id: parse_expression(args[0])?,
+                text: parse_expression(args[1])?,
+                x: parse_expression(args[2])?,
+                y: parse_expression(args[3])?,
+            });
+        }
+    }
+    if let Some(content) = method_args(line, "ui.rect") {
+        let args = split_top_level_commas(content);
+        if args.len() == 9 {
+            return Some(RuntimeStatement::UiRect {
+                id: parse_expression(args[0])?,
+                x: parse_expression(args[1])?,
+                y: parse_expression(args[2])?,
+                width: parse_expression(args[3])?,
+                height: parse_expression(args[4])?,
+                color: [
+                    parse_expression(args[5])?,
+                    parse_expression(args[6])?,
+                    parse_expression(args[7])?,
+                    parse_expression(args[8])?,
+                ],
+            });
+        }
     }
     if let Some((name, value)) = parse_local_declaration(line) {
         return Some(RuntimeStatement::DeclareLocal {
@@ -3314,7 +3428,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
     if trimmed.starts_with("emit(") || trimmed.starts_with("emit ") {
         return (
             "unsupported runtime API `emit`".to_string(),
-            "The MVP runtime supports local script state, transform position changes, Input, Time, Math, `log(...)`, and `wait(...)`."
+            "The MVP runtime supports local script state, transform position changes, Input, Time, Math, `log(...)`, `wait(...)`, and basic `ui.*(...)` draw commands."
                 .to_string(),
             "`emit(...)` is in the target language direction but is not wired into this runtime yet. Store a value in `state.*` or use `log(...)` for now."
                 .to_string(),
@@ -3362,7 +3476,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
 
     (
         "unsupported runtime statement".to_string(),
-        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
+        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
             .to_string(),
         "Rewrite this line using the supported MVP script API, or add runtime support before using this language construct."
             .to_string(),
@@ -4107,6 +4221,55 @@ mod tests {
         assert_eq!(
             output.state.get("dead").and_then(|value| value.as_f64()),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn runtime_emits_ui_draw_commands() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/hud.varg",
+            r#"script Hud {
+    func update(_ dt: Float) {
+        ui.rect("health_bg", 12.0, 16.0, 120.0, 10.0, 0.1, 0.1, 0.1, 0.8)
+        ui.label("score", "Score: 10", 12.0, 32.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let output = script.unwrap().run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 1.0,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.ui_commands,
+            vec![
+                VargUiCommand::Rect {
+                    id: "health_bg".to_string(),
+                    x: 12.0,
+                    y: 16.0,
+                    width: 120.0,
+                    height: 10.0,
+                    color: [0.1, 0.1, 0.1, 0.8],
+                },
+                VargUiCommand::Label {
+                    id: "score".to_string(),
+                    text: "Score: 10".to_string(),
+                    x: 12.0,
+                    y: 32.0,
+                },
+            ]
         );
     }
 

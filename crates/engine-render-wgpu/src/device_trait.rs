@@ -702,6 +702,10 @@ impl RenderDevice for WgpuRenderDevice {
         Ok(())
     }
 
+    fn queue_surface_gui(&mut self, draw_list: GuiDrawList) {
+        self.set_next_surface_gui(draw_list);
+    }
+
     fn upload_mesh_data(
         &mut self,
         mesh_name: &str,

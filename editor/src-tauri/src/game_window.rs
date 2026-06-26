@@ -13,7 +13,7 @@ use engine_render_wgpu::WgpuRenderDevice;
 use runtime_min::RuntimeServices;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 /// Minimum frame interval for ~60fps cap.
@@ -83,7 +83,7 @@ pub enum GameEvent {
 
 /// Handle to a running game window.
 pub struct GameWindowHandle {
-    cmd_tx: mpsc::Sender<GameCommand>,
+    cmd_tx: Option<EventLoopProxy<GameCommand>>,
     event_rx: mpsc::Receiver<GameEvent>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -92,14 +92,18 @@ impl GameWindowHandle {
     /// Restarts the game with a fresh runtime snapshot.
     pub fn restart(&self, snapshot: GameRuntimeSnapshot) -> Result<(), String> {
         self.cmd_tx
-            .send(GameCommand::Restart(snapshot))
+            .as_ref()
+            .ok_or_else(|| "game window thread is not running".to_owned())?
+            .send_event(GameCommand::Restart(snapshot))
             .map_err(|_| "game window thread is not running".to_owned())
     }
 
     /// Shows the game window without recreating its event loop.
     pub fn show(&self) -> Result<(), String> {
         self.cmd_tx
-            .send(GameCommand::Show)
+            .as_ref()
+            .ok_or_else(|| "game window thread is not running".to_owned())?
+            .send_event(GameCommand::Show)
             .map_err(|_| "game window thread is not running".to_owned())
     }
 
@@ -109,7 +113,9 @@ impl GameWindowHandle {
         settings: engine_render::RenderScalingSettings,
     ) -> Result<(), String> {
         self.cmd_tx
-            .send(GameCommand::SetRenderScaling(settings))
+            .as_ref()
+            .ok_or_else(|| "game window thread is not running".to_owned())?
+            .send_event(GameCommand::SetRenderScaling(settings))
             .map_err(|_| "game window thread is not running".to_owned())
     }
 
@@ -121,7 +127,9 @@ impl GameWindowHandle {
     /// Shuts down the game window and waits for the thread to finish.
     #[cfg(test)]
     pub fn shutdown(mut self) {
-        let _ = self.cmd_tx.send(GameCommand::Shutdown);
+        if let Some(cmd_tx) = self.cmd_tx.as_ref() {
+            let _ = cmd_tx.send_event(GameCommand::Shutdown);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -130,7 +138,9 @@ impl GameWindowHandle {
 
 impl Drop for GameWindowHandle {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(GameCommand::Shutdown);
+        if let Some(cmd_tx) = self.cmd_tx.as_ref() {
+            let _ = cmd_tx.send_event(GameCommand::Shutdown);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -147,12 +157,21 @@ pub fn spawn_game_window(
     height: u32,
     snapshot: GameRuntimeSnapshot,
 ) -> GameWindowHandle {
-    let (cmd_tx, cmd_rx) = mpsc::channel::<GameCommand>();
     let (event_tx, event_rx) = mpsc::channel::<GameEvent>();
+    let (proxy_tx, proxy_rx) = mpsc::sync_channel(1);
+    let thread_event_tx = event_tx.clone();
 
     let thread = thread::spawn(move || {
-        run_game_window(title, width, height, snapshot, cmd_rx, event_tx);
+        run_game_window(title, width, height, snapshot, thread_event_tx, proxy_tx);
     });
+    let cmd_tx = match proxy_rx.recv() {
+        Ok(Ok(proxy)) => Some(proxy),
+        Ok(Err(error)) => {
+            let _ = event_tx.send(GameEvent::Error(error));
+            None
+        }
+        Err(_) => None,
+    };
 
     GameWindowHandle {
         cmd_tx,
@@ -166,10 +185,10 @@ fn run_game_window(
     width: u32,
     height: u32,
     snapshot: GameRuntimeSnapshot,
-    cmd_rx: mpsc::Receiver<GameCommand>,
     event_tx: mpsc::Sender<GameEvent>,
+    proxy_tx: mpsc::SyncSender<Result<EventLoopProxy<GameCommand>, String>>,
 ) {
-    let mut builder = EventLoop::builder();
+    let mut builder = EventLoop::<GameCommand>::with_user_event();
     // Allow event loop on non-main thread (required since Tauri owns the main thread)
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -179,10 +198,14 @@ fn run_game_window(
     let event_loop = match builder.build() {
         Ok(el) => el,
         Err(e) => {
-            let _ = event_tx.send(GameEvent::Error(format!("event loop: {e}")));
+            let _ = proxy_tx.send(Err(format!("event loop: {e}")));
             return;
         }
     };
+    let proxy = event_loop.create_proxy();
+    if proxy_tx.send(Ok(proxy)).is_err() {
+        return;
+    }
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = GameApp {
@@ -191,7 +214,6 @@ fn run_game_window(
         height,
         runtime: None,
         window: None,
-        cmd_rx,
         event_tx,
         last_frame: Instant::now(),
         pending_snapshot: Some(snapshot),
@@ -212,14 +234,13 @@ struct GameApp {
     // lifetime. Fields drop in declaration order, so runtime precedes window.
     runtime: Option<RuntimeServices<WgpuRenderDevice>>,
     window: Option<Window>,
-    cmd_rx: mpsc::Receiver<GameCommand>,
     event_tx: mpsc::Sender<GameEvent>,
     last_frame: Instant,
     pending_snapshot: Option<GameRuntimeSnapshot>,
     visible: bool,
 }
 
-impl ApplicationHandler for GameApp {
+impl ApplicationHandler<GameCommand> for GameApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.create_window_and_install_runtime(event_loop) {
             let _ = self.event_tx.send(GameEvent::Error(error));
@@ -252,46 +273,11 @@ impl ApplicationHandler for GameApp {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Drain commands from the editor
-        let commands: Vec<_> = self.cmd_rx.try_iter().collect();
-        for cmd in commands {
-            match cmd {
-                GameCommand::Restart(snapshot) => {
-                    if self.window.is_some() {
-                        if let Err(error) = self.install_runtime(snapshot) {
-                            let _ = self.event_tx.send(GameEvent::Error(error));
-                        }
-                    } else {
-                        self.pending_snapshot = Some(snapshot);
-                    }
-                }
-                GameCommand::Show => {
-                    self.visible = true;
-                    if self.window.is_none() {
-                        if let Err(error) = self.create_window_and_install_runtime(event_loop) {
-                            let _ = self.event_tx.send(GameEvent::Error(error));
-                        }
-                    }
-                    if let Some(window) = self.window.as_ref() {
-                        window.set_visible(true);
-                        window.focus_window();
-                        window.request_redraw();
-                    }
-                }
-                GameCommand::SetRenderScaling(settings) => {
-                    if let Some(runtime) = self.runtime.as_mut() {
-                        runtime
-                            .set_render_scaling(settings, runtime_min::runtime_scaling_context());
-                    }
-                }
-                GameCommand::Shutdown => {
-                    event_loop.exit();
-                    return;
-                }
-            }
-        }
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: GameCommand) {
+        self.handle_command(event_loop, event);
+    }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Request a redraw for continuous rendering
         if self.visible {
             if let Some(window) = self.window.as_ref() {
@@ -315,6 +301,41 @@ impl ApplicationHandler for GameApp {
 }
 
 impl GameApp {
+    fn handle_command(&mut self, event_loop: &ActiveEventLoop, cmd: GameCommand) {
+        match cmd {
+            GameCommand::Restart(snapshot) => {
+                if self.window.is_some() {
+                    if let Err(error) = self.install_runtime(snapshot) {
+                        let _ = self.event_tx.send(GameEvent::Error(error));
+                    }
+                } else {
+                    self.pending_snapshot = Some(snapshot);
+                }
+            }
+            GameCommand::Show => {
+                self.visible = true;
+                if self.window.is_none() {
+                    if let Err(error) = self.create_window_and_install_runtime(event_loop) {
+                        let _ = self.event_tx.send(GameEvent::Error(error));
+                    }
+                }
+                if let Some(window) = self.window.as_ref() {
+                    window.set_visible(true);
+                    window.focus_window();
+                    window.request_redraw();
+                }
+            }
+            GameCommand::SetRenderScaling(settings) => {
+                if let Some(runtime) = self.runtime.as_mut() {
+                    runtime.set_render_scaling(settings, runtime_min::runtime_scaling_context());
+                }
+            }
+            GameCommand::Shutdown => {
+                event_loop.exit();
+            }
+        }
+    }
+
     fn window_attributes(&self) -> WindowAttributes {
         WindowAttributes::default()
             .with_title(&self.title)
@@ -397,6 +418,7 @@ impl GameApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_editor::FileEditorStore;
 
     #[cfg(target_os = "linux")]
     fn has_linux_display() -> bool {
@@ -448,5 +470,27 @@ mod tests {
         assert!(errors.is_empty(), "game window errors: {errors:?}");
 
         handle.shutdown();
+    }
+
+    #[test]
+    fn polling_closed_game_window_keeps_event_loop_handle() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileEditorStore::new(&temp_dir.path().join("editor-state.toml"));
+        let mut host = crate::EditorHost::new(store).expect("create editor host");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        host.game_window = Some(GameWindowHandle {
+            cmd_tx: None,
+            event_rx,
+            thread: None,
+        });
+        event_tx.send(GameEvent::Closed).expect("send close event");
+
+        host.poll_game_window();
+
+        assert!(
+            host.game_window.is_some(),
+            "closed game windows should reuse their event loop on the next Play"
+        );
     }
 }
