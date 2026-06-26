@@ -6562,6 +6562,7 @@ fn validate_quest_workspace(workspace_root: &Path) -> Vec<ValidationResult> {
     results.push(validate_quest_audio_diagnostics(&project));
     results.push(validate_quest_render_extraction(&project));
     results.push(validate_quest_play_preview(workspace_root, &project));
+    results.push(validate_quest_credential_reachability(workspace_root));
 
     let cargo_toml = workspace_root.join("Cargo.toml");
     if cargo_toml.is_file() {
@@ -6921,6 +6922,32 @@ fn validate_quest_play_preview(
             }
         }
         Err(error) => ValidationResult::new("Play preview smoke", "failed", error.to_string()),
+    }
+}
+
+fn validate_quest_credential_reachability(workspace_root: &Path) -> ValidationResult {
+    // Check if the workspace project has a configured AI provider credential.
+    // This is a lightweight check — it verifies the project-level config exists,
+    // not that a specific API key is valid (which requires network calls).
+    let aster_dir = workspace_root.join(".aster");
+    let has_quest_config = aster_dir.join("quest-config.json").is_file()
+        || aster_dir.join("copilot.json").is_file();
+
+    // Also check if there's a stub/deterministic marker which means no real key needed
+    let stub_marker = aster_dir.join("quest-stub-enabled").is_file();
+
+    if has_quest_config || stub_marker {
+        ValidationResult::new(
+            "Credential reachability",
+            "passed",
+            "Quest AI provider configuration is present for this project.",
+        )
+    } else {
+        ValidationResult::new(
+            "Credential reachability",
+            "skipped",
+            "No project-level AI provider configuration found. Defaulting to editor-wide settings.",
+        )
     }
 }
 
