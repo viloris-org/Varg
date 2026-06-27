@@ -136,13 +136,16 @@ impl WaylandEmbeddedViewport {
 
 #[derive(Clone, Copy, Debug)]
 pub struct WaylandEmbeddedHostOutputTarget {
-    surface: scene_window::SceneRawSurface,
+    _surface: scene_window::SceneRawSurface,
     viewport: WaylandEmbeddedViewport,
 }
 
 impl WaylandEmbeddedHostOutputTarget {
     pub fn new(surface: scene_window::SceneRawSurface, viewport: WaylandEmbeddedViewport) -> Self {
-        Self { surface, viewport }
+        Self {
+            _surface: surface,
+            viewport,
+        }
     }
 }
 
@@ -225,6 +228,7 @@ impl WaylandEmbeddedOutputCompositionStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(not(feature = "wayland-embedded-compositor"), allow(dead_code))]
 pub struct WaylandEmbeddedCompositorTelemetry {
     pub imported_frames: u64,
     pub committed_frames: u64,
@@ -1008,7 +1012,8 @@ mod backend {
         fn create_wayland_target(
             target: WaylandEmbeddedHostOutputTarget,
         ) -> Result<(GlesRenderer, GlesHostWaylandTarget), String> {
-            let scene_window::SceneRawSurface::Wayland { display, surface } = target.surface else {
+            let scene_window::SceneRawSurface::Wayland { display, surface } = target._surface
+            else {
                 return Err(
                     "embedded compositor host output only supports Wayland surfaces".to_owned(),
                 );

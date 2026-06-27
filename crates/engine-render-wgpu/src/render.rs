@@ -1,4 +1,11 @@
-use crate::{device::*, format::*, passes::*, scene_uniforms::*, uniforms::*};
+use crate::{
+    device::*,
+    format::*,
+    math::{IDENTITY_MAT4, inverse_mat4},
+    passes::*,
+    scene_uniforms::*,
+    uniforms::*,
+};
 use engine_core::{EngineError, EngineResult, Handle};
 use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
@@ -85,6 +92,23 @@ impl WgpuRenderDevice {
         self.latest_culled_lights = self
             .latest_submitted_lights
             .saturating_sub(self.latest_visible_lights);
+        let selected = select_forward_lights(world);
+        self.latest_shadowed_lights = selected
+            .iter()
+            .filter(|light| light.settings.casts_shadow)
+            .count() as u32;
+        self.latest_directional_shadow_cascades = selected
+            .iter()
+            .find(|light| {
+                light.kind == engine_render::RenderLightKind::Directional
+                    && light.settings.casts_shadow
+            })
+            .map(|light| match light.settings.directional_shadow_mode {
+                engine_render::RenderDirectionalShadowMode::Orthogonal => 1,
+                engine_render::RenderDirectionalShadowMode::Parallel2Splits => 2,
+                engine_render::RenderDirectionalShadowMode::Parallel4Splits => 4,
+            })
+            .unwrap_or(0);
         self.queue
             .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
     }
@@ -333,6 +357,10 @@ impl WgpuRenderDevice {
             .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
             .count() as u32
             * CSM_CASCADE_COUNT as u32;
+        self.latest_shadow_caster_batches = batches
+            .iter()
+            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
+            .count() as u32;
         let bloom_draws = if bloom_enabled {
             self.bloom_mip_views
                 .len()
@@ -650,6 +678,7 @@ impl WgpuRenderDevice {
         let frame_res = self.encode_frame_passes(
             &batches,
             &csm,
+            &uniform,
             tw,
             th,
             ow,
@@ -719,6 +748,9 @@ impl WgpuRenderDevice {
             submitted_lights: self.latest_submitted_lights,
             visible_lights: self.latest_visible_lights,
             culled_lights: self.latest_culled_lights,
+            shadowed_lights: self.latest_shadowed_lights,
+            shadow_caster_batches: self.latest_shadow_caster_batches,
+            directional_shadow_cascades: self.latest_directional_shadow_cascades,
             hybrid_deferred,
             active_gi_probes,
             virtual_shadow_pages,
@@ -735,6 +767,7 @@ impl WgpuRenderDevice {
         &mut self,
         _batches: &[(String, u32, String, bool)],
         csm: &CsmUniform,
+        camera: &CameraUniform,
         tw: u32,
         th: u32,
         output_width: u32,
@@ -755,6 +788,9 @@ impl WgpuRenderDevice {
             &self.post_uniform,
             0,
             bytemuck::bytes_of(&PostProcessUniform {
+                inv_view_projection: inverse_mat4(&camera.view_projection).unwrap_or(IDENTITY_MAT4),
+                view_projection: camera.view_projection,
+                camera_position: camera.camera_position,
                 render_width: tw as f32,
                 render_height: th as f32,
                 inv_render_width: 1.0 / tw.max(1) as f32,

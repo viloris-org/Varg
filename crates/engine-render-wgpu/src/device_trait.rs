@@ -119,6 +119,7 @@ impl RenderDevice for WgpuRenderDevice {
             let frame_res = self.encode_frame_passes(
                 &batches,
                 &csm,
+                &uniform,
                 rw,
                 rh,
                 sw,
@@ -242,6 +243,7 @@ impl RenderDevice for WgpuRenderDevice {
         let frame_res = self.encode_frame_passes(
             &batches,
             &csm,
+            &uniform,
             tw,
             th,
             ow,

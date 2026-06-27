@@ -1,3 +1,4 @@
+use crate::math::{mul_mat4_vec3, orthographic_rh, orthographic_rh_custom, perspective_rh};
 use crate::{device::*, meshes::*, post::*, render::*, scene_uniforms::*, shaders::*, uniforms::*};
 use engine_render::{
     RenderGlobalIllumination, RenderLight, RenderLightKind, RenderObject, RenderWorld,
@@ -162,7 +163,7 @@ fn forward_shader_selects_cascades_with_linear_camera_depth() {
 #[test]
 fn gpu_uniform_structs_match_wgsl_alignment() {
     assert_eq!(std::mem::size_of::<CameraUniform>(), 96);
-    assert_eq!(std::mem::size_of::<PostProcessUniform>(), 80);
+    assert_eq!(std::mem::size_of::<PostProcessUniform>(), 224);
     assert_eq!(
         std::mem::size_of::<LightingUniform>(),
         32 + MAX_FORWARD_LIGHTS * std::mem::size_of::<ForwardLightUniform>()
@@ -183,6 +184,21 @@ fn forward_and_ssgi_shaders_expose_p1_p2_temporal_lighting_inputs() {
     assert!(POST_SHADER.contains("var depth_tex: texture_depth_2d"));
     assert!(POST_SHADER.contains("fn screen_space_reflection"));
     assert!(POST_SHADER.contains("post.ssr_intensity"));
+    assert!(POST_SHADER.contains("reconstruct_world_position"));
+    assert!(POST_SHADER.contains("post.view_projection * vec4<f32>(ray_pos, 1.0)"));
+}
+
+#[test]
+fn screen_space_reflections_are_enabled_with_camera_matrices() {
+    let render_source = include_str!("render.rs");
+    let constructor_source = include_str!("constructors.rs");
+
+    assert!(render_source.contains("inv_view_projection"));
+    assert!(render_source.contains("view_projection: camera.view_projection"));
+    assert!(render_source.contains("ssr_enabled: 1.0"));
+    assert!(render_source.contains("ssr_intensity: 0.35"));
+    assert!(constructor_source.contains("ssr_enabled: 1.0"));
+    assert!(constructor_source.contains("ssr_intensity: 0.35"));
 }
 
 #[test]
@@ -199,8 +215,27 @@ fn csm_uniform_exposes_shadow_sampling_params() {
 
     assert_eq!(params[0], CSM_CASCADE_FADE_RANGE);
     assert_eq!(params[1], 1.0 / CSM_SHADOW_RESOLUTION as f32);
-    assert!(params[2] > 0.0);
+    assert!(params[2] >= 0.002);
     assert!(params[3] > params[2]);
+}
+
+#[test]
+fn forward_shader_applies_shadows_to_direct_directional_light_only() {
+    assert!(FORWARD_SHADER.contains("radiance = radiance * shadow_factor;"));
+    assert!(!FORWARD_SHADER.contains("direct_shadow"));
+}
+
+#[test]
+fn forward_shader_flips_csm_y_for_texture_sampling() {
+    assert!(FORWARD_SHADER.contains("0.5 - ndc.y * 0.5"));
+    assert!(FORWARD_SHADER.contains("0.5 - ndc2.y * 0.5"));
+}
+
+#[test]
+fn forward_shader_rejects_invalid_next_cascade_before_fade_blend() {
+    assert!(FORWARD_SHADER.contains("uv2.x < 0.0"));
+    assert!(FORWARD_SHADER.contains("return base_shadow;"));
+    assert!(FORWARD_SHADER.contains("mix(base_shadow, next_shadow"));
 }
 
 #[test]
@@ -217,6 +252,48 @@ fn csm_bounds_snap_to_shadow_texel_grid() {
     assert!(max_x >= 8.911);
     assert!(min_y <= -2.603);
     assert!(max_y >= 4.119);
+}
+
+#[test]
+fn shadow_orthographic_projection_maps_depth_into_compare_range() {
+    let projection = orthographic_rh_custom(-2.0, 2.0, -1.0, 1.0, -60.0, 35.0);
+
+    let near = mul_mat4_vec3(&projection, engine_core::math::Vec3::new(0.0, 0.0, -60.0));
+    let mid = mul_mat4_vec3(&projection, engine_core::math::Vec3::new(0.0, 0.0, -12.5));
+    let far = mul_mat4_vec3(&projection, engine_core::math::Vec3::new(0.0, 0.0, 35.0));
+
+    assert!((near.z - 0.0).abs() < 0.0001);
+    assert!((mid.z - 0.5).abs() < 0.0001);
+    assert!((far.z - 1.0).abs() < 0.0001);
+}
+
+#[test]
+fn camera_projections_map_depth_into_wgpu_clip_range() {
+    let perspective = perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
+    let perspective_near = mul_mat4_vec4(&perspective, [0.0, 0.0, -0.1, 1.0]);
+    let perspective_far = mul_mat4_vec4(&perspective, [0.0, 0.0, -100.0, 1.0]);
+
+    assert!((perspective_near[2] / perspective_near[3]).abs() < 0.0001);
+    assert!((perspective_far[2] / perspective_far[3] - 1.0).abs() < 0.0001);
+
+    let orthographic = orthographic_rh(8.0, 16.0 / 9.0, 0.1, 100.0);
+    let near = mul_mat4_vec3(&orthographic, engine_core::math::Vec3::new(0.0, 0.0, -0.1));
+    let far = mul_mat4_vec3(
+        &orthographic,
+        engine_core::math::Vec3::new(0.0, 0.0, -100.0),
+    );
+
+    assert!(near.z.abs() < 0.0001);
+    assert!((far.z - 1.0).abs() < 0.0001);
+}
+
+fn mul_mat4_vec4(m: &[[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
+        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
+    ]
 }
 
 #[test]
@@ -410,6 +487,9 @@ fn packs_light_quality_controls_into_forward_uniform() {
             source_radius: 1.75,
             temperature_kelvin: 2_700.0,
             contact_shadow_strength: 0.5,
+            attenuation: 1.4,
+            specular: 0.65,
+            ..Default::default()
         },
     };
 
@@ -417,6 +497,8 @@ fn packs_light_quality_controls_into_forward_uniform() {
 
     assert_eq!(packed.spot_angles[2], 0.0);
     assert_eq!(packed.spot_angles[3], 1.75);
+    assert_eq!(packed.quality[0], 1.4);
+    assert_eq!(packed.quality[1], 0.65);
     assert!(packed.color_intensity[0] >= packed.color_intensity[2]);
     assert_eq!(packed.color_intensity[3], 2.0);
 }
@@ -681,12 +763,23 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
             100.0,
             4.0,
         ),
+        test_light(
+            6,
+            RenderLightKind::Point,
+            engine_core::math::Vec3::new(0.0, 0.0, 12.0),
+            500.0,
+            2.0,
+        ),
     ];
     for index in 0..48 {
         lights.push(test_light(
             10 + index,
             RenderLightKind::Point,
-            engine_core::math::Vec3::new(2.0 + index as f32, 0.0, 0.0),
+            engine_core::math::Vec3::new(
+                (index as f32 % 8.0) - 4.0,
+                0.0,
+                -6.0 - index as f32 * 0.2,
+            ),
             1.0,
             5.0,
         ));
@@ -714,7 +807,12 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
     assert!(
         selected
             .iter()
-            .all(|light| light.object != engine_core::EntityId::from_u128(5))
+            .any(|light| light.object == engine_core::EntityId::from_u128(5))
+    );
+    assert!(
+        selected
+            .iter()
+            .any(|light| light.object == engine_core::EntityId::from_u128(6))
     );
     assert!(
         selected
@@ -729,6 +827,60 @@ fn selects_directional_budget_then_highest_scored_local_lights() {
         primary_directional_light(&world).unwrap().object,
         engine_core::EntityId::from_u128(3)
     );
+}
+
+#[test]
+fn local_light_selection_is_stable_across_camera_views() {
+    let lights = vec![
+        test_light(
+            1,
+            RenderLightKind::Point,
+            engine_core::math::Vec3::new(-12.0, 0.0, 0.0),
+            4.0,
+            8.0,
+        ),
+        test_light(
+            2,
+            RenderLightKind::Point,
+            engine_core::math::Vec3::new(12.0, 0.0, 0.0),
+            3.0,
+            8.0,
+        ),
+        test_light(
+            3,
+            RenderLightKind::Point,
+            engine_core::math::Vec3::new(0.0, 0.0, -20.0),
+            2.0,
+            12.0,
+        ),
+    ];
+    let world_a = RenderWorld {
+        camera: Some(engine_render::RenderCamera {
+            object: engine_core::EntityId::from_u128(10),
+            transform: engine_core::math::Transform::IDENTITY,
+            projection: engine_render::RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.1,
+            far: 50.0,
+            look_at_target: Some(engine_core::math::Vec3::new(0.0, 0.0, -1.0)),
+        }),
+        lights,
+        ..RenderWorld::default()
+    };
+    let mut world_b = world_a.clone();
+    world_b.camera.as_mut().unwrap().look_at_target =
+        Some(engine_core::math::Vec3::new(0.0, 0.0, 1.0));
+
+    let selected_a: Vec<_> = select_forward_lights(&world_a)
+        .into_iter()
+        .map(|light| light.object)
+        .collect();
+    let selected_b: Vec<_> = select_forward_lights(&world_b)
+        .into_iter()
+        .map(|light| light.object)
+        .collect();
+
+    assert_eq!(selected_a, selected_b);
 }
 
 fn test_light(
@@ -831,21 +983,29 @@ fn probe_volume_generates_enabled_irradiance_grid() {
     assert_eq!(uniform.params[1], 8);
     assert_eq!(uniform.counts_intensity, [2.0, 2.0, 2.0, 1.5]);
     assert_eq!(probes.len(), 8);
-    assert!(probes.iter().any(|probe| probe.irradiance[0] > 0.03));
+    assert!(probes.iter().any(|probe| probe.irradiance_pos_y[0] > 0.03));
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.irradiance_pos_y[0] > probe.irradiance_neg_y[0])
+    );
 }
 
 #[test]
-fn render_world_defaults_to_probe_volume_gi() {
+fn render_world_defaults_to_conservative_screen_space_gi() {
     let world = RenderWorld::default();
-    assert!(matches!(
+    assert_eq!(
         world.global_illumination,
-        RenderGlobalIllumination::ProbeVolume(_)
-    ));
+        RenderGlobalIllumination::ScreenSpace { intensity: 0.35 }
+    );
 }
 
 #[test]
 fn probe_volume_auto_bounds_include_scene_objects() {
     let world = RenderWorld {
+        global_illumination: engine_render::RenderGlobalIllumination::ProbeVolume(
+            engine_render::RenderProbeVolume::default(),
+        ),
         objects: vec![RenderObject {
             object: engine_core::EntityId::from_u128(7),
             transform: engine_core::math::Transform {

@@ -191,7 +191,7 @@ pub struct RenderLight {
 }
 
 /// Renderer-facing controls for light quality and physically-inspired shading.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderLightSettings {
     /// Whether this light may contribute to real-time shadow maps.
     pub casts_shadow: bool,
@@ -201,6 +201,34 @@ pub struct RenderLightSettings {
     pub temperature_kelvin: f32,
     /// Contact-shadow strength hint for near-surface shadowing.
     pub contact_shadow_strength: f32,
+    /// Indirect lighting contribution multiplier.
+    pub indirect_energy: f32,
+    /// Specular highlight contribution multiplier.
+    pub specular: f32,
+    /// Distance attenuation exponent for point and spot lights.
+    pub attenuation: f32,
+    /// Constant shadow depth bias.
+    pub shadow_bias: f32,
+    /// Normal-dependent shadow bias.
+    pub shadow_normal_bias: f32,
+    /// Fraction of shadow range where shadows fade out.
+    pub shadow_fade_start: f32,
+    /// Maximum directional shadow distance.
+    pub shadow_max_distance: f32,
+    /// Render layers affected by this light.
+    pub cull_mask: u32,
+    /// Render layers allowed to cast shadows for this light.
+    pub shadow_caster_mask: u32,
+    /// Light baking behavior.
+    pub bake_mode: RenderLightBakeMode,
+    /// Directional shadow cascade layout.
+    pub directional_shadow_mode: RenderDirectionalShadowMode,
+    /// Whether directional cascades blend at split boundaries.
+    pub directional_shadow_blend_splits: bool,
+    /// Directional shadow split fractions.
+    pub directional_shadow_splits: [f32; 3],
+    /// Optional projector texture asset label/path.
+    pub projector: Option<String>,
 }
 
 impl Default for RenderLightSettings {
@@ -210,8 +238,46 @@ impl Default for RenderLightSettings {
             source_radius: 0.0,
             temperature_kelvin: 0.0,
             contact_shadow_strength: 0.0,
+            indirect_energy: 1.0,
+            specular: 1.0,
+            attenuation: 2.0,
+            shadow_bias: 0.0008,
+            shadow_normal_bias: 0.0025,
+            shadow_fade_start: 0.8,
+            shadow_max_distance: 200.0,
+            cull_mask: u32::MAX,
+            shadow_caster_mask: u32::MAX,
+            bake_mode: RenderLightBakeMode::Dynamic,
+            directional_shadow_mode: RenderDirectionalShadowMode::Parallel4Splits,
+            directional_shadow_blend_splits: true,
+            directional_shadow_splits: [0.1, 0.28, 0.55],
+            projector: None,
         }
     }
+}
+
+/// Renderer-facing light baking behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RenderLightBakeMode {
+    /// Excluded from baked lighting.
+    Disabled,
+    /// Baked as static lighting.
+    Static,
+    /// May affect dynamic GI/light probes.
+    #[default]
+    Dynamic,
+}
+
+/// Renderer-facing directional shadow cascade layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RenderDirectionalShadowMode {
+    /// Single orthographic directional shadow.
+    Orthogonal,
+    /// Two parallel split shadow maps.
+    Parallel2Splits,
+    /// Four parallel split shadow maps.
+    #[default]
+    Parallel4Splits,
 }
 
 /// Light category used by render backends.
@@ -223,15 +289,38 @@ pub enum RenderLightKind {
     Point,
     /// Spot light attenuated by range and cone angle.
     Spot,
+    /// Area light hint approximated by the active backend.
+    Area,
 }
 
 impl RenderLightKind {
     /// Converts a serialized ECS light kind into a render light kind.
     pub fn from_component_kind(kind: &str) -> Self {
         match kind {
-            "point" => Self::Point,
+            "point" | "omni" => Self::Point,
             "spot" => Self::Spot,
+            "area" => Self::Area,
             _ => Self::Directional,
+        }
+    }
+}
+
+impl From<engine_ecs::LightBakeMode> for RenderLightBakeMode {
+    fn from(value: engine_ecs::LightBakeMode) -> Self {
+        match value {
+            engine_ecs::LightBakeMode::Disabled => Self::Disabled,
+            engine_ecs::LightBakeMode::Static => Self::Static,
+            engine_ecs::LightBakeMode::Dynamic => Self::Dynamic,
+        }
+    }
+}
+
+impl From<engine_ecs::DirectionalShadowMode> for RenderDirectionalShadowMode {
+    fn from(value: engine_ecs::DirectionalShadowMode) -> Self {
+        match value {
+            engine_ecs::DirectionalShadowMode::Orthogonal => Self::Orthogonal,
+            engine_ecs::DirectionalShadowMode::Parallel2Splits => Self::Parallel2Splits,
+            engine_ecs::DirectionalShadowMode::Parallel4Splits => Self::Parallel4Splits,
         }
     }
 }
@@ -283,7 +372,7 @@ impl Default for RenderProbeVolume {
             center: engine_core::math::Vec3::ZERO,
             extent: engine_core::math::Vec3::new(20.0, 8.0, 20.0),
             counts: [6, 3, 6],
-            intensity: 1.0,
+            intensity: 0.45,
         }
     }
 }
@@ -427,7 +516,7 @@ impl Default for RenderWorld {
             skybox: None,
             fog: None,
             lighting_mode: RenderLightingMode::default(),
-            global_illumination: RenderGlobalIllumination::ProbeVolume(RenderProbeVolume::default()),
+            global_illumination: RenderGlobalIllumination::ScreenSpace { intensity: 0.35 },
             shadow_virtualization: RenderShadowVirtualization::default(),
         }
     }
@@ -567,7 +656,9 @@ impl RenderWorld {
                         world.lights.push(RenderLight {
                             object: obj.id,
                             transform,
-                            kind: RenderLightKind::from_component_kind(&light.kind),
+                            kind: RenderLightKind::from_component_kind(
+                                light.light_kind().as_legacy_str(),
+                            ),
                             color: light.color,
                             intensity: light.intensity,
                             range: light.range,
@@ -577,6 +668,25 @@ impl RenderWorld {
                                 source_radius: light.source_radius,
                                 temperature_kelvin: light.temperature_kelvin,
                                 contact_shadow_strength: light.contact_shadow_strength,
+                                indirect_energy: light.indirect_energy,
+                                specular: light.specular,
+                                attenuation: light.attenuation,
+                                shadow_bias: light.shadow_bias,
+                                shadow_normal_bias: light.shadow_normal_bias,
+                                shadow_fade_start: light.shadow_fade_start,
+                                shadow_max_distance: light.shadow_max_distance,
+                                cull_mask: light.cull_mask,
+                                shadow_caster_mask: light.shadow_caster_mask,
+                                bake_mode: light.bake_mode.into(),
+                                directional_shadow_mode: light.directional_shadow_mode.into(),
+                                directional_shadow_blend_splits: light
+                                    .directional_shadow_blend_splits,
+                                directional_shadow_splits: [
+                                    light.directional_shadow_split_1,
+                                    light.directional_shadow_split_2,
+                                    light.directional_shadow_split_3,
+                                ],
+                                projector: light.projector.clone(),
                             },
                         });
                     }
@@ -1236,8 +1346,68 @@ mod tests {
             RenderLightKind::Spot
         );
         assert_eq!(
+            RenderLightKind::from_component_kind("area"),
+            RenderLightKind::Area
+        );
+        assert_eq!(
             RenderLightKind::from_component_kind("invalid"),
             RenderLightKind::Directional
+        );
+    }
+
+    #[test]
+    fn extracts_extended_light_quality_settings() {
+        let mut scene = Scene::new();
+        let entity = scene.create_object("Area Light").unwrap();
+        scene
+            .upsert_component(
+                entity,
+                ComponentData::Light(engine_ecs::LightComponentData {
+                    kind: "area".to_string(),
+                    indirect_energy: 0.4,
+                    specular: 0.7,
+                    attenuation: 1.5,
+                    shadow_bias: 0.002,
+                    shadow_normal_bias: 0.004,
+                    shadow_fade_start: 0.6,
+                    shadow_max_distance: 80.0,
+                    cull_mask: 0b101,
+                    shadow_caster_mask: 0b001,
+                    bake_mode: engine_ecs::LightBakeMode::Static,
+                    directional_shadow_mode: engine_ecs::DirectionalShadowMode::Parallel2Splits,
+                    directional_shadow_blend_splits: false,
+                    directional_shadow_split_1: 0.2,
+                    directional_shadow_split_2: 0.45,
+                    directional_shadow_split_3: 0.75,
+                    projector: Some("textures/window.png".to_string()),
+                    ..engine_ecs::LightComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let world = RenderWorld::extract(&scene);
+        let light = &world.lights[0];
+
+        assert_eq!(light.kind, RenderLightKind::Area);
+        assert_eq!(light.settings.indirect_energy, 0.4);
+        assert_eq!(light.settings.specular, 0.7);
+        assert_eq!(light.settings.attenuation, 1.5);
+        assert_eq!(light.settings.shadow_bias, 0.002);
+        assert_eq!(light.settings.shadow_normal_bias, 0.004);
+        assert_eq!(light.settings.shadow_fade_start, 0.6);
+        assert_eq!(light.settings.shadow_max_distance, 80.0);
+        assert_eq!(light.settings.cull_mask, 0b101);
+        assert_eq!(light.settings.shadow_caster_mask, 0b001);
+        assert_eq!(light.settings.bake_mode, RenderLightBakeMode::Static);
+        assert_eq!(
+            light.settings.directional_shadow_mode,
+            RenderDirectionalShadowMode::Parallel2Splits
+        );
+        assert!(!light.settings.directional_shadow_blend_splits);
+        assert_eq!(light.settings.directional_shadow_splits, [0.2, 0.45, 0.75]);
+        assert_eq!(
+            light.settings.projector.as_deref(),
+            Some("textures/window.png")
         );
     }
 

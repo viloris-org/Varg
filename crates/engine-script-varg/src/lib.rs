@@ -2264,18 +2264,78 @@ fn compile_script_component(block: &VsceneBlock) -> ScriptComponent {
 }
 
 fn compile_light_component(block: &VsceneBlock) -> LightComponentData {
-    LightComponentData {
-        color: vec3_property(block, "color").unwrap_or(Vec3::ONE),
-        intensity: number_property(block, "intensity").unwrap_or(1.0),
+    let mut light = LightComponentData {
         kind: identifier_property(block, "kind")
             .or_else(|| identifier_property(block, "type"))
             .unwrap_or_else(|| "point".to_string()),
-        range: number_property(block, "range").unwrap_or(10.0),
-        spot_angle: number_property(block, "spotAngle").unwrap_or(30.0),
-        casts_shadow: bool_property(block, "castsShadow").unwrap_or(true),
-        source_radius: number_property(block, "sourceRadius").unwrap_or(0.0),
-        temperature_kelvin: number_property(block, "temperatureKelvin").unwrap_or(0.0),
-        contact_shadow_strength: number_property(block, "contactShadowStrength").unwrap_or(0.0),
+        ..LightComponentData::default()
+    };
+    light.color = vec3_property(block, "color").unwrap_or(Vec3::ONE);
+    light.intensity = number_property(block, "intensity").unwrap_or(1.0);
+    light.range = number_property(block, "range").unwrap_or(10.0);
+    light.spot_angle = number_property(block, "spotAngle").unwrap_or(30.0);
+    light.casts_shadow = bool_property(block, "castsShadow").unwrap_or(true);
+    light.source_radius = number_property(block, "sourceRadius").unwrap_or(0.0);
+    light.temperature_kelvin = number_property(block, "temperatureKelvin").unwrap_or(0.0);
+    light.contact_shadow_strength = number_property(block, "contactShadowStrength").unwrap_or(0.0);
+    light.indirect_energy = number_property(block, "indirectEnergy").unwrap_or(1.0);
+    light.specular = number_property(block, "specular").unwrap_or(1.0);
+    light.attenuation = number_property(block, "attenuation").unwrap_or(2.0);
+    light.shadow_bias = number_property(block, "shadowBias").unwrap_or(0.0008);
+    light.shadow_normal_bias = number_property(block, "shadowNormalBias").unwrap_or(0.0025);
+    light.shadow_fade_start = number_property(block, "shadowFadeStart").unwrap_or(0.8);
+    light.shadow_max_distance = number_property(block, "shadowMaxDistance").unwrap_or(200.0);
+    light.cull_mask = u32_property(block, "cullMask").unwrap_or(u32::MAX);
+    light.shadow_caster_mask = u32_property(block, "shadowCasterMask").unwrap_or(u32::MAX);
+    light.directional_shadow_blend_splits =
+        bool_property(block, "directionalShadowBlendSplits").unwrap_or(true);
+    light.directional_shadow_split_1 =
+        number_property(block, "directionalShadowSplit1").unwrap_or(0.1);
+    light.directional_shadow_split_2 =
+        number_property(block, "directionalShadowSplit2").unwrap_or(0.28);
+    light.directional_shadow_split_3 =
+        number_property(block, "directionalShadowSplit3").unwrap_or(0.55);
+    light.projector = string_property(block, "projector").filter(|value| !value.is_empty());
+    if let Some(mode) = identifier_property(block, "bakeMode") {
+        light.bake_mode = parse_light_bake_mode(&mode);
+    }
+    if let Some(mode) = identifier_property(block, "directionalShadowMode") {
+        light.directional_shadow_mode = parse_directional_shadow_mode(&mode);
+    }
+    light
+}
+
+fn parse_light_bake_mode(value: &str) -> engine_ecs::LightBakeMode {
+    match value {
+        "disabled" => engine_ecs::LightBakeMode::Disabled,
+        "static" => engine_ecs::LightBakeMode::Static,
+        _ => engine_ecs::LightBakeMode::Dynamic,
+    }
+}
+
+fn parse_directional_shadow_mode(value: &str) -> engine_ecs::DirectionalShadowMode {
+    match value {
+        "orthogonal" => engine_ecs::DirectionalShadowMode::Orthogonal,
+        "parallel-2-splits" | "parallel2" | "pssm2" => {
+            engine_ecs::DirectionalShadowMode::Parallel2Splits
+        }
+        _ => engine_ecs::DirectionalShadowMode::Parallel4Splits,
+    }
+}
+
+fn light_bake_mode_name(value: engine_ecs::LightBakeMode) -> &'static str {
+    match value {
+        engine_ecs::LightBakeMode::Disabled => "disabled",
+        engine_ecs::LightBakeMode::Static => "static",
+        engine_ecs::LightBakeMode::Dynamic => "dynamic",
+    }
+}
+
+fn directional_shadow_mode_name(value: engine_ecs::DirectionalShadowMode) -> &'static str {
+    match value {
+        engine_ecs::DirectionalShadowMode::Orthogonal => "orthogonal",
+        engine_ecs::DirectionalShadowMode::Parallel2Splits => "parallel-2-splits",
+        engine_ecs::DirectionalShadowMode::Parallel4Splits => "parallel-4-splits",
     }
 }
 
@@ -2364,6 +2424,14 @@ fn parse_hex_color(source: &str) -> Option<Vec3> {
 fn number_property(block: &VsceneBlock, key: &str) -> Option<f32> {
     match block.properties.get(key)? {
         VsceneValue::Number(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn u32_property(block: &VsceneBlock, key: &str) -> Option<u32> {
+    match block.properties.get(key)? {
+        VsceneValue::Number(value) if *value >= 0.0 => Some(*value as u32),
+        VsceneValue::String(value) | VsceneValue::Identifier(value) => value.parse().ok(),
         _ => None,
     }
 }
@@ -2696,6 +2764,117 @@ fn write_light_properties(output: &mut String, indent: usize, light: &LightCompo
         "spotAngle",
         &vscene_number(light.spot_angle),
     );
+    write_property(
+        output,
+        indent,
+        "castsShadow",
+        if light.casts_shadow { "true" } else { "false" },
+    );
+    write_property(
+        output,
+        indent,
+        "sourceRadius",
+        &vscene_number(light.source_radius),
+    );
+    write_property(
+        output,
+        indent,
+        "temperatureKelvin",
+        &vscene_number(light.temperature_kelvin),
+    );
+    write_property(
+        output,
+        indent,
+        "contactShadowStrength",
+        &vscene_number(light.contact_shadow_strength),
+    );
+    write_property(
+        output,
+        indent,
+        "indirectEnergy",
+        &vscene_number(light.indirect_energy),
+    );
+    write_property(output, indent, "specular", &vscene_number(light.specular));
+    write_property(
+        output,
+        indent,
+        "attenuation",
+        &vscene_number(light.attenuation),
+    );
+    write_property(
+        output,
+        indent,
+        "shadowBias",
+        &vscene_number(light.shadow_bias),
+    );
+    write_property(
+        output,
+        indent,
+        "shadowNormalBias",
+        &vscene_number(light.shadow_normal_bias),
+    );
+    write_property(
+        output,
+        indent,
+        "shadowFadeStart",
+        &vscene_number(light.shadow_fade_start),
+    );
+    write_property(
+        output,
+        indent,
+        "shadowMaxDistance",
+        &vscene_number(light.shadow_max_distance),
+    );
+    write_property(output, indent, "cullMask", &light.cull_mask.to_string());
+    write_property(
+        output,
+        indent,
+        "shadowCasterMask",
+        &light.shadow_caster_mask.to_string(),
+    );
+    write_property(
+        output,
+        indent,
+        "bakeMode",
+        light_bake_mode_name(light.bake_mode),
+    );
+    write_property(
+        output,
+        indent,
+        "directionalShadowMode",
+        directional_shadow_mode_name(light.directional_shadow_mode),
+    );
+    write_property(
+        output,
+        indent,
+        "directionalShadowBlendSplits",
+        if light.directional_shadow_blend_splits {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    write_property(
+        output,
+        indent,
+        "directionalShadowSplit1",
+        &vscene_number(light.directional_shadow_split_1),
+    );
+    write_property(
+        output,
+        indent,
+        "directionalShadowSplit2",
+        &vscene_number(light.directional_shadow_split_2),
+    );
+    write_property(
+        output,
+        indent,
+        "directionalShadowSplit3",
+        &vscene_number(light.directional_shadow_split_3),
+    );
+    if let Some(projector) = &light.projector {
+        write_property(output, indent, "projector", &vscene_quoted(projector));
+    }
 }
 
 fn write_property(output: &mut String, indent: usize, key: &str, value: &str) {

@@ -17,6 +17,7 @@ struct ForwardLight {
     direction_range: vec4<f32>,
     color_intensity: vec4<f32>,
     spot_angles: vec4<f32>,
+    quality: vec4<f32>,
 };
 
 struct LightingUniform {
@@ -45,7 +46,12 @@ struct GiProbeUniform {
 };
 
 struct GiProbe {
-    irradiance: vec4<f32>,
+    irradiance_pos_x: vec4<f32>,
+    irradiance_neg_x: vec4<f32>,
+    irradiance_pos_y: vec4<f32>,
+    irradiance_neg_y: vec4<f32>,
+    irradiance_pos_z: vec4<f32>,
+    irradiance_neg_z: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -168,6 +174,17 @@ fn gi_probe_index(x: u32, y: u32, z: u32, cx: u32, cy: u32) -> u32 {
     return x + y * cx + z * cx * cy;
 }
 
+fn sample_probe_directional_irradiance(probe: GiProbe, n: vec3<f32>) -> vec3<f32> {
+    let weights = max(vec3<f32>(n.x, n.y, n.z), vec3<f32>(0.0))
+        + max(vec3<f32>(-n.x, -n.y, -n.z), vec3<f32>(0.0));
+    let total_weight = max(weights.x + weights.y + weights.z, 0.001);
+    var irradiance = vec3<f32>(0.0);
+    irradiance += select(probe.irradiance_neg_x.rgb, probe.irradiance_pos_x.rgb, n.x >= 0.0) * abs(n.x);
+    irradiance += select(probe.irradiance_neg_y.rgb, probe.irradiance_pos_y.rgb, n.y >= 0.0) * abs(n.y);
+    irradiance += select(probe.irradiance_neg_z.rgb, probe.irradiance_pos_z.rgb, n.z >= 0.0) * abs(n.z);
+    return irradiance / total_weight;
+}
+
 fn sample_gi_probe_volume(world_pos: vec3<f32>, n: vec3<f32>, base_color: vec3<f32>, metallic: f32) -> vec3<f32> {
     if (gi_probe_volume.params.x == 0u || gi_probe_volume.params.y == 0u) {
         return vec3<f32>(0.0);
@@ -202,13 +219,12 @@ fn sample_gi_probe_volume(world_pos: vec3<f32>, n: vec3<f32>, base_color: vec3<f
                 let wx = select(1.0 - f.x, f.x, dx == 1u);
                 let wy = select(1.0 - f.y, f.y, dy == 1u);
                 let wz = select(1.0 - f.z, f.z, dz == 1u);
-                irradiance = irradiance + gi_probes[idx].irradiance.rgb * wx * wy * wz;
+                irradiance = irradiance + sample_probe_directional_irradiance(gi_probes[idx], n) * wx * wy * wz;
             }
         }
     }
 
-    let normal_weight = clamp(n.y * 0.35 + 0.65, 0.35, 1.0);
-    return irradiance * base_color * (1.0 - metallic) * gi_probe_volume.counts_intensity.w * normal_weight;
+    return irradiance * base_color * (1.0 - metallic) * gi_probe_volume.counts_intensity.w;
 }
 
 fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>, dist: f32) -> vec3<f32> {
@@ -300,7 +316,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
     else { shadow_coord = csm.cascade_vps[4] * vec4<f32>(world_pos, 1.0); }
 
     let ndc = shadow_coord.xyz / shadow_coord.w;
-    let uv = ndc.xy * 0.5 + 0.5;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let depth = ndc.z;
 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth < 0.0 || depth > 1.0) {
@@ -320,8 +336,11 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
             shadow_coord = csm.cascade_vps[4] * vec4<f32>(world_pos, 1.0);
         } else { return base_shadow; }
         let ndc2 = shadow_coord.xyz / shadow_coord.w;
-        let uv2 = ndc2.xy * 0.5 + 0.5;
+        let uv2 = vec2<f32>(ndc2.x * 0.5 + 0.5, 0.5 - ndc2.y * 0.5);
         let depth2 = ndc2.z;
+        if (uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0 || depth2 < 0.0 || depth2 > 1.0) {
+            return base_shadow;
+        }
         let next_shadow = sample_cascade_shadow(cascade_idx + 1u, uv2, depth2, ndotl);
         return mix(base_shadow, next_shadow, 1.0 - fade);
     }
@@ -431,7 +450,8 @@ fn fs_main(input: VsOut) -> FsOut {
             let source_radius = max(light.spot_angles.w, 0.0);
             let effective_distance = max(distance - source_radius, 0.0);
             let falloff = max(1.0 - effective_distance / range, 0.0);
-            attenuation = falloff * falloff / max(1.0 + source_radius * source_radius * 0.08, 1.0);
+            let attenuation_power = max(light.quality.x, 0.01);
+            attenuation = pow(falloff, attenuation_power) / max(1.0 + source_radius * source_radius * 0.08, 1.0);
 
             if (light_type > 1.5) {
                 let spot_alignment = dot(normalize(-light_dir), normalize(light.direction_range.xyz));
@@ -452,7 +472,7 @@ fn fs_main(input: VsOut) -> FsOut {
         let g = geometry_smith(n, v, light_dir, roughness);
         let f = fresnel_schlick(vdoth, f0);
 
-        let specular = (d * g * f) / max(4.0 * ndotv * ndotl, EPSILON);
+        let specular = ((d * g * f) / max(4.0 * ndotv * ndotl, EPSILON)) * max(light.quality.y, 0.0);
         let kd = (1.0 - f) * (1.0 - metallic);
         let diffuse = kd * base_color / PI;
 
@@ -1176,6 +1196,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 pub(crate) const POST_SHADER: &str = r#"
 struct PostProcessUniform {
+    inv_view_projection: mat4x4<f32>,
+    view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
     render_width: f32,
     render_height: f32,
     inv_render_width: f32,
@@ -1308,6 +1331,12 @@ fn sample_post_depth(uv: vec2<f32>) -> f32 {
     return textureLoad(depth_tex, pixel, 0);
 }
 
+fn reconstruct_world_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let clip = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world = post.inv_view_projection * clip;
+    return world.xyz / max(world.w, 0.0001);
+}
+
 fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
     if (post.ssr_enabled < 0.5) {
         return vec3<f32>(0.0);
@@ -1324,19 +1353,26 @@ fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
     let n = decode_post_normal(normal_roughness.rgb);
     let roughness = clamp(normal_roughness.a, 0.04, 1.0);
     let metallic = textureLoad(albedo_tex, pixel, 0).a;
-    let view_dir = normalize(vec3<f32>(uv * 2.0 - vec2<f32>(1.0), 1.0));
+    let world_pos = reconstruct_world_position(uv, depth);
+    let view_dir = normalize(world_pos - post.camera_position.xyz);
     let r = reflect(view_dir, n);
-    let screen_dir = normalize(r.xy + vec2<f32>(0.0001));
-    let max_distance = mix(48.0, 8.0, roughness);
+    let max_distance = mix(32.0, 5.0, roughness);
     for (var step = 1u; step <= 24u; step = step + 1u) {
         let t = f32(step) / 24.0;
-        let sample_uv = uv + screen_dir * max_distance * t * vec2<f32>(post.inv_render_width, post.inv_render_height);
+        let ray_pos = world_pos + r * max_distance * t;
+        let ray_clip = post.view_projection * vec4<f32>(ray_pos, 1.0);
+        if (ray_clip.w <= 0.0001) {
+            break;
+        }
+        let ray_ndc = ray_clip.xyz / ray_clip.w;
+        let sample_uv = vec2<f32>(ray_ndc.x * 0.5 + 0.5, 0.5 - ray_ndc.y * 0.5);
         if (sample_uv.x <= 0.0 || sample_uv.x >= 1.0 || sample_uv.y <= 0.0 || sample_uv.y >= 1.0) {
             break;
         }
         let sample_depth = sample_post_depth(sample_uv);
-        let expected_depth = depth - r.z * 0.012 * t;
-        if (sample_depth < 0.9999 && abs(sample_depth - expected_depth) < 0.025 + t * 0.035) {
+        let expected_depth = ray_ndc.z;
+        let thickness = 0.006 + t * 0.018;
+        if (sample_depth < 0.9999 && expected_depth >= 0.0 && expected_depth <= 1.0 && abs(sample_depth - expected_depth) < thickness) {
             let edge_fade = smoothstep(0.0, 0.12, sample_uv.x) * smoothstep(1.0, 0.88, sample_uv.x)
                 * smoothstep(0.0, 0.12, sample_uv.y) * smoothstep(1.0, 0.88, sample_uv.y);
             let material_weight = smoothstep(0.08, 0.6, metallic) * pow(1.0 - roughness, 2.0);
@@ -1368,6 +1404,9 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
 
 pub(crate) const TAA_SHADER: &str = r#"
 struct PostProcessUniform {
+    inv_view_projection: mat4x4<f32>,
+    view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
     render_width: f32,
     render_height: f32,
     inv_render_width: f32,

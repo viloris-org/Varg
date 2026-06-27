@@ -464,6 +464,7 @@ fn gemini_thinking_delta(json: &serde_json::Value) -> Option<&str> {
         .as_str()
 }
 
+#[cfg(test)]
 fn codex_delta(json: &serde_json::Value) -> Option<&str> {
     if json["type"] == "response.output_text.delta" {
         json["delta"].as_str()
@@ -472,6 +473,7 @@ fn codex_delta(json: &serde_json::Value) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn codex_thinking_delta(json: &serde_json::Value) -> Option<&str> {
     if json["type"] == "response.reasoning_summary_text.delta" {
         json["delta"].as_str()

@@ -10,6 +10,15 @@ const PROBE_SKY_DIRECTIONS: [engine_core::math::Vec3; 6] = [
     engine_core::math::Vec3::new(0.0, 0.5, -0.86),
 ];
 
+const PROBE_IRRADIANCE_DIRECTIONS: [engine_core::math::Vec3; 6] = [
+    engine_core::math::Vec3::new(1.0, 0.0, 0.0),
+    engine_core::math::Vec3::new(-1.0, 0.0, 0.0),
+    engine_core::math::Vec3::new(0.0, 1.0, 0.0),
+    engine_core::math::Vec3::new(0.0, -1.0, 0.0),
+    engine_core::math::Vec3::new(0.0, 0.0, 1.0),
+    engine_core::math::Vec3::new(0.0, 0.0, -1.0),
+];
+
 pub(crate) fn csm_uniform_from_world(world: &RenderWorld, aspect: f32) -> CsmUniform {
     let light_dir = primary_directional_light(world)
         .map(|l| {
@@ -142,8 +151,8 @@ pub(crate) fn default_csm_params() -> [f32; 4] {
     [
         CSM_CASCADE_FADE_RANGE,
         1.0 / CSM_SHADOW_RESOLUTION as f32,
-        0.0005,
-        0.0015,
+        0.002,
+        0.006,
     ]
 }
 
@@ -379,6 +388,7 @@ pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUnifor
             direction_range: [-0.5, -1.0, -0.25, 0.0],
             color_intensity: [1.0, 1.0, 1.0, 1.0],
             spot_angles: [1.0, 1.0, 1.0, 0.0],
+            quality: [2.0, 1.0, 1.0, 0.0],
         };
         count = 1;
     }
@@ -434,13 +444,14 @@ pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform,
                     min.y + step.y * y as f32,
                     min.z + step.z * z as f32,
                 );
+                let irradiance = directional_probe_irradiance_at(world, position);
                 probes.push(GiProbe {
-                    irradiance: [
-                        probe_irradiance_at(world, position).x,
-                        probe_irradiance_at(world, position).y,
-                        probe_irradiance_at(world, position).z,
-                        1.0,
-                    ],
+                    irradiance_pos_x: vec3_to_probe_slot(irradiance[0]),
+                    irradiance_neg_x: vec3_to_probe_slot(irradiance[1]),
+                    irradiance_pos_y: vec3_to_probe_slot(irradiance[2]),
+                    irradiance_neg_y: vec3_to_probe_slot(irradiance[3]),
+                    irradiance_pos_z: vec3_to_probe_slot(irradiance[4]),
+                    irradiance_neg_z: vec3_to_probe_slot(irradiance[5]),
                 });
             }
         }
@@ -506,18 +517,51 @@ fn resolved_probe_volume_bounds(
     (center, extent)
 }
 
+#[cfg(test)]
 pub(crate) fn probe_irradiance_at(
     world: &RenderWorld,
     position: engine_core::math::Vec3,
 ) -> engine_core::math::Vec3 {
+    directional_probe_irradiance_at(world, position)
+        .into_iter()
+        .fold(engine_core::math::Vec3::ZERO, |sum, value| sum + value)
+        / 6.0
+}
+
+fn directional_probe_irradiance_at(
+    world: &RenderWorld,
+    position: engine_core::math::Vec3,
+) -> [engine_core::math::Vec3; 6] {
+    PROBE_IRRADIANCE_DIRECTIONS.map(|normal| probe_irradiance_for_normal(world, position, normal))
+}
+
+fn probe_irradiance_for_normal(
+    world: &RenderWorld,
+    position: engine_core::math::Vec3,
+    normal: engine_core::math::Vec3,
+) -> engine_core::math::Vec3 {
     let sky_visibility = sky_visibility_at(world, position);
-    let mut irradiance = engine_core::math::Vec3::new(0.025, 0.028, 0.032) * sky_visibility;
+    let sky_direction = normal.y.clamp(0.0, 1.0);
+    let ground_direction = (-normal.y).clamp(0.0, 1.0);
+    let mut irradiance = engine_core::math::Vec3::new(0.018, 0.02, 0.024)
+        * sky_visibility
+        * (0.35 + sky_direction * 0.65);
     if let Some(skybox) = &world.skybox {
-        let sky = engine_core::math::Vec3::new(
-            (skybox.zenith_color[0] + skybox.horizon_color[0]) * 0.5,
-            (skybox.zenith_color[1] + skybox.horizon_color[1]) * 0.5,
-            (skybox.zenith_color[2] + skybox.horizon_color[2]) * 0.5,
-        ) * (0.28 * skybox.intensity * sky_visibility);
+        let sky_mix = (normal.y * 0.5 + 0.5).clamp(0.0, 1.0);
+        let horizon = engine_core::math::Vec3::new(
+            skybox.horizon_color[0],
+            skybox.horizon_color[1],
+            skybox.horizon_color[2],
+        );
+        let zenith = engine_core::math::Vec3::new(
+            skybox.zenith_color[0],
+            skybox.zenith_color[1],
+            skybox.zenith_color[2],
+        );
+        let ground = horizon * 0.18;
+        let sky_color = horizon * (1.0 - sky_mix) + zenith * sky_mix;
+        let sky = (sky_color * (1.0 - ground_direction) + ground * ground_direction)
+            * (0.18 * skybox.intensity * sky_visibility);
         irradiance += sky;
     }
     for light in &world.lights {
@@ -529,26 +573,37 @@ pub(crate) fn probe_irradiance_at(
                     .rotation
                     .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
                     .normalized();
+                let facing = normal.dot(-dir).clamp(0.0, 1.0);
                 let visibility = ray_visibility(world, position, dir, 80.0);
-                irradiance += color * (0.1 * visibility);
+                irradiance += color * (0.08 * facing * visibility);
             }
-            engine_render::RenderLightKind::Point | engine_render::RenderLightKind::Spot => {
-                let to_probe = position - light.transform.translation;
-                let distance = to_probe.length();
+            engine_render::RenderLightKind::Point
+            | engine_render::RenderLightKind::Spot
+            | engine_render::RenderLightKind::Area => {
+                let to_light = light.transform.translation - position;
+                let distance = to_light.length();
                 let range = light.range.max(0.001);
-                let attenuation = (1.0 - distance / range).max(0.0).powi(2);
-                let visibility = ray_visibility(
-                    world,
-                    position,
-                    (light.transform.translation - position).normalized(),
-                    distance,
-                );
-                irradiance += color * attenuation * visibility * 0.26;
+                let attenuation = (1.0 - distance / range)
+                    .max(0.0)
+                    .powf(light.settings.attenuation.max(0.01));
+                let light_dir = to_light.normalized();
+                let facing = normal.dot(light_dir).clamp(0.0, 1.0);
+                let visibility = ray_visibility(world, position, light_dir, distance);
+                irradiance += color
+                    * light.settings.indirect_energy.max(0.0)
+                    * attenuation
+                    * facing
+                    * visibility
+                    * 0.22;
             }
         }
     }
-    irradiance += local_bounce_irradiance(world, position);
+    irradiance += local_bounce_irradiance(world, position, normal);
     clamp_vec3(irradiance, 0.0, 6.0)
+}
+
+fn vec3_to_probe_slot(value: engine_core::math::Vec3) -> [f32; 4] {
+    [value.x, value.y, value.z, 1.0]
 }
 
 fn sky_visibility_at(world: &RenderWorld, position: engine_core::math::Vec3) -> f32 {
@@ -562,6 +617,7 @@ fn sky_visibility_at(world: &RenderWorld, position: engine_core::math::Vec3) -> 
 fn local_bounce_irradiance(
     world: &RenderWorld,
     position: engine_core::math::Vec3,
+    normal: engine_core::math::Vec3,
 ) -> engine_core::math::Vec3 {
     let mut bounce = engine_core::math::Vec3::ZERO;
     for object in &world.objects {
@@ -603,9 +659,10 @@ fn local_bounce_irradiance(
             material.emissive[2],
         );
         let visibility = ray_visibility(world, position, to_object.normalized(), distance);
+        let facing = normal.dot(to_object.normalized()).clamp(0.0, 1.0);
         let area = (radius * radius / distance_sq).clamp(0.0, 1.0);
         let non_metal = 1.0 - material.metallic.clamp(0.0, 1.0);
-        bounce += (albedo * non_metal * 0.18 + emissive * 0.35) * area * visibility;
+        bounce += (albedo * non_metal * 0.14 + emissive * 0.32) * area * facing * visibility;
     }
     bounce
 }
@@ -711,30 +768,18 @@ pub(crate) fn select_forward_lights(world: &RenderWorld) -> Vec<&RenderLight> {
     selected
 }
 
-pub(crate) fn local_light_score(world: &RenderWorld, light: &RenderLight) -> Option<f32> {
+pub(crate) fn local_light_score(_world: &RenderWorld, light: &RenderLight) -> Option<f32> {
     if light.intensity <= 0.0 || light.range <= 0.0 {
         return None;
     }
 
     let range = light.range.max(0.001);
-    let camera = world.camera.as_ref();
-    let Some(camera) = camera else {
-        return Some(light.intensity * range);
-    };
-
-    let to_light = light.transform.translation - camera.transform.translation;
-    let distance = to_light.length();
-    if distance - range > camera.far {
-        return None;
-    }
-
-    let distance_sq = to_light.length_squared().max(1.0);
-    Some(light.intensity * range * range / distance_sq)
+    Some(light.intensity * range * range)
 }
 
 pub(crate) fn forward_light_uniform(light: &RenderLight) -> ForwardLightUniform {
     let light_type = match light.kind {
-        RenderLightKind::Point => 1.0,
+        RenderLightKind::Point | RenderLightKind::Area => 1.0,
         RenderLightKind::Spot => 2.0,
         RenderLightKind::Directional => 0.0,
     };
@@ -776,6 +821,12 @@ pub(crate) fn forward_light_uniform(light: &RenderLight) -> ForwardLightUniform 
                 0.0
             },
             light.settings.source_radius.max(0.0),
+        ],
+        quality: [
+            light.settings.attenuation.max(0.01),
+            light.settings.specular.max(0.0),
+            light.settings.indirect_energy.max(0.0),
+            light.settings.contact_shadow_strength.max(0.0),
         ],
     }
 }

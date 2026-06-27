@@ -53,6 +53,7 @@ pub(crate) struct ForwardLightUniform {
     pub(crate) direction_range: [f32; 4],
     pub(crate) color_intensity: [f32; 4],
     pub(crate) spot_angles: [f32; 4],
+    pub(crate) quality: [f32; 4],
 }
 
 #[repr(C)]
@@ -86,7 +87,12 @@ impl Default for GiProbeUniform {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct GiProbe {
-    pub(crate) irradiance: [f32; 4],
+    pub(crate) irradiance_pos_x: [f32; 4],
+    pub(crate) irradiance_neg_x: [f32; 4],
+    pub(crate) irradiance_pos_y: [f32; 4],
+    pub(crate) irradiance_neg_y: [f32; 4],
+    pub(crate) irradiance_pos_z: [f32; 4],
+    pub(crate) irradiance_neg_z: [f32; 4],
 }
 
 impl Default for LightingUniform {
@@ -199,6 +205,9 @@ pub(crate) struct FogUniform {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct PostProcessUniform {
+    pub(crate) inv_view_projection: [[f32; 4]; 4],
+    pub(crate) view_projection: [[f32; 4]; 4],
+    pub(crate) camera_position: [f32; 4],
     pub(crate) render_width: f32,
     pub(crate) render_height: f32,
     pub(crate) inv_render_width: f32,

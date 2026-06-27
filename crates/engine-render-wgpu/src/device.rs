@@ -42,8 +42,6 @@ pub(crate) const SSAO_BIAS: f32 = 0.012;
 pub(crate) const SSGI_RADIUS: f32 = 2.25;
 pub(crate) const SSGI_INTENSITY: f32 = 0.78;
 pub(crate) const MAX_GI_PROBES: usize = 512;
-pub(crate) const INTERMEDIATE_WIDTH: u32 = 1920;
-pub(crate) const INTERMEDIATE_HEIGHT: u32 = 1080;
 
 /// Rectangle on a configured native surface where a render result is presented.
 ///
@@ -281,7 +279,7 @@ pub struct WgpuRenderDevice {
     /// Pre-allocated per-cascade bind group.
     pub(crate) csm_cascade_bind_groups: [wgpu::BindGroup; CSM_CASCADE_COUNT],
     pub(crate) shadow_pipeline: wgpu::RenderPipeline,
-    pub(crate) shadow_bind_group_layout: wgpu::BindGroupLayout,
+    pub(crate) _shadow_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) material_cache: HashMap<String, ([f32; 4], f32, f32, [f32; 3])>,
     pub(crate) skybox_pipeline: wgpu::RenderPipeline,
     pub(crate) skybox_bind_group_layout: wgpu::BindGroupLayout,
@@ -298,10 +296,10 @@ pub struct WgpuRenderDevice {
     pub(crate) destroy_queue: Vec<(u64, DestroyResource)>,
     // IBL resources
     pub(crate) ibl_irradiance_map: wgpu::Texture,
-    pub(crate) ibl_irradiance_view: wgpu::TextureView,
+    pub(crate) _ibl_irradiance_view: wgpu::TextureView,
     pub(crate) ibl_prefilter_map: wgpu::Texture,
-    pub(crate) ibl_prefilter_views: Vec<wgpu::TextureView>,
-    pub(crate) ibl_brdf_lut: wgpu::Texture,
+    pub(crate) _ibl_prefilter_views: Vec<wgpu::TextureView>,
+    pub(crate) _ibl_brdf_lut: wgpu::Texture,
     pub(crate) ibl_brdf_lut_view: wgpu::TextureView,
     pub(crate) ibl_sampler: wgpu::Sampler,
     pub(crate) ibl_enabled: bool,
@@ -311,7 +309,7 @@ pub struct WgpuRenderDevice {
     // Post-processing pipeline
     pub(crate) post_pipeline: wgpu::RenderPipeline,
     pub(crate) post_bind_group_layout: wgpu::BindGroupLayout,
-    pub(crate) post_bind_group: wgpu::BindGroup,
+    pub(crate) _post_bind_group: wgpu::BindGroup,
     pub(crate) taa_pipeline: wgpu::ComputePipeline,
     pub(crate) taa_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) taa_bind_group: Option<Arc<wgpu::BindGroup>>,
@@ -319,30 +317,30 @@ pub struct WgpuRenderDevice {
     pub(crate) post_cached_bg: Option<Arc<wgpu::BindGroup>>,
     /// Whether the cached post bind group samples the TAA-resolved HDR target.
     pub(crate) post_cached_uses_taa: bool,
-    pub(crate) post_cached_dims: (u32, u32),
+    pub(crate) _post_cached_dims: (u32, u32),
     pub(crate) post_uniform: wgpu::Buffer,
     // Bloom resources
-    pub(crate) bloom_pipeline_downsample: Option<wgpu::RenderPipeline>,
-    pub(crate) bloom_pipeline_upsample: Option<wgpu::RenderPipeline>,
-    pub(crate) bloom_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pub(crate) _bloom_pipeline_downsample: Option<wgpu::RenderPipeline>,
+    pub(crate) _bloom_pipeline_upsample: Option<wgpu::RenderPipeline>,
+    pub(crate) _bloom_bind_group_layout: Option<wgpu::BindGroupLayout>,
     pub(crate) bloom_mip_views: Vec<wgpu::TextureView>,
     pub(crate) bloom_mip_textures: Vec<wgpu::Texture>,
     /// Cached bloom compute bind groups per mip, regenerated on resize.
     pub(crate) bloom_cached_down_bgs: Vec<Arc<wgpu::BindGroup>>,
     pub(crate) bloom_cached_up_bgs: Vec<Arc<wgpu::BindGroup>>,
-    pub(crate) bloom_cached_dims: (u32, u32),
+    pub(crate) _bloom_cached_dims: (u32, u32),
     pub(crate) bloom_sampler: wgpu::Sampler,
     pub(crate) bloom_uniform: wgpu::Buffer,
     // SSAO resources
-    pub(crate) ssao_pipeline: Option<wgpu::RenderPipeline>,
-    pub(crate) ssao_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    pub(crate) ssao_bind_group: Option<wgpu::BindGroup>,
+    pub(crate) _ssao_pipeline: Option<wgpu::RenderPipeline>,
+    pub(crate) _ssao_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pub(crate) _ssao_bind_group: Option<wgpu::BindGroup>,
     pub(crate) ssao_cached_bg: Option<Arc<wgpu::BindGroup>>,
-    pub(crate) ssao_cached_dims: (u32, u32),
-    pub(crate) ssao_noise_texture: wgpu::Texture,
+    pub(crate) _ssao_cached_dims: (u32, u32),
+    pub(crate) _ssao_noise_texture: wgpu::Texture,
     pub(crate) ssao_noise_view: wgpu::TextureView,
     pub(crate) ssao_samples_buffer: wgpu::Buffer,
-    pub(crate) ssao_linear_sampler: wgpu::Sampler,
+    pub(crate) _ssao_linear_sampler: wgpu::Sampler,
     pub(crate) ssao_output_texture: Option<wgpu::Texture>,
     pub(crate) ssao_output_view: Option<wgpu::TextureView>,
     pub(crate) ssao_uniform: wgpu::Buffer,
@@ -398,6 +396,9 @@ pub struct WgpuRenderDevice {
     pub(crate) latest_submitted_lights: u32,
     pub(crate) latest_visible_lights: u32,
     pub(crate) latest_culled_lights: u32,
+    pub(crate) latest_shadowed_lights: u32,
+    pub(crate) latest_shadow_caster_batches: u32,
+    pub(crate) latest_directional_shadow_cascades: u32,
     pub(crate) latest_draw_calls: u32,
     pub(crate) latest_triangles: u64,
     pub(crate) gpu_particles: crate::particles::GpuParticlePipeline,

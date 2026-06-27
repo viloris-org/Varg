@@ -47,8 +47,8 @@ pub(crate) fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[
     [
         [f / aspect, 0.0, 0.0, 0.0],
         [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, (far + near) * range_inv, -1.0],
-        [0.0, 0.0, 2.0 * far * near * range_inv, 0.0],
+        [0.0, 0.0, far * range_inv, -1.0],
+        [0.0, 0.0, far * near * range_inv, 0.0],
     ]
 }
 
@@ -66,11 +66,11 @@ pub(crate) fn orthographic_rh(
     [
         [2.0 / (right - left), 0.0, 0.0, 0.0],
         [0.0, 2.0 / (top - bottom), 0.0, 0.0],
-        [0.0, 0.0, 2.0 * range_inv, 0.0],
+        [0.0, 0.0, range_inv, 0.0],
         [
             -(right + left) / (right - left),
             -(top + bottom) / (top - bottom),
-            (far + near) * range_inv,
+            near * range_inv,
             1.0,
         ],
     ]
@@ -99,6 +99,60 @@ pub(crate) fn mul_mat4_vec3(
     engine_core::math::Vec3::new(x, y, z)
 }
 
+pub(crate) fn inverse_mat4(m: &[[f32; 4]; 4]) -> Option<[[f32; 4]; 4]> {
+    let mut a = [[0.0f32; 8]; 4];
+    for row in 0..4 {
+        for col in 0..4 {
+            a[row][col] = m[col][row];
+        }
+        a[row][4 + row] = 1.0;
+    }
+
+    for col in 0..4 {
+        let mut pivot = col;
+        let mut pivot_abs = a[col][col].abs();
+        for row in (col + 1)..4 {
+            let candidate = a[row][col].abs();
+            if candidate > pivot_abs {
+                pivot = row;
+                pivot_abs = candidate;
+            }
+        }
+        if pivot_abs <= 1e-8 {
+            return None;
+        }
+        if pivot != col {
+            a.swap(col, pivot);
+        }
+
+        let inv_pivot = 1.0 / a[col][col];
+        for value in &mut a[col] {
+            *value *= inv_pivot;
+        }
+
+        for row in 0..4 {
+            if row == col {
+                continue;
+            }
+            let factor = a[row][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for idx in 0..8 {
+                a[row][idx] -= factor * a[col][idx];
+            }
+        }
+    }
+
+    let mut inverse = [[0.0f32; 4]; 4];
+    for row in 0..4 {
+        for col in 0..4 {
+            inverse[col][row] = a[row][4 + col];
+        }
+    }
+    Some(inverse)
+}
+
 pub(crate) fn orthographic_rh_custom(
     left: f32,
     right: f32,
@@ -107,7 +161,7 @@ pub(crate) fn orthographic_rh_custom(
     near: f32,
     far: f32,
 ) -> [[f32; 4]; 4] {
-    let range_inv = 1.0 / (near - far);
+    let range_inv = 1.0 / (far - near);
     [
         [2.0 / (right - left), 0.0, 0.0, 0.0],
         [0.0, 2.0 / (top - bottom), 0.0, 0.0],
@@ -115,7 +169,7 @@ pub(crate) fn orthographic_rh_custom(
         [
             -(right + left) / (right - left),
             -(top + bottom) / (top - bottom),
-            near * range_inv,
+            -near * range_inv,
             1.0,
         ],
     ]

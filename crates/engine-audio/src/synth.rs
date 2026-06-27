@@ -163,13 +163,6 @@ impl EnvelopeState {
 /// A scheduled parameter change.
 #[derive(Clone, Debug)]
 enum Automation {
-    /// Hold current value until time.
-    HoldValue {
-        /// Target value.
-        value: f32,
-        /// Time to hold until.
-        time: f32,
-    },
     /// Linear ramp from current to target.
     LinearRamp {
         /// Target value.
@@ -207,7 +200,6 @@ impl AutomationParam {
     fn tick(&mut self, current_time: f32) -> f32 {
         // Remove expired automations
         self.automations.retain(|a| match a {
-            Automation::HoldValue { time, .. } => current_time <= *time,
             Automation::LinearRamp { end_time, .. } => current_time <= *end_time,
             Automation::ExponentialRamp { end_time, .. } => current_time <= *end_time,
         });
@@ -215,9 +207,6 @@ impl AutomationParam {
         let mut result = self.value;
         if let Some(auto) = self.automations.first() {
             match auto {
-                Automation::HoldValue { value, .. } => {
-                    result = *value;
-                }
                 Automation::LinearRamp {
                     target,
                     start_time,

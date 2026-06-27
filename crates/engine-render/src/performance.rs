@@ -151,6 +151,12 @@ pub struct RenderPerformanceMetrics {
     pub visible_lights: u32,
     /// Scene lights omitted by the active lighting budget.
     pub culled_lights: u32,
+    /// Visible lights that request real-time shadows.
+    pub shadowed_lights: u32,
+    /// Shadow-casting geometry batches submitted before cascade multiplication.
+    pub shadow_caster_batches: u32,
+    /// Directional shadow cascades requested by the primary shadow light.
+    pub directional_shadow_cascades: u32,
     /// Whether the frame used the hybrid deferred lighting path.
     pub hybrid_deferred: bool,
     /// Number of active GI probes considered by the backend.

@@ -148,7 +148,7 @@ impl ComponentSchemaRegistry {
         registry.register(ComponentSchema {
             type_id: "Light".to_string(),
             display_name: "Light".to_string(),
-            version: 3,
+            version: 4,
             fields: vec![
                 field("kind", ComponentFieldKind::String, "directional"),
                 field("color", ComponentFieldKind::Vec3, "1,1,1"),
@@ -159,6 +159,42 @@ impl ComponentSchemaRegistry {
                 field("source_radius", ComponentFieldKind::F32, "0"),
                 field("temperature_kelvin", ComponentFieldKind::F32, "0"),
                 field("contact_shadow_strength", ComponentFieldKind::F32, "0"),
+                field("indirect_energy", ComponentFieldKind::F32, "1"),
+                field("specular", ComponentFieldKind::F32, "1"),
+                field("attenuation", ComponentFieldKind::F32, "2"),
+                field("shadow_bias", ComponentFieldKind::F32, "0.0008"),
+                field("shadow_normal_bias", ComponentFieldKind::F32, "0.0025"),
+                field("shadow_fade_start", ComponentFieldKind::F32, "0.8"),
+                field("shadow_max_distance", ComponentFieldKind::F32, "200"),
+                field("cull_mask", ComponentFieldKind::String, "4294967295"),
+                field(
+                    "shadow_caster_mask",
+                    ComponentFieldKind::String,
+                    "4294967295",
+                ),
+                field("bake_mode", ComponentFieldKind::String, "dynamic"),
+                field(
+                    "directional_shadow_mode",
+                    ComponentFieldKind::String,
+                    "parallel-4-splits",
+                ),
+                field(
+                    "directional_shadow_blend_splits",
+                    ComponentFieldKind::Bool,
+                    "true",
+                ),
+                field("directional_shadow_split_1", ComponentFieldKind::F32, "0.1"),
+                field(
+                    "directional_shadow_split_2",
+                    ComponentFieldKind::F32,
+                    "0.28",
+                ),
+                field(
+                    "directional_shadow_split_3",
+                    ComponentFieldKind::F32,
+                    "0.55",
+                ),
+                field("projector", ComponentFieldKind::String, ""),
             ],
             evolution: SchemaEvolution::default(),
         });

@@ -245,6 +245,117 @@ pub struct LightComponentData {
     /// Contact-shadow strength hint for near-surface shadowing.
     #[serde(default)]
     pub contact_shadow_strength: f32,
+    /// Indirect lighting contribution multiplier for GI and probe systems.
+    #[serde(default = "default_light_indirect_energy")]
+    pub indirect_energy: f32,
+    /// Specular highlight contribution multiplier.
+    #[serde(default = "default_light_specular")]
+    pub specular: f32,
+    /// Distance attenuation exponent for point and spot lights.
+    #[serde(default = "default_light_attenuation")]
+    pub attenuation: f32,
+    /// Constant shadow depth bias.
+    #[serde(default = "default_light_shadow_bias")]
+    pub shadow_bias: f32,
+    /// Normal-dependent shadow bias.
+    #[serde(default = "default_light_shadow_normal_bias")]
+    pub shadow_normal_bias: f32,
+    /// Fraction of shadow range where shadows fade out.
+    #[serde(default = "default_light_shadow_fade_start")]
+    pub shadow_fade_start: f32,
+    /// Maximum directional shadow distance.
+    #[serde(default = "default_light_shadow_max_distance")]
+    pub shadow_max_distance: f32,
+    /// Render layers affected by this light.
+    #[serde(default = "default_light_cull_mask")]
+    pub cull_mask: u32,
+    /// Render layers allowed to cast shadows for this light.
+    #[serde(default = "default_light_shadow_caster_mask")]
+    pub shadow_caster_mask: u32,
+    /// Whether this light participates in baking.
+    #[serde(default)]
+    pub bake_mode: LightBakeMode,
+    /// Directional shadow split layout.
+    #[serde(default)]
+    pub directional_shadow_mode: DirectionalShadowMode,
+    /// Whether directional cascades blend at split boundaries.
+    #[serde(default)]
+    pub directional_shadow_blend_splits: bool,
+    /// First directional split as a fraction of max distance.
+    #[serde(default = "default_directional_shadow_split_1")]
+    pub directional_shadow_split_1: f32,
+    /// Second directional split as a fraction of max distance.
+    #[serde(default = "default_directional_shadow_split_2")]
+    pub directional_shadow_split_2: f32,
+    /// Third directional split as a fraction of max distance.
+    #[serde(default = "default_directional_shadow_split_3")]
+    pub directional_shadow_split_3: f32,
+    /// Optional projector texture asset label/path.
+    #[serde(default)]
+    pub projector: Option<String>,
+}
+
+/// Typed light category used by scene tools and render extraction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LightKind {
+    /// Directional light with no position attenuation.
+    #[default]
+    Directional,
+    /// Point light attenuated by range.
+    Point,
+    /// Spot light attenuated by range and cone angle.
+    Spot,
+    /// Rectangular area light hint.
+    Area,
+}
+
+impl LightKind {
+    /// Parses legacy serialized light kind strings.
+    pub fn from_legacy(value: &str) -> Self {
+        match value {
+            "point" | "omni" => Self::Point,
+            "spot" => Self::Spot,
+            "area" => Self::Area,
+            _ => Self::Directional,
+        }
+    }
+
+    /// Returns the canonical legacy string for compatibility with existing scenes.
+    pub fn as_legacy_str(self) -> &'static str {
+        match self {
+            Self::Directional => "directional",
+            Self::Point => "point",
+            Self::Spot => "spot",
+            Self::Area => "area",
+        }
+    }
+}
+
+/// Light baking behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LightBakeMode {
+    /// Excluded from baked lighting.
+    Disabled,
+    /// Baked as static lighting.
+    Static,
+    /// May affect dynamic GI/light probes.
+    #[default]
+    Dynamic,
+}
+
+/// Directional shadow cascade layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DirectionalShadowMode {
+    /// Single orthographic directional shadow.
+    Orthogonal,
+    /// Two parallel split shadow maps.
+    Parallel2Splits,
+    /// Four parallel split shadow maps.
+    #[default]
+    Parallel4Splits,
 }
 
 fn default_light_range() -> f32 {
@@ -253,6 +364,54 @@ fn default_light_range() -> f32 {
 
 fn default_spot_angle() -> f32 {
     30.0
+}
+
+fn default_light_indirect_energy() -> f32 {
+    1.0
+}
+
+fn default_light_specular() -> f32 {
+    1.0
+}
+
+fn default_light_attenuation() -> f32 {
+    2.0
+}
+
+fn default_light_shadow_bias() -> f32 {
+    0.0008
+}
+
+fn default_light_shadow_normal_bias() -> f32 {
+    0.0025
+}
+
+fn default_light_shadow_fade_start() -> f32 {
+    0.8
+}
+
+fn default_light_shadow_max_distance() -> f32 {
+    200.0
+}
+
+fn default_light_cull_mask() -> u32 {
+    u32::MAX
+}
+
+fn default_light_shadow_caster_mask() -> u32 {
+    u32::MAX
+}
+
+fn default_directional_shadow_split_1() -> f32 {
+    0.1
+}
+
+fn default_directional_shadow_split_2() -> f32 {
+    0.28
+}
+
+fn default_directional_shadow_split_3() -> f32 {
+    0.55
 }
 
 impl Default for LightComponentData {
@@ -267,7 +426,35 @@ impl Default for LightComponentData {
             source_radius: 0.0,
             temperature_kelvin: 0.0,
             contact_shadow_strength: 0.0,
+            indirect_energy: default_light_indirect_energy(),
+            specular: default_light_specular(),
+            attenuation: default_light_attenuation(),
+            shadow_bias: default_light_shadow_bias(),
+            shadow_normal_bias: default_light_shadow_normal_bias(),
+            shadow_fade_start: default_light_shadow_fade_start(),
+            shadow_max_distance: default_light_shadow_max_distance(),
+            cull_mask: default_light_cull_mask(),
+            shadow_caster_mask: default_light_shadow_caster_mask(),
+            bake_mode: LightBakeMode::default(),
+            directional_shadow_mode: DirectionalShadowMode::default(),
+            directional_shadow_blend_splits: true,
+            directional_shadow_split_1: default_directional_shadow_split_1(),
+            directional_shadow_split_2: default_directional_shadow_split_2(),
+            directional_shadow_split_3: default_directional_shadow_split_3(),
+            projector: None,
         }
+    }
+}
+
+impl LightComponentData {
+    /// Returns the typed light kind while preserving legacy string storage.
+    pub fn light_kind(&self) -> LightKind {
+        LightKind::from_legacy(&self.kind)
+    }
+
+    /// Updates the legacy kind field from a typed light kind.
+    pub fn set_light_kind(&mut self, kind: LightKind) {
+        self.kind = kind.as_legacy_str().to_string();
     }
 }
 
@@ -2160,6 +2347,20 @@ mod tests {
             loaded.components(camera).unwrap()[0],
             ComponentData::Camera(_)
         ));
+    }
+
+    #[test]
+    fn light_kind_helpers_preserve_legacy_storage() {
+        let mut light = LightComponentData {
+            kind: "omni".to_string(),
+            ..LightComponentData::default()
+        };
+
+        assert_eq!(light.light_kind(), LightKind::Point);
+
+        light.set_light_kind(LightKind::Area);
+        assert_eq!(light.kind, "area");
+        assert_eq!(light.light_kind(), LightKind::Area);
     }
 
     #[test]
