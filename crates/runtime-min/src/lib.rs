@@ -56,8 +56,9 @@ use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
 use engine_script_varg::{
-    VargAudioCommand, VargRuntimeContextRef, VargSceneContext, VargScript, VargSpawnRequest,
-    VargUiCommand, compile_script_source, compile_vscene_source_to_scene,
+    VargAudioCommand, VargDestroyNearestRequest, VargRuntimeContextRef, VargSceneContext,
+    VargScript, VargSpawnRequest, VargUiCommand, compile_script_source,
+    compile_vscene_source_to_scene,
 };
 #[cfg(feature = "audio")]
 use std::collections::HashSet;
@@ -519,7 +520,11 @@ impl<R: RenderDevice> RuntimeServices<R> {
     }
 
     #[cfg(all(feature = "audio", feature = "runtime-game"))]
-    fn enable_default_audio_output(&mut self) {
+    /// Attempts to route runtime audio to the operating system's default output device.
+    ///
+    /// If no device can be opened, the runtime keeps the deterministic memory backend
+    /// and records a warning diagnostic so preview hosts can surface the failure.
+    pub fn enable_default_audio_output(&mut self) {
         match AudioContext::device_default() {
             Ok(audio) => self.audio = audio,
             Err(error) => self.diagnostics.push(RuntimeDiagnostic {
@@ -803,6 +808,17 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     self.scene_snapshot.refresh(&self.scene);
                 }
             }
+            for request in output.destroy_nearest_requests {
+                if let Err(error) = self.apply_varg_destroy_nearest_request(entity, request) {
+                    self.diagnostics.push(RuntimeDiagnostic {
+                        source: "script".to_string(),
+                        level: "error".to_string(),
+                        message: format!("varg destroy nearest error: {error}"),
+                        file: Some(script_path.clone()),
+                        line: None,
+                    });
+                }
+            }
             if let Some(mouse_capture) = output.mouse_capture {
                 self.input_capture.mouse = mouse_capture;
             }
@@ -888,6 +904,33 @@ impl<R: RenderDevice> RuntimeServices<R> {
         if let Some(script) = request.script {
             self.scene
                 .upsert_component(entity, ComponentData::Script(ScriptComponent::new(script)))?;
+        }
+        Ok(())
+    }
+
+    fn apply_varg_destroy_nearest_request(
+        &mut self,
+        source_entity: engine_ecs::Entity,
+        request: VargDestroyNearestRequest,
+    ) -> EngineResult<()> {
+        if request.tag.is_empty() || request.radius <= 0.0 {
+            return Ok(());
+        }
+
+        let nearest = self
+            .scene
+            .iter_objects()
+            .filter(|(entity, object)| *entity != source_entity && object.tag == request.tag)
+            .filter_map(|(entity, _)| {
+                let transform = self.scene.transforms().local(entity)?;
+                let distance = (transform.translation - request.origin).length();
+                (distance <= request.radius).then_some((entity, distance))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(entity, _)| entity);
+
+        if let Some(entity) = nearest {
+            self.scene.destroy_deferred(entity)?;
         }
         Ok(())
     }
@@ -4219,6 +4262,80 @@ mod tests {
         assert!(
             services.scene.object(enemy).is_none(),
             "enemy should be destroyed at the frame-safe destroy point"
+        );
+    }
+
+    #[test]
+    fn varg_script_can_destroy_nearest_tagged_scene_object() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("collector.varg"),
+            r#"script Collector {
+    func update(_ dt: Float) {
+        scene.destroyNearestWithTag("Collectible", 1.5)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+
+        let player = services.scene.create_object("Player").unwrap();
+        services.scene.object_mut(player).unwrap().tag = "Player".to_string();
+        services.scene.transforms_mut().set_local(
+            player,
+            Transform {
+                translation: Vec3::new(0.0, 0.0, 0.0),
+                ..Transform::default()
+            },
+        );
+        services
+            .scene
+            .upsert_component(
+                player,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/collector.varg")),
+            )
+            .unwrap();
+
+        let near = services.scene.create_object("Near Crystal").unwrap();
+        services.scene.object_mut(near).unwrap().tag = "Collectible".to_string();
+        services.scene.transforms_mut().set_local(
+            near,
+            Transform {
+                translation: Vec3::new(0.5, 0.0, 0.0),
+                ..Transform::default()
+            },
+        );
+
+        let far = services.scene.create_object("Far Crystal").unwrap();
+        services.scene.object_mut(far).unwrap().tag = "Collectible".to_string();
+        services.scene.transforms_mut().set_local(
+            far,
+            Transform {
+                translation: Vec3::new(3.0, 0.0, 0.0),
+                ..Transform::default()
+            },
+        );
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(
+            services.scene.object(near).is_none(),
+            "nearest crystal should be destroyed"
+        );
+        assert!(
+            services.scene.object(far).is_some(),
+            "far crystal should remain outside the pickup radius"
+        );
+        assert!(
+            services.scene.object(player).is_some(),
+            "request source should not destroy itself"
         );
     }
 

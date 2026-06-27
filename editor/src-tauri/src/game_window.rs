@@ -64,6 +64,7 @@ impl GameRuntimeSnapshot {
     ) -> engine_core::EngineResult<RuntimeServices<WgpuRenderDevice>> {
         let scene = engine_ecs::Scene::from_scene_file(self.scene_file)?;
         let mut runtime = RuntimeServices::with_renderer(self.config, renderer);
+        runtime.enable_default_audio_output();
         runtime.set_project_root(self.project_root);
         runtime.set_script_roots(self.script_roots);
         runtime.load_project_assets(self.asset_root)?;

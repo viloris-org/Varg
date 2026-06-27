@@ -65,7 +65,9 @@ fn load_runtime_project_fails_for_invalid_manifest() {
 fn find_workspace_root() -> PathBuf {
     let mut current = std::env::current_dir().expect("get current dir");
     loop {
-        if current.join("Cargo.toml").is_file() && current.join("examples").is_dir() {
+        if current.join("Cargo.toml").is_file()
+            && current.join("examples/project/Varg.toml").is_file()
+        {
             return current;
         }
         if !current.pop() {

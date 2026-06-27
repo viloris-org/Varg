@@ -383,9 +383,6 @@ const pickRadiusPx = 30;
 const viewportFovDeg = 60;
 const editorViewportTargetFps = 75;
 const editorViewportFrameMs = 1000 / editorViewportTargetFps;
-const editorViewportMaxPixels = 1920 * 1080;
-const interactiveViewportMaxPixels = 1280 * 720;
-const playViewportMaxPixels = editorViewportMaxPixels;
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
@@ -411,21 +408,14 @@ function storedPanelSize(key: string, min: number, max: number, fallback: number
 }
 
 function viewportDevicePixelRatio() {
-  return Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+  return Math.max(window.devicePixelRatio || 1, 1);
 }
 
-function fitViewportReadbackSize(width: number, height: number, maxPixels = editorViewportMaxPixels) {
+function fitViewportReadbackSize(width: number, height: number) {
   const pixelRatio = viewportDevicePixelRatio();
-  const roundedWidth = Math.max(1, Math.round(width * pixelRatio));
-  const roundedHeight = Math.max(1, Math.round(height * pixelRatio));
-  if (!maxPixels || roundedWidth * roundedHeight <= maxPixels) {
-    return { width: roundedWidth, height: roundedHeight, scaled: false };
-  }
-  const scale = Math.sqrt(maxPixels / (roundedWidth * roundedHeight));
   return {
-    width: Math.max(1, Math.round(roundedWidth * scale)),
-    height: Math.max(1, Math.round(roundedHeight * scale)),
-    scaled: true,
+    width: Math.max(1, Math.round(width * pixelRatio)),
+    height: Math.max(1, Math.round(height * pixelRatio)),
   };
 }
 
@@ -672,7 +662,6 @@ function ViewportCanvas({
       const { width, height } = fitViewportReadbackSize(
         sizeRef.current.width,
         sizeRef.current.height,
-        fastPreview ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
       );
       const camera = cameraRef.current;
       const lastVersion = !playMode && !fastPreview
@@ -705,7 +694,6 @@ function ViewportCanvas({
           const expected = fitViewportReadbackSize(
             sizeRef.current.width,
             sizeRef.current.height,
-            fastPreview ? interactiveViewportMaxPixels : playMode ? playViewportMaxPixels : editorViewportMaxPixels,
           );
           lastDrawWasScaledRef.current = widthFromBackend !== expected.width || heightFromBackend !== expected.height;
           const canvas = canvasRef.current;

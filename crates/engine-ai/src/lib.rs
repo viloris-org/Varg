@@ -10,10 +10,21 @@
 mod parser;
 pub mod providers;
 pub mod registry;
+pub mod skills;
 mod system_prompt;
+pub mod tools;
 
 pub use parser::parse_operations;
 pub use registry::ModelRegistry;
+pub use skills::{
+    SkillReadRequest, SkillReadResult, SkillRegistryConfig, SkillSearchQuery, SkillSearchResult,
+    SkillSource, read_skill, search_skills,
+};
+pub use tools::{
+    CapabilityDecision, CapabilityDecisionResult, CapabilityRequest, CapabilityRequestResult,
+    EvidenceKind, RiskClass, ToolExposure, ToolSearchQuery, ToolSearchResult, ToolStage, ToolType,
+    VargToolMetadata, search_tools,
+};
 
 use std::path::{Component, Path, PathBuf};
 
@@ -371,6 +382,144 @@ pub enum AgentOperation {
         /// Natural language query.
         query: String,
     },
+    /// Search the AI tool registry for tools that are not always visible.
+    ToolSearch {
+        /// Natural-language search text.
+        query: String,
+        /// Optional tool type filters.
+        #[serde(default)]
+        types: Vec<String>,
+        /// Optional required capability filters.
+        #[serde(default)]
+        capabilities: Vec<String>,
+        /// Optional stage filter.
+        #[serde(default)]
+        stage: Option<String>,
+        /// Optional maximum risk class.
+        #[serde(default)]
+        risk_max: Option<String>,
+        /// Maximum number of results to return.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Search project and global Varg skills.
+    SkillSearch {
+        /// Natural-language search text.
+        query: String,
+        /// Optional source filter: "project" or "global".
+        #[serde(default)]
+        source: Option<String>,
+        /// Maximum number of results to return.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Read a Varg skill file from a resolved skill ID.
+    SkillRead {
+        /// Resolved skill ID from `skill_search`.
+        id: String,
+        /// Optional path inside the skill directory. Defaults to `SKILL.md`.
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Ask the permission gate whether scoped capabilities are currently allowed.
+    RequestCapability {
+        /// Capability strings requested directly.
+        capabilities: Vec<String>,
+        /// Optional tool names whose declared capabilities should be included.
+        #[serde(default)]
+        tools: Vec<String>,
+        /// Optional explanation for why access is needed.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Return structured scene hierarchy and object/component summaries.
+    GetSceneInfo {
+        /// Whether to include component payload details.
+        #[serde(default)]
+        include_components: bool,
+    },
+    /// Return detailed transform, component, mesh, material, and bounds info for one object.
+    GetObjectInfo {
+        /// Entity identifier or exact object name.
+        entity: String,
+    },
+    /// Return asset metadata and scene references for an asset path or GUID.
+    GetAssetInfo {
+        /// Asset-root-relative path or 128-bit GUID string.
+        asset: String,
+    },
+    /// Create a primitive mesh object using structured transform and material fields.
+    CreatePrimitive {
+        /// Object name.
+        name: String,
+        /// Primitive kind, such as cube, sphere, plane, capsule, cylinder, or quad.
+        primitive: String,
+        /// Optional transform.
+        #[serde(default)]
+        transform: Option<TransformSpec>,
+        /// Optional material override.
+        #[serde(default)]
+        material: Option<MaterialSpec>,
+    },
+    /// Set an object's transform using structured position/rotation/scale values.
+    SetTransform {
+        /// Entity identifier or exact object name.
+        entity: String,
+        /// New transform values. Omitted fields keep current values.
+        transform: TransformSpec,
+    },
+    /// Duplicate an object one or more times with an optional transform offset.
+    DuplicateObject {
+        /// Entity identifier or exact object name.
+        entity: String,
+        /// Number of copies to create.
+        #[serde(default)]
+        count: Option<usize>,
+        /// Local transform offset applied per copy.
+        #[serde(default)]
+        offset: Option<TransformSpec>,
+    },
+    /// Create or assign material parameters for an object's MeshRenderer.
+    SetMaterial {
+        /// Entity identifier or exact object name.
+        entity: String,
+        /// Material parameters or built-in material name.
+        material: MaterialSpec,
+    },
+    /// Write a structured mesh asset descriptor under the asset root.
+    CreateMeshAsset {
+        /// Asset-root-relative target path, usually under models/ and ending in .vmesh.json.
+        path: String,
+        /// Mesh authoring operations or primitives to record.
+        operations: Vec<MeshOperationSpec>,
+        /// Optional assign-to entity after asset creation.
+        #[serde(default)]
+        assign_to: Option<String>,
+    },
+    /// Apply structured mesh operations by recording a derived mesh asset descriptor.
+    ModifyMesh {
+        /// Source asset path/GUID or entity whose MeshRenderer mesh should be used.
+        source: String,
+        /// Asset-root-relative target path for the derived mesh descriptor.
+        target_path: String,
+        /// Operations such as bevel, inset, extrude, mirror, boolean, or array.
+        operations: Vec<MeshOperationSpec>,
+    },
+    /// Capture a lightweight viewport feedback request for the editor surface.
+    CaptureViewport {
+        /// Optional entity identifier or name to frame before capture.
+        #[serde(default)]
+        entity: Option<String>,
+        /// Optional output path relative to project root for future screenshot persistence.
+        #[serde(default)]
+        output_path: Option<String>,
+    },
+    /// Validate scene references, assets, and basic authoring constraints.
+    ValidateScene {
+        /// Whether to include advisory warnings in addition to blocking errors.
+        #[serde(default)]
+        include_warnings: bool,
+    },
     /// Attach a declarative behavior tree to an entity.
     AttachBehavior {
         /// Entity identifier or name.
@@ -437,6 +586,21 @@ impl AgentOperation {
             Self::ShowInViewport { .. } => "show_in_viewport",
             Self::BatchOperation { .. } => "batch_operation",
             Self::QuerySceneSemantic { .. } => "query_scene_semantic",
+            Self::ToolSearch { .. } => "tool_search",
+            Self::SkillSearch { .. } => "skill_search",
+            Self::SkillRead { .. } => "skill_read",
+            Self::RequestCapability { .. } => "request_capability",
+            Self::GetSceneInfo { .. } => "get_scene_info",
+            Self::GetObjectInfo { .. } => "get_object_info",
+            Self::GetAssetInfo { .. } => "get_asset_info",
+            Self::CreatePrimitive { .. } => "create_primitive",
+            Self::SetTransform { .. } => "set_transform",
+            Self::DuplicateObject { .. } => "duplicate_object",
+            Self::SetMaterial { .. } => "set_material",
+            Self::CreateMeshAsset { .. } => "create_mesh_asset",
+            Self::ModifyMesh { .. } => "modify_mesh",
+            Self::CaptureViewport { .. } => "capture_viewport",
+            Self::ValidateScene { .. } => "validate_scene",
             Self::AttachBehavior { .. } => "attach_behavior",
             Self::MoveEntityTo { .. } => "move_entity_to",
             Self::RunCommand { .. } => "run_command",
@@ -469,6 +633,54 @@ pub struct ComponentSpec {
     /// Optional initial properties for the component.
     #[serde(default)]
     pub properties: serde_json::Value,
+}
+
+/// Structured transform values accepted by modeling tools.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct TransformSpec {
+    /// Optional translation [x, y, z].
+    #[serde(default)]
+    pub position: Option<[f32; 3]>,
+    /// Optional quaternion rotation [x, y, z, w].
+    #[serde(default)]
+    pub rotation: Option<[f32; 4]>,
+    /// Optional local scale [x, y, z].
+    #[serde(default)]
+    pub scale: Option<[f32; 3]>,
+}
+
+/// Structured material values accepted by modeling tools.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct MaterialSpec {
+    /// Built-in material name, if using a built-in material.
+    #[serde(default)]
+    pub builtin: Option<String>,
+    /// Optional generated material asset path relative to the asset root.
+    #[serde(default)]
+    pub asset_path: Option<String>,
+    /// Optional display name for generated material descriptors.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional base color [r, g, b].
+    #[serde(default)]
+    pub base_color: Option<[f32; 3]>,
+    /// Optional roughness value.
+    #[serde(default)]
+    pub roughness: Option<f32>,
+    /// Optional metallic value.
+    #[serde(default)]
+    pub metallic: Option<f32>,
+}
+
+/// Structured mesh operation descriptor.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct MeshOperationSpec {
+    /// Operation kind, such as cube, bevel, inset, extrude, mirror, boolean, or array.
+    #[serde(rename = "type")]
+    pub operation_type: String,
+    /// Operation parameters.
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Outcome of an AI agent interaction.
@@ -507,6 +719,10 @@ pub struct PlannedOperation {
     pub preview: String,
     /// Whether this operation requires write permission.
     pub requires_write: bool,
+    /// Capabilities declared for this operation.
+    pub capabilities: Vec<String>,
+    /// Policy decisions for each declared capability.
+    pub capability_decisions: Vec<CapabilityDecisionResult>,
 }
 
 /// A validated agent plan ready for user preview.
@@ -541,6 +757,8 @@ pub struct AgentSession {
     pub trace: TraceRecorder,
     /// Asset root path for script creation.
     asset_root: PathBuf,
+    /// Permission policy currently being applied, used by capability preflight logs.
+    active_policy: PermissionPolicy,
 }
 
 impl AgentSession {
@@ -563,6 +781,7 @@ impl AgentSession {
             selection: SelectionService::default(),
             trace: TraceRecorder::default(),
             asset_root,
+            active_policy: PermissionPolicy::read_only(),
         })
     }
 
@@ -635,6 +854,14 @@ impl AgentSession {
         }
     }
 
+    fn skill_registry_config(&self) -> SkillRegistryConfig {
+        SkillRegistryConfig::new(&self.context.root, default_global_varg_root())
+    }
+
+    fn current_policy_hint(&self) -> PermissionPolicy {
+        self.active_policy.clone()
+    }
+
     /// Parses and validates a completed provider response.
     pub fn plan_from_response(
         &mut self,
@@ -695,6 +922,7 @@ impl AgentSession {
     /// Applies an approved plan and records diagnostics and trace entries.
     pub fn apply_plan(&mut self, plan: &AgentPlan) -> EngineResult<AgentOutcome> {
         let mut outcome = AgentOutcome::default();
+        self.active_policy = plan.policy.clone();
         for planned in &plan.operations {
             let op = &planned.operation;
             if matches!(op, AgentOperation::Complete { .. }) {
@@ -746,10 +974,14 @@ impl AgentSession {
                 requires_write = true;
             }
             validate_operation_policy(&operation, access, &policy)?;
+            let capabilities = operation_capabilities(&operation);
+            let capability_decisions = evaluate_capabilities(&capabilities, &policy);
             planned.push(PlannedOperation {
                 preview: preview_operation(&operation),
                 operation,
                 requires_write: access.requires_write,
+                capabilities,
+                capability_decisions,
             });
         }
 
@@ -924,7 +1156,7 @@ impl AgentSession {
                 value,
             } => self.apply_property(entity, component, field, value),
             AgentOperation::RemoveComponent { entity, component } => {
-                let parsed = parse_entity_id(entity)?;
+                let parsed = self.resolve_entity(entity)?;
                 let removed = self.context.scene.remove_component(parsed, component)?;
                 if removed {
                     self.console.push(ConsoleEntry {
@@ -941,7 +1173,7 @@ impl AgentSession {
                 Ok(())
             }
             AgentOperation::DestroyObject { entity } => {
-                let parsed = parse_entity_id(entity)?;
+                let parsed = self.resolve_entity(entity)?;
                 self.context.scene.destroy_deferred(parsed)?;
                 self.context.scene.process_deferred_destroy()?;
                 self.console.push(ConsoleEntry {
@@ -1160,6 +1392,162 @@ impl AgentSession {
                 rollback_on_failure,
             } => self.execute_batch_operation_inner(operations, *rollback_on_failure, depth),
             AgentOperation::QuerySceneSemantic { query } => self.execute_semantic_query(query),
+            AgentOperation::ToolSearch {
+                query,
+                types,
+                capabilities,
+                stage,
+                risk_max,
+                limit,
+            } => {
+                let results = tools::search_tools(&tools::ToolSearchQuery {
+                    query: query.clone(),
+                    types: types.clone(),
+                    capabilities: capabilities.clone(),
+                    stage: stage.clone(),
+                    risk_max: risk_max.clone(),
+                    limit: *limit,
+                })?;
+                let result_text = serde_json::to_string_pretty(&results)
+                    .map_err(|error| EngineError::other(error.to_string()))?;
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "ai-agent-tools".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message: result_text,
+                });
+                Ok(())
+            }
+            AgentOperation::SkillSearch {
+                query,
+                source,
+                limit,
+            } => {
+                let results = skills::search_skills(
+                    &self.skill_registry_config(),
+                    &skills::SkillSearchQuery {
+                        query: query.clone(),
+                        source: source.clone(),
+                        limit: *limit,
+                    },
+                )?;
+                let result_text = serde_json::to_string_pretty(&results)
+                    .map_err(|error| EngineError::other(error.to_string()))?;
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "ai-agent-skills".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message: result_text,
+                });
+                Ok(())
+            }
+            AgentOperation::SkillRead { id, path } => {
+                let result = skills::read_skill(
+                    &self.skill_registry_config(),
+                    &skills::SkillReadRequest {
+                        id: id.clone(),
+                        path: path.clone(),
+                    },
+                )?;
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "ai-agent-skills".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message: result.content,
+                });
+                Ok(())
+            }
+            AgentOperation::RequestCapability {
+                capabilities,
+                tools,
+                reason,
+            } => {
+                let requested = resolve_requested_capabilities(capabilities, tools);
+                let result = capability_request_result(&requested, &self.current_policy_hint());
+                let message = serde_json::to_string_pretty(&serde_json::json!({
+                    "reason": reason,
+                    "requested": requested,
+                    "result": result,
+                    "note": "request_capability is a preflight only; it does not grant permission."
+                }))
+                .map_err(|error| EngineError::other(error.to_string()))?;
+                self.console.push(ConsoleEntry {
+                    timestamp: "now".into(),
+                    level: ConsoleLevel::Info,
+                    source: ConsoleSource {
+                        subsystem: "ai-agent-permissions".into(),
+                        file: None,
+                        line: None,
+                    },
+                    message,
+                });
+                Ok(())
+            }
+            AgentOperation::GetSceneInfo { include_components } => {
+                let info = self.scene_info_json(*include_components)?;
+                self.push_json_console("ai-agent-scene", info)
+            }
+            AgentOperation::GetObjectInfo { entity } => {
+                let parsed = self.resolve_entity(entity)?;
+                let info = self.object_info_json(parsed)?;
+                self.push_json_console("ai-agent-scene", info)
+            }
+            AgentOperation::GetAssetInfo { asset } => {
+                let info = self.asset_info_json(asset);
+                self.push_json_console("ai-agent-assets", info)
+            }
+            AgentOperation::CreatePrimitive {
+                name,
+                primitive,
+                transform,
+                material,
+            } => self.execute_create_primitive(
+                name,
+                primitive,
+                transform.as_ref(),
+                material.as_ref(),
+            ),
+            AgentOperation::SetTransform { entity, transform } => {
+                self.execute_set_transform(entity, transform)
+            }
+            AgentOperation::DuplicateObject {
+                entity,
+                count,
+                offset,
+            } => self.execute_duplicate_object(entity, count.unwrap_or(1), offset.as_ref()),
+            AgentOperation::SetMaterial { entity, material } => {
+                self.execute_set_material(entity, material)
+            }
+            AgentOperation::CreateMeshAsset {
+                path,
+                operations,
+                assign_to,
+            } => self.execute_create_mesh_asset(path, operations, assign_to.as_deref()),
+            AgentOperation::ModifyMesh {
+                source,
+                target_path,
+                operations,
+            } => self.execute_modify_mesh(source, target_path, operations),
+            AgentOperation::CaptureViewport {
+                entity,
+                output_path,
+            } => self.execute_capture_viewport(entity.as_deref(), output_path.as_deref()),
+            AgentOperation::ValidateScene { include_warnings } => {
+                let report = self.validate_scene_json(*include_warnings);
+                self.push_json_console("ai-agent-validation", report)
+            }
             AgentOperation::AttachBehavior { entity, behavior } => {
                 self.execute_attach_behavior(entity, behavior)
             }
@@ -1185,6 +1573,503 @@ impl AgentSession {
                 *capture_stderr,
             ),
         }
+    }
+
+    fn push_json_console(
+        &mut self,
+        subsystem: impl Into<String>,
+        value: serde_json::Value,
+    ) -> EngineResult<()> {
+        let message = serde_json::to_string_pretty(&value)
+            .map_err(|error| EngineError::other(error.to_string()))?;
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: subsystem.into(),
+                file: None,
+                line: None,
+            },
+            message,
+        });
+        Ok(())
+    }
+
+    fn scene_info_json(&self, include_components: bool) -> EngineResult<serde_json::Value> {
+        let objects = self
+            .context
+            .scene
+            .objects()
+            .into_iter()
+            .map(|(entity, object)| {
+                let transform = self.context.scene.transforms().local(entity);
+                let parent = self.context.scene.transforms().parent(entity);
+                let components = if include_components {
+                    object
+                        .components
+                        .iter()
+                        .map(component_json)
+                        .collect::<Vec<_>>()
+                } else {
+                    object
+                        .components
+                        .iter()
+                        .map(|component| serde_json::json!({ "type": component.type_id() }))
+                        .collect::<Vec<_>>()
+                };
+                serde_json::json!({
+                    "id": entity_id_string(entity),
+                    "name": object.name,
+                    "tag": object.tag,
+                    "layer": object.layer,
+                    "active": object.active,
+                    "parent": parent.map(entity_id_string),
+                    "transform": transform.map(transform_json),
+                    "components": components,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!({
+            "scene_path": self.context.scene_path,
+            "mode": format!("{:?}", self.context.scene.mode()),
+            "structure_version": self.context.scene.structure_version(),
+            "object_count": objects.len(),
+            "objects": objects,
+        }))
+    }
+
+    fn object_info_json(&self, entity: engine_ecs::Entity) -> EngineResult<serde_json::Value> {
+        let object = self
+            .context
+            .scene
+            .object(entity)
+            .ok_or_else(|| EngineError::config("object not found"))?;
+        let transform = self.context.scene.transforms().local(entity);
+        let mesh_renderer = object.components.iter().find_map(|component| {
+            if let engine_ecs::ComponentData::MeshRenderer(mesh) = component {
+                Some(mesh)
+            } else {
+                None
+            }
+        });
+
+        Ok(serde_json::json!({
+            "id": entity_id_string(entity),
+            "name": object.name,
+            "tag": object.tag,
+            "layer": object.layer,
+            "active": object.active,
+            "parent": self.context.scene.transforms().parent(entity).map(entity_id_string),
+            "transform": transform.map(transform_json),
+            "components": object.components.iter().map(component_json).collect::<Vec<_>>(),
+            "mesh": mesh_renderer.map(|mesh| serde_json::json!({
+                "asset": mesh.mesh.map(|id| id.as_u128().to_string()),
+                "builtin_mesh": mesh.builtin_mesh,
+            })),
+            "material": mesh_renderer.map(|mesh| serde_json::json!({
+                "asset": mesh.material.asset.map(|id| id.as_u128().to_string()),
+                "builtin": mesh.material.builtin,
+            })),
+            "bounds": transform.map(|t| serde_json::json!({
+                "center": [t.translation.x, t.translation.y, t.translation.z],
+                "extents": [
+                    t.scale.x.abs() * 0.5,
+                    t.scale.y.abs() * 0.5,
+                    t.scale.z.abs() * 0.5
+                ],
+            })),
+        }))
+    }
+
+    fn asset_info_json(&self, asset: &str) -> serde_json::Value {
+        let query = asset.trim();
+        let by_path = self
+            .context
+            .assets
+            .iter()
+            .find(|candidate| candidate.source_path.to_string_lossy() == query);
+        let by_guid = self
+            .context
+            .assets
+            .iter()
+            .find(|candidate| candidate.guid.to_string() == query);
+        let meta = by_path.or(by_guid);
+        let references = meta
+            .map(|meta| scene_references_to_asset(&self.context.scene, meta.guid.as_asset_id()))
+            .unwrap_or_default();
+
+        serde_json::json!({
+            "query": query,
+            "found": meta.is_some(),
+            "asset": meta.map(|meta| serde_json::json!({
+                "guid": meta.guid.to_string(),
+                "path": meta.source_path,
+                "kind": format!("{:?}", meta.kind),
+                "importer": meta.importer,
+            })),
+            "references": references,
+        })
+    }
+
+    fn execute_create_primitive(
+        &mut self,
+        name: &str,
+        primitive: &str,
+        transform: Option<&TransformSpec>,
+        material: Option<&MaterialSpec>,
+    ) -> EngineResult<()> {
+        let builtin_mesh = builtin_mesh_for_primitive(primitive)?;
+        let entity = self.context.scene.create_object(name)?;
+        let mut renderer = engine_ecs::MeshRendererComponentData {
+            builtin_mesh: Some(builtin_mesh.to_owned()),
+            ..engine_ecs::MeshRendererComponentData::default()
+        };
+        if let Some(material) = material {
+            renderer.material = self.material_ref_from_spec(material)?;
+        }
+        self.context
+            .scene
+            .upsert_component(entity, engine_ecs::ComponentData::MeshRenderer(renderer))?;
+        if let Some(transform) = transform {
+            let current = self
+                .context
+                .scene
+                .transforms()
+                .local(entity)
+                .unwrap_or_default();
+            self.context
+                .scene
+                .transforms_mut()
+                .set_local(entity, apply_transform_spec(current, transform));
+        }
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: "ai-agent-modeling".into(),
+                file: None,
+                line: None,
+            },
+            message: format!(
+                "Created primitive: {name} ({}) using {builtin_mesh}",
+                entity_id_string(entity)
+            ),
+        });
+        Ok(())
+    }
+
+    fn execute_set_transform(
+        &mut self,
+        entity: &str,
+        transform: &TransformSpec,
+    ) -> EngineResult<()> {
+        let parsed = self.resolve_entity(entity)?;
+        let current = self
+            .context
+            .scene
+            .transforms()
+            .local(parsed)
+            .unwrap_or_default();
+        self.context
+            .scene
+            .transforms_mut()
+            .set_local(parsed, apply_transform_spec(current, transform));
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: "ai-agent-modeling".into(),
+                file: None,
+                line: None,
+            },
+            message: format!("Updated transform for {entity}"),
+        });
+        Ok(())
+    }
+
+    fn execute_duplicate_object(
+        &mut self,
+        entity: &str,
+        count: usize,
+        offset: Option<&TransformSpec>,
+    ) -> EngineResult<()> {
+        let count = count.clamp(1, 256);
+        let source = self.resolve_entity(entity)?;
+        let mut created = Vec::with_capacity(count);
+        for index in 0..count {
+            let duplicate = self.context.scene.clone_object(source)?;
+            if let Some(offset) = offset {
+                let current = self
+                    .context
+                    .scene
+                    .transforms()
+                    .local(duplicate)
+                    .unwrap_or_default();
+                let stepped = apply_repeated_transform_offset(current, offset, index + 1);
+                self.context
+                    .scene
+                    .transforms_mut()
+                    .set_local(duplicate, stepped);
+            }
+            created.push(entity_id_string(duplicate));
+        }
+        self.push_json_console(
+            "ai-agent-modeling",
+            serde_json::json!({
+                "duplicated": entity,
+                "count": count,
+                "created": created,
+            }),
+        )
+    }
+
+    fn execute_set_material(&mut self, entity: &str, material: &MaterialSpec) -> EngineResult<()> {
+        let parsed = self.resolve_entity(entity)?;
+        let material_ref = self.material_ref_from_spec(material)?;
+        let mut renderer = self
+            .context
+            .scene
+            .components(parsed)
+            .and_then(|components| {
+                components.iter().find_map(|component| {
+                    if let engine_ecs::ComponentData::MeshRenderer(mesh) = component {
+                        Some(mesh.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        renderer.material = material_ref;
+        self.context
+            .scene
+            .upsert_component(parsed, engine_ecs::ComponentData::MeshRenderer(renderer))?;
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: "ai-agent-modeling".into(),
+                file: None,
+                line: None,
+            },
+            message: format!("Set material on {entity}"),
+        });
+        Ok(())
+    }
+
+    fn material_ref_from_spec(
+        &mut self,
+        material: &MaterialSpec,
+    ) -> EngineResult<engine_ecs::MaterialRef> {
+        if let Some(builtin) = material
+            .builtin
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Ok(engine_ecs::MaterialRef {
+                asset: None,
+                builtin: Some(builtin.trim().to_owned()),
+            });
+        }
+        if let Some(path) = material
+            .asset_path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let relative = sanitize_project_relative_path(path)?;
+            let full_path = self.asset_root.join(&relative);
+            if !full_path.exists() {
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                }
+                let descriptor = material_descriptor_json(material);
+                std::fs::write(
+                    &full_path,
+                    serde_json::to_string_pretty(&descriptor)
+                        .map_err(|error| EngineError::other(error.to_string()))?,
+                )
+                .map_err(|source| EngineError::Filesystem {
+                    path: full_path.clone(),
+                    source,
+                })?;
+                self.context.rescan_assets()?;
+            }
+            let guid = self
+                .context
+                .database
+                .get_guid_for_path(&relative)
+                .map(|guid| guid.as_asset_id());
+            return Ok(engine_ecs::MaterialRef {
+                asset: guid,
+                builtin: guid
+                    .is_none()
+                    .then(|| relative.to_string_lossy().to_string()),
+            });
+        }
+        Ok(engine_ecs::MaterialRef::debug())
+    }
+
+    fn execute_create_mesh_asset(
+        &mut self,
+        path: &str,
+        operations: &[MeshOperationSpec],
+        assign_to: Option<&str>,
+    ) -> EngineResult<()> {
+        let relative = sanitize_project_relative_path(path)?;
+        let full_path = self.asset_root.join(&relative);
+        write_mesh_descriptor(&full_path, "generated_mesh", None, operations)?;
+        self.context.rescan_assets()?;
+
+        if let Some(entity) = assign_to {
+            let parsed = self.resolve_entity(entity)?;
+            let guid = self
+                .context
+                .database
+                .get_guid_for_path(&relative)
+                .map(|guid| guid.as_asset_id());
+            let mut renderer = self
+                .context
+                .scene
+                .components(parsed)
+                .and_then(|components| {
+                    components.iter().find_map(|component| {
+                        if let engine_ecs::ComponentData::MeshRenderer(mesh) = component {
+                            Some(mesh.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            renderer.mesh = guid;
+            renderer.builtin_mesh = guid
+                .is_none()
+                .then(|| relative.to_string_lossy().to_string());
+            self.context
+                .scene
+                .upsert_component(parsed, engine_ecs::ComponentData::MeshRenderer(renderer))?;
+        }
+
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: "ai-agent-modeling".into(),
+                file: Some(full_path),
+                line: None,
+            },
+            message: format!(
+                "Created mesh asset descriptor: {}",
+                relative.to_string_lossy()
+            ),
+        });
+        Ok(())
+    }
+
+    fn execute_modify_mesh(
+        &mut self,
+        source: &str,
+        target_path: &str,
+        operations: &[MeshOperationSpec],
+    ) -> EngineResult<()> {
+        let relative = sanitize_project_relative_path(target_path)?;
+        let full_path = self.asset_root.join(&relative);
+        write_mesh_descriptor(&full_path, "modified_mesh", Some(source), operations)?;
+        self.context.rescan_assets()?;
+        self.console.push(ConsoleEntry {
+            timestamp: "now".into(),
+            level: ConsoleLevel::Info,
+            source: ConsoleSource {
+                subsystem: "ai-agent-modeling".into(),
+                file: Some(full_path),
+                line: None,
+            },
+            message: format!(
+                "Recorded mesh modification descriptor: {}",
+                relative.to_string_lossy()
+            ),
+        });
+        Ok(())
+    }
+
+    fn execute_capture_viewport(
+        &mut self,
+        entity: Option<&str>,
+        output_path: Option<&str>,
+    ) -> EngineResult<()> {
+        if let Some(entity) = entity {
+            self.selection
+                .select(engine_editor::Selection::Entity(entity.to_owned()));
+        }
+        if let Some(path) = output_path {
+            let _ = sanitize_project_relative_path(path)?;
+        }
+        self.push_json_console(
+            "ai-agent-viewport",
+            serde_json::json!({
+                "capture_requested": true,
+                "entity": entity,
+                "output_path": output_path,
+                "note": "Viewport capture is queued for the editor host; this operation records the requested evidence."
+            }),
+        )
+    }
+
+    fn validate_scene_json(&self, include_warnings: bool) -> serde_json::Value {
+        let mut diagnostics = Vec::new();
+        for (entity, object) in self.context.scene.objects() {
+            if object.name.trim().is_empty() {
+                diagnostics.push(serde_json::json!({
+                    "level": "error",
+                    "entity": entity_id_string(entity),
+                    "message": "object name is empty",
+                }));
+            }
+            for component in &object.components {
+                if let engine_ecs::ComponentData::MeshRenderer(mesh) = component {
+                    if mesh.mesh.is_none() && mesh.builtin_mesh.is_none() && include_warnings {
+                        diagnostics.push(serde_json::json!({
+                            "level": "warning",
+                            "entity": entity_id_string(entity),
+                            "message": "MeshRenderer has no mesh asset or built-in mesh",
+                        }));
+                    }
+                    if let Some(asset) = mesh.mesh
+                        && scene_asset_missing(&self.context, asset)
+                    {
+                        diagnostics.push(serde_json::json!({
+                            "level": "error",
+                            "entity": entity_id_string(entity),
+                            "message": "MeshRenderer references a missing mesh asset",
+                            "asset": asset.as_u128().to_string(),
+                        }));
+                    }
+                    if let Some(asset) = mesh.material.asset
+                        && scene_asset_missing(&self.context, asset)
+                    {
+                        diagnostics.push(serde_json::json!({
+                            "level": "error",
+                            "entity": entity_id_string(entity),
+                            "message": "MeshRenderer references a missing material asset",
+                            "asset": asset.as_u128().to_string(),
+                        }));
+                    }
+                }
+            }
+        }
+        let error_count = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["level"] == "error")
+            .count();
+        serde_json::json!({
+            "ok": error_count == 0,
+            "error_count": error_count,
+            "diagnostics": diagnostics,
+        })
     }
 
     /// Converts a `ComponentSpec` into a `ComponentData` variant.
@@ -1240,7 +2125,7 @@ impl AgentSession {
         field: &str,
         value: &serde_json::Value,
     ) -> EngineResult<()> {
-        let parsed = parse_entity_id(entity)?;
+        let parsed = self.resolve_entity(entity)?;
         let components = self
             .context
             .scene
@@ -1866,6 +2751,194 @@ fn write_varg_script(asset_root: &Path, relative: &Path, source: &str) -> Engine
     Ok(full_path)
 }
 
+fn entity_id_string(entity: engine_ecs::Entity) -> String {
+    format!(
+        "{}:{}",
+        entity.handle().slot(),
+        entity.handle().generation().get()
+    )
+}
+
+fn transform_json(transform: engine_core::math::Transform) -> serde_json::Value {
+    serde_json::json!({
+        "position": [
+            transform.translation.x,
+            transform.translation.y,
+            transform.translation.z
+        ],
+        "rotation": [
+            transform.rotation.x,
+            transform.rotation.y,
+            transform.rotation.z,
+            transform.rotation.w
+        ],
+        "scale": [transform.scale.x, transform.scale.y, transform.scale.z],
+    })
+}
+
+fn component_json(component: &engine_ecs::ComponentData) -> serde_json::Value {
+    serde_json::to_value(component)
+        .unwrap_or_else(|_| serde_json::json!({ "type": component.type_id() }))
+}
+
+fn apply_transform_spec(
+    mut transform: engine_core::math::Transform,
+    spec: &TransformSpec,
+) -> engine_core::math::Transform {
+    use engine_core::math::{Quat, Vec3};
+    if let Some(position) = spec.position {
+        transform.translation = Vec3::new(position[0], position[1], position[2]);
+    }
+    if let Some(rotation) = spec.rotation {
+        transform.rotation = Quat {
+            x: rotation[0],
+            y: rotation[1],
+            z: rotation[2],
+            w: rotation[3],
+        }
+        .normalized();
+    }
+    if let Some(scale) = spec.scale {
+        transform.scale = Vec3::new(scale[0], scale[1], scale[2]);
+    }
+    transform
+}
+
+fn apply_repeated_transform_offset(
+    mut transform: engine_core::math::Transform,
+    offset: &TransformSpec,
+    step: usize,
+) -> engine_core::math::Transform {
+    use engine_core::math::{Quat, Vec3};
+    let multiplier = step as f32;
+    if let Some(position) = offset.position {
+        transform.translation += Vec3::new(position[0], position[1], position[2]) * multiplier;
+    }
+    if let Some(rotation) = offset.rotation {
+        let delta = Quat {
+            x: rotation[0],
+            y: rotation[1],
+            z: rotation[2],
+            w: rotation[3],
+        }
+        .normalized();
+        for _ in 0..step {
+            transform.rotation = (transform.rotation * delta).normalized();
+        }
+    }
+    if let Some(scale) = offset.scale {
+        let factor = Vec3::new(scale[0], scale[1], scale[2]);
+        for _ in 0..step {
+            transform.scale = transform.scale * factor;
+        }
+    }
+    transform
+}
+
+fn builtin_mesh_for_primitive(primitive: &str) -> EngineResult<&'static str> {
+    match primitive.trim().to_ascii_lowercase().as_str() {
+        "cube" | "box" => Ok("debug/cube"),
+        "sphere" | "uv_sphere" => Ok("debug/sphere"),
+        "plane" => Ok("debug/plane"),
+        "quad" | "sprite" => Ok("debug/quad"),
+        "capsule" => Ok("debug/capsule"),
+        "cylinder" => Ok("debug/cylinder"),
+        other => Err(EngineError::config(format!(
+            "unknown primitive kind: {other}"
+        ))),
+    }
+}
+
+fn material_descriptor_json(material: &MaterialSpec) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "kind": "material",
+        "name": material.name.as_deref().unwrap_or("AI Material"),
+        "base_color": material.base_color.unwrap_or([0.8, 0.8, 0.8]),
+        "roughness": material.roughness.unwrap_or(0.7),
+        "metallic": material.metallic.unwrap_or(0.0),
+    })
+}
+
+fn write_mesh_descriptor(
+    full_path: &Path,
+    kind: &str,
+    source: Option<&str>,
+    operations: &[MeshOperationSpec],
+) -> EngineResult<()> {
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| EngineError::Filesystem {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let descriptor = serde_json::json!({
+        "schema_version": 1,
+        "kind": kind,
+        "source": source,
+        "operations": operations,
+    });
+    std::fs::write(
+        full_path,
+        serde_json::to_string_pretty(&descriptor)
+            .map_err(|error| EngineError::other(error.to_string()))?,
+    )
+    .map_err(|source| EngineError::Filesystem {
+        path: full_path.to_path_buf(),
+        source,
+    })
+}
+
+fn scene_references_to_asset(
+    scene: &engine_ecs::Scene,
+    asset: engine_core::AssetId,
+) -> Vec<serde_json::Value> {
+    let mut references = Vec::new();
+    for (entity, object) in scene.objects() {
+        for component in &object.components {
+            match component {
+                engine_ecs::ComponentData::MeshRenderer(mesh) => {
+                    if mesh.mesh == Some(asset) || mesh.material.asset == Some(asset) {
+                        references.push(serde_json::json!({
+                            "entity": entity_id_string(entity),
+                            "name": object.name,
+                            "component": "MeshRenderer",
+                        }));
+                    }
+                }
+                engine_ecs::ComponentData::SkinnedMeshRenderer(mesh) => {
+                    if mesh.mesh == Some(asset) || mesh.material.asset == Some(asset) {
+                        references.push(serde_json::json!({
+                            "entity": entity_id_string(entity),
+                            "name": object.name,
+                            "component": "SkinnedMeshRenderer",
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    references
+}
+
+fn scene_asset_missing(context: &ProjectContext, asset: engine_core::AssetId) -> bool {
+    context
+        .database
+        .resolve_guid(engine_assets::AssetGuid::from_asset_id(asset))
+        .is_err()
+}
+
+fn default_global_varg_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("VARG_HOME") {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".varg")
+}
+
 fn operation_is_transactional(operation: &AgentOperation) -> bool {
     match operation {
         AgentOperation::WriteScript { .. }
@@ -1876,6 +2949,16 @@ fn operation_is_transactional(operation: &AgentOperation) -> bool {
         | AgentOperation::GenerateAsset { .. }
         | AgentOperation::ShowInViewport { .. }
         | AgentOperation::RunCommand { .. } => false,
+        AgentOperation::SkillSearch { .. }
+        | AgentOperation::SkillRead { .. }
+        | AgentOperation::ToolSearch { .. }
+        | AgentOperation::ReadFile { .. }
+        | AgentOperation::CheckScript { .. }
+        | AgentOperation::CreateTask { .. }
+        | AgentOperation::UpdateTask { .. }
+        | AgentOperation::Complete { .. }
+        | AgentOperation::QueryDependencyGraph { .. }
+        | AgentOperation::QuerySceneSemantic { .. } => true,
         AgentOperation::BatchOperation {
             operations,
             rollback_on_failure: _,
@@ -1900,6 +2983,15 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
         | AgentOperation::Complete { .. }
         | AgentOperation::QueryDependencyGraph { .. }
         | AgentOperation::QuerySceneSemantic { .. }
+        | AgentOperation::ToolSearch { .. }
+        | AgentOperation::SkillSearch { .. }
+        | AgentOperation::SkillRead { .. }
+        | AgentOperation::RequestCapability { .. }
+        | AgentOperation::GetSceneInfo { .. }
+        | AgentOperation::GetObjectInfo { .. }
+        | AgentOperation::GetAssetInfo { .. }
+        | AgentOperation::CaptureViewport { .. }
+        | AgentOperation::ValidateScene { .. }
         | AgentOperation::ShowInViewport { .. } => OperationAccess {
             requires_write: false,
             requires_filesystem_write: false,
@@ -1918,6 +3010,13 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
             requires_filesystem_write: true,
             requires_process_execution: false,
         },
+        AgentOperation::CreateMeshAsset { .. } | AgentOperation::ModifyMesh { .. } => {
+            OperationAccess {
+                requires_write: true,
+                requires_filesystem_write: true,
+                requires_process_execution: false,
+            }
+        }
         AgentOperation::RunCommand { .. } => OperationAccess {
             requires_write: true,
             requires_filesystem_write: false,
@@ -1925,7 +3024,11 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
         },
         AgentOperation::ExecuteCommand { .. }
         | AgentOperation::CreateObject { .. }
+        | AgentOperation::CreatePrimitive { .. }
         | AgentOperation::SetProperty { .. }
+        | AgentOperation::SetTransform { .. }
+        | AgentOperation::DuplicateObject { .. }
+        | AgentOperation::SetMaterial { .. }
         | AgentOperation::RemoveComponent { .. }
         | AgentOperation::DestroyObject { .. }
         | AgentOperation::AttachBehavior { .. }
@@ -1950,6 +3053,161 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
                 requires_process_execution: any_proc,
             }
         }
+    }
+}
+
+fn operation_capabilities(operation: &AgentOperation) -> Vec<String> {
+    match operation {
+        AgentOperation::RequestCapability {
+            capabilities,
+            tools,
+            ..
+        } => resolve_requested_capabilities(capabilities, tools),
+        other => tools::metadata_for_tool(other.action_name())
+            .map(|metadata| metadata.capabilities)
+            .unwrap_or_default(),
+    }
+}
+
+fn resolve_requested_capabilities(capabilities: &[String], tools: &[String]) -> Vec<String> {
+    let mut resolved = capabilities
+        .iter()
+        .map(|capability| capability.trim().to_owned())
+        .filter(|capability| !capability.is_empty())
+        .collect::<Vec<_>>();
+
+    for tool in tools {
+        if let Some(metadata) = tools::metadata_for_tool(tool.trim()) {
+            resolved.extend(metadata.capabilities);
+        }
+    }
+
+    resolved.sort();
+    resolved.dedup();
+    resolved
+}
+
+fn capability_request_result(
+    capabilities: &[String],
+    policy: &PermissionPolicy,
+) -> CapabilityRequestResult {
+    let decisions = evaluate_capabilities(capabilities, policy);
+    let all_approved = decisions
+        .iter()
+        .all(|result| result.decision == CapabilityDecision::Approved);
+    CapabilityRequestResult {
+        decisions,
+        all_approved,
+    }
+}
+
+fn evaluate_capabilities(
+    capabilities: &[String],
+    policy: &PermissionPolicy,
+) -> Vec<CapabilityDecisionResult> {
+    capabilities
+        .iter()
+        .map(|capability| evaluate_capability(capability, policy))
+        .collect()
+}
+
+fn evaluate_capability(capability: &str, policy: &PermissionPolicy) -> CapabilityDecisionResult {
+    let capability = capability.trim().to_owned();
+    let (decision, reason) = match capability.as_str() {
+        "context.read" | "scene.read" | "asset.read" | "tool.search" | "skill.search"
+        | "skill.read" | "viewport.capture" => (
+            CapabilityDecision::Approved,
+            "read-only or transient capability is allowed by default".to_owned(),
+        ),
+        "scene.write.entity" | "scene.write.component" => match policy.write_mode {
+            AgentWriteMode::ReadOnly => (
+                CapabilityDecision::RequiresUserApproval,
+                "scene writes require a write-capable policy".to_owned(),
+            ),
+            AgentWriteMode::Transactional | AgentWriteMode::Worktree => (
+                CapabilityDecision::Approved,
+                "scene write is allowed by the current write policy".to_owned(),
+            ),
+            AgentWriteMode::Direct if policy.direct_write => (
+                CapabilityDecision::Approved,
+                "direct scene write is explicitly allowed".to_owned(),
+            ),
+            AgentWriteMode::Direct => (
+                CapabilityDecision::RequiresUserApproval,
+                "direct scene write needs explicit direct-write approval".to_owned(),
+            ),
+        },
+        "asset.write.generated" | "asset.write.mesh" | "asset.write.material" => {
+            if policy.write_mode == AgentWriteMode::ReadOnly {
+                (
+                    CapabilityDecision::RequiresUserApproval,
+                    "asset writes require a write-capable policy".to_owned(),
+                )
+            } else if policy.filesystem_write {
+                (
+                    CapabilityDecision::Approved,
+                    "asset write is allowed by filesystem write policy".to_owned(),
+                )
+            } else {
+                (
+                    CapabilityDecision::Denied,
+                    "filesystem writes are disabled by the current policy".to_owned(),
+                )
+            }
+        }
+        "script.execute.sandboxed" => {
+            if policy.process_execution {
+                (
+                    CapabilityDecision::Approved,
+                    "sandboxed script execution is allowed by process policy".to_owned(),
+                )
+            } else {
+                (
+                    CapabilityDecision::RequiresQuest,
+                    "script execution should run in Quest or another approved sandbox".to_owned(),
+                )
+            }
+        }
+        "command.run" => {
+            if policy.process_execution {
+                (
+                    CapabilityDecision::Approved,
+                    "external command execution is allowed by process policy".to_owned(),
+                )
+            } else {
+                (
+                    CapabilityDecision::RequiresUserApproval,
+                    "external command execution needs explicit approval".to_owned(),
+                )
+            }
+        }
+        "network.fetch_asset" => {
+            if policy.network {
+                (
+                    CapabilityDecision::Approved,
+                    "network asset fetch is allowed by network policy".to_owned(),
+                )
+            } else {
+                (
+                    CapabilityDecision::RequiresUserApproval,
+                    "network asset fetch needs explicit network approval".to_owned(),
+                )
+            }
+        }
+        "quest.create" => (
+            CapabilityDecision::RequiresQuest,
+            "broad or persistent work should be routed through Quest".to_owned(),
+        ),
+        _ => (
+            CapabilityDecision::Narrowed,
+            "unknown capability needs a narrower policy rule before it can be approved".to_owned(),
+        ),
+    };
+
+    CapabilityDecisionResult {
+        capability,
+        decision,
+        reason,
     }
 }
 
@@ -2067,6 +3325,73 @@ fn preview_operation(operation: &AgentOperation) -> String {
         AgentOperation::QuerySceneSemantic { query } => {
             format!("Search scene: '{query}'")
         }
+        AgentOperation::ToolSearch { query, .. } => {
+            format!("Search AI tools: '{query}'")
+        }
+        AgentOperation::SkillSearch { query, source, .. } => match source {
+            Some(source) => format!("Search {source} Varg skills: '{query}'"),
+            None => format!("Search Varg skills: '{query}'"),
+        },
+        AgentOperation::SkillRead { id, path } => match path {
+            Some(path) => format!("Read Varg skill `{id}` reference `{path}`"),
+            None => format!("Read Varg skill `{id}`"),
+        },
+        AgentOperation::RequestCapability {
+            capabilities,
+            tools,
+            reason,
+        } => {
+            let mut parts = Vec::new();
+            if !capabilities.is_empty() {
+                parts.push(format!("capabilities {}", capabilities.join(", ")));
+            }
+            if !tools.is_empty() {
+                parts.push(format!("tools {}", tools.join(", ")));
+            }
+            let target = if parts.is_empty() {
+                "no requested capabilities".to_owned()
+            } else {
+                parts.join("; ")
+            };
+            match reason {
+                Some(reason) => format!("Preflight permissions for {target}: {reason}"),
+                None => format!("Preflight permissions for {target}"),
+            }
+        }
+        AgentOperation::GetSceneInfo { .. } => "Inspect scene hierarchy".to_owned(),
+        AgentOperation::GetObjectInfo { entity } => format!("Inspect object `{entity}`"),
+        AgentOperation::GetAssetInfo { asset } => format!("Inspect asset `{asset}`"),
+        AgentOperation::CreatePrimitive {
+            name, primitive, ..
+        } => format!("Create {primitive} primitive `{name}`"),
+        AgentOperation::SetTransform { entity, .. } => {
+            format!("Set transform for `{entity}`")
+        }
+        AgentOperation::DuplicateObject { entity, count, .. } => {
+            format!("Duplicate `{entity}` {} time(s)", count.unwrap_or(1))
+        }
+        AgentOperation::SetMaterial { entity, .. } => format!("Set material on `{entity}`"),
+        AgentOperation::CreateMeshAsset {
+            path, assign_to, ..
+        } => match assign_to {
+            Some(entity) => format!("Create mesh asset `{path}` and assign to `{entity}`"),
+            None => format!("Create mesh asset `{path}`"),
+        },
+        AgentOperation::ModifyMesh {
+            source,
+            target_path,
+            ..
+        } => format!("Record mesh modification from `{source}` to `{target_path}`"),
+        AgentOperation::CaptureViewport {
+            entity,
+            output_path,
+        } => match (entity, output_path) {
+            (Some(entity), Some(path)) => format!("Capture viewport for `{entity}` to `{path}`"),
+            (Some(entity), None) => format!("Capture viewport for `{entity}`"),
+            (None, Some(path)) => format!("Capture viewport to `{path}`"),
+            (None, None) => "Capture viewport".to_owned(),
+        },
+        AgentOperation::ValidateScene { .. } => "Validate scene references".to_owned(),
         AgentOperation::GenerateAsset {
             tool, target_path, ..
         } => {
@@ -2128,7 +3453,11 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
     match operation {
         AgentOperation::ExecuteCommand { .. }
         | AgentOperation::CreateObject { .. }
+        | AgentOperation::CreatePrimitive { .. }
         | AgentOperation::SetProperty { .. }
+        | AgentOperation::SetTransform { .. }
+        | AgentOperation::DuplicateObject { .. }
+        | AgentOperation::SetMaterial { .. }
         | AgentOperation::RemoveComponent { .. }
         | AgentOperation::DestroyObject { .. }
         | AgentOperation::AttachBehavior { .. }
@@ -2141,6 +3470,24 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         }
         AgentOperation::ReadFile { .. } | AgentOperation::QuerySceneSemantic { .. } => {
             "No recovery needed; this operation only read project data."
+        }
+        AgentOperation::GetSceneInfo { .. }
+        | AgentOperation::GetObjectInfo { .. }
+        | AgentOperation::GetAssetInfo { .. }
+        | AgentOperation::ValidateScene { .. } => {
+            "No recovery needed; this operation only read project data."
+        }
+        AgentOperation::CaptureViewport { .. } => {
+            "No recovery needed; viewport capture requests are transient evidence."
+        }
+        AgentOperation::ToolSearch { .. } => {
+            "No recovery needed; tool discovery does not grant permission."
+        }
+        AgentOperation::RequestCapability { .. } => {
+            "No recovery needed; capability preflight does not grant permission."
+        }
+        AgentOperation::SkillSearch { .. } | AgentOperation::SkillRead { .. } => {
+            "No recovery needed; skill discovery only reads scoped instruction files."
         }
         AgentOperation::CreateTask { .. } | AgentOperation::UpdateTask { .. } => {
             "No recovery needed; Copilot tasks only update transient editor UI."
@@ -2159,6 +3506,9 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         }
         AgentOperation::GenerateAsset { .. } => {
             "Delete the generated asset file from the project to revert."
+        }
+        AgentOperation::CreateMeshAsset { .. } | AgentOperation::ModifyMesh { .. } => {
+            "Delete the generated mesh descriptor from the asset root to revert."
         }
         AgentOperation::ShowInViewport { .. } => "No recovery needed; viewport state is transient.",
         AgentOperation::BatchOperation { .. } => {
@@ -2189,10 +3539,23 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
             "Check that the command is registered and available."
         }
         AgentOperation::CreateObject { .. }
+        | AgentOperation::CreatePrimitive { .. }
         | AgentOperation::SetProperty { .. }
+        | AgentOperation::SetTransform { .. }
+        | AgentOperation::DuplicateObject { .. }
+        | AgentOperation::SetMaterial { .. }
         | AgentOperation::RemoveComponent { .. }
         | AgentOperation::DestroyObject { .. } => {
             "Check entity identifiers, component names, and editor diagnostics before retrying."
+        }
+        AgentOperation::GetSceneInfo { .. }
+        | AgentOperation::GetObjectInfo { .. }
+        | AgentOperation::GetAssetInfo { .. }
+        | AgentOperation::ValidateScene { .. } => {
+            "Check identifiers and asset paths, then retry the inspection."
+        }
+        AgentOperation::CreateMeshAsset { .. } | AgentOperation::ModifyMesh { .. } => {
+            "Check the mesh descriptor path and operation parameters."
         }
         AgentOperation::Complete { .. } => {
             "No recovery needed; completion does not mutate the project."
@@ -2206,11 +3569,24 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
         AgentOperation::QuerySceneSemantic { .. } => {
             "Try rephrasing the query. Supported patterns: 'all X', 'entities with X', 'X near Y', or direct name matches."
         }
+        AgentOperation::ToolSearch { .. } => {
+            "Try a shorter query or remove strict type, capability, stage, or risk filters."
+        }
+        AgentOperation::RequestCapability { .. } => {
+            "Request a known capability or include tool names from tool_search results."
+        }
+        AgentOperation::SkillSearch { .. } => "Try a shorter query or remove the source filter.",
+        AgentOperation::SkillRead { .. } => {
+            "Use a resolved skill id from skill_search and a path inside that skill directory."
+        }
         AgentOperation::GenerateAsset { .. } => {
             "Check tool availability, API key configuration, and network connectivity."
         }
         AgentOperation::ShowInViewport { .. } => {
             "Check that the entity identifier is valid and the entity exists in the scene."
+        }
+        AgentOperation::CaptureViewport { .. } => {
+            "Check that the target entity exists and the output path stays inside the project."
         }
         AgentOperation::BatchOperation { .. } => {
             "Review the error message for which operation failed. Fix that operation and retry the batch."
@@ -2231,7 +3607,7 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
 fn parse_entity_id(entity_str: &str) -> EngineResult<engine_ecs::Entity> {
     let id_part = entity_str.strip_prefix("entity:").unwrap_or(entity_str);
     let parts: Vec<&str> = id_part.split(':').collect();
-    if parts.is_empty() {
+    if parts.is_empty() || parts.len() > 2 {
         return Err(EngineError::config(format!(
             "invalid entity id: {entity_str}"
         )));
@@ -2239,9 +3615,17 @@ fn parse_entity_id(entity_str: &str) -> EngineResult<engine_ecs::Entity> {
     let slot = parts[0]
         .parse::<u32>()
         .map_err(|_| EngineError::config(format!("invalid entity id: {entity_str}")))?;
+    let generation = match parts.get(1) {
+        Some(value) => {
+            let raw = value
+                .parse::<u32>()
+                .map_err(|_| EngineError::config(format!("invalid entity id: {entity_str}")))?;
+            engine_core::Generation::from_raw(raw)?
+        }
+        None => engine_core::Generation::FIRST,
+    };
     Ok(engine_ecs::Entity::from_handle(engine_core::Handle::new(
-        slot,
-        engine_core::Generation::FIRST,
+        slot, generation,
     )))
 }
 
@@ -2301,6 +3685,18 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let content = args["content"].as_str().unwrap_or("").to_owned();
             Ok(AgentOperation::WriteFile { path, content })
         }
+        "generate_asset" => {
+            let tool = args["tool"].as_str().unwrap_or("").to_owned();
+            let prompt = args["prompt"].as_str().unwrap_or("").to_owned();
+            let target_path = args["target_path"].as_str().unwrap_or("").to_owned();
+            let style = args["style"].as_str().map(String::from);
+            Ok(AgentOperation::GenerateAsset {
+                tool,
+                prompt,
+                target_path,
+                style,
+            })
+        }
         "set_property" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
             let component = args["component"].as_str().unwrap_or("").to_owned();
@@ -2355,6 +3751,102 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
             let query = args["query"].as_str().unwrap_or("").to_owned();
             Ok(AgentOperation::QuerySceneSemantic { query })
         }
+        "tool_search" => {
+            let query = args["query"].as_str().unwrap_or("").to_owned();
+            let types = string_array_arg(args, "types");
+            let capabilities = string_array_arg(args, "capabilities");
+            let stage = args["stage"].as_str().map(String::from);
+            let risk_max = args["risk_max"].as_str().map(String::from);
+            let limit = args["limit"].as_u64().map(|value| value as usize);
+            Ok(AgentOperation::ToolSearch {
+                query,
+                types,
+                capabilities,
+                stage,
+                risk_max,
+                limit,
+            })
+        }
+        "skill_search" => {
+            let query = args["query"].as_str().unwrap_or("").to_owned();
+            let source = args["source"].as_str().map(String::from);
+            let limit = args["limit"].as_u64().map(|value| value as usize);
+            Ok(AgentOperation::SkillSearch {
+                query,
+                source,
+                limit,
+            })
+        }
+        "skill_read" => {
+            let id = args["id"].as_str().unwrap_or("").to_owned();
+            let path = args["path"].as_str().map(String::from);
+            Ok(AgentOperation::SkillRead { id, path })
+        }
+        "request_capability" => {
+            let capabilities = string_array_arg(args, "capabilities");
+            let tools = string_array_arg(args, "tools");
+            let reason = args["reason"].as_str().map(String::from);
+            Ok(AgentOperation::RequestCapability {
+                capabilities,
+                tools,
+                reason,
+            })
+        }
+        "get_scene_info" => Ok(AgentOperation::GetSceneInfo {
+            include_components: args["include_components"].as_bool().unwrap_or(false),
+        }),
+        "get_object_info" => Ok(AgentOperation::GetObjectInfo {
+            entity: args["entity"].as_str().unwrap_or("").to_owned(),
+        }),
+        "get_asset_info" => Ok(AgentOperation::GetAssetInfo {
+            asset: args["asset"].as_str().unwrap_or("").to_owned(),
+        }),
+        "create_primitive" => Ok(AgentOperation::CreatePrimitive {
+            name: args["name"].as_str().unwrap_or("").to_owned(),
+            primitive: args["primitive"].as_str().unwrap_or("cube").to_owned(),
+            transform: optional_arg(args, "transform")?,
+            material: optional_arg(args, "material")?,
+        }),
+        "set_transform" => Ok(AgentOperation::SetTransform {
+            entity: args["entity"].as_str().unwrap_or("").to_owned(),
+            transform: serde_json::from_value(
+                args.get("transform")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            )
+            .map_err(|error| EngineError::config(format!("invalid transform: {error}")))?,
+        }),
+        "duplicate_object" => Ok(AgentOperation::DuplicateObject {
+            entity: args["entity"].as_str().unwrap_or("").to_owned(),
+            count: args["count"].as_u64().map(|value| value as usize),
+            offset: optional_arg(args, "offset")?,
+        }),
+        "set_material" => Ok(AgentOperation::SetMaterial {
+            entity: args["entity"].as_str().unwrap_or("").to_owned(),
+            material: serde_json::from_value(
+                args.get("material")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            )
+            .map_err(|error| EngineError::config(format!("invalid material: {error}")))?,
+        }),
+        "create_mesh_asset" => Ok(AgentOperation::CreateMeshAsset {
+            path: args["path"].as_str().unwrap_or("").to_owned(),
+            operations: mesh_operations_arg(args)?,
+            assign_to: args["assign_to"].as_str().map(String::from),
+        }),
+        "modify_mesh" => Ok(AgentOperation::ModifyMesh {
+            source: args["source"].as_str().unwrap_or("").to_owned(),
+            target_path: args["target_path"].as_str().unwrap_or("").to_owned(),
+            operations: mesh_operations_arg(args)?,
+        }),
+        "capture_viewport" => Ok(AgentOperation::CaptureViewport {
+            entity: args["entity"].as_str().map(String::from),
+            output_path: args["output_path"].as_str().map(String::from),
+        }),
+        "validate_scene" => Ok(AgentOperation::ValidateScene {
+            include_warnings: args["include_warnings"].as_bool().unwrap_or(true),
+        }),
         "move_entity_to" => {
             let entity = args["entity"].as_str().unwrap_or("").to_owned();
             let position = args["position"]
@@ -2461,12 +3953,117 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
     }
 }
 
+fn string_array_arg(args: &serde_json::Value, key: &str) -> Vec<String> {
+    args[key]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn optional_arg<T>(args: &serde_json::Value, key: &str) -> EngineResult<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match args.get(key) {
+        Some(value) if !value.is_null() => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| EngineError::config(format!("invalid {key}: {error}"))),
+        _ => Ok(None),
+    }
+}
+
+fn mesh_operations_arg(args: &serde_json::Value) -> EngineResult<Vec<MeshOperationSpec>> {
+    serde_json::from_value(
+        args.get("operations")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| EngineError::config(format!("invalid mesh operations: {error}")))
+}
+
+fn transform_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "position": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
+            },
+            "rotation": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 4,
+                "maxItems": 4,
+                "description": "Quaternion [x, y, z, w]"
+            },
+            "scale": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
+            }
+        }
+    })
+}
+
+fn material_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "builtin": { "type": "string", "description": "Built-in material name" },
+            "asset_path": { "type": "string", "description": "Material descriptor path relative to asset root" },
+            "name": { "type": "string", "description": "Generated material display name" },
+            "base_color": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 3,
+                "maxItems": 3
+            },
+            "roughness": { "type": "number" },
+            "metallic": { "type": "number" }
+        }
+    })
+}
+
+fn mesh_operations_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "type": { "type": "string", "description": "Operation kind: cube, bevel, inset, extrude, mirror, boolean, array" },
+                "params": { "type": "object", "description": "Operation parameters" }
+            },
+            "required": ["type"]
+        }
+    })
+}
+
+fn modeling_object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}
+
 /// Returns tool definitions for all supported agent operations.
 ///
 /// These are sent to the model so it can request operations via native
 /// tool calling instead of embedding JSON in text.
 pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
     vec![
+        tools::tool_search_definition(),
+        tools::request_capability_definition(),
+        skills::skill_search_definition(),
+        skills::skill_read_definition(),
         ToolDefinition {
             name: "create_object".into(),
             description: "Create a new game object with optional components and position.".into(),
@@ -2534,6 +4131,20 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                     "content": { "type": "string", "description": "Complete file content to write" }
                 },
                 "required": ["path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "generate_asset".into(),
+            description: "Request generation of an external asset into a project asset path. Use only when the task specifically needs generated media or imported model assets.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "description": "Asset generator name, e.g. gpt-image, suno, meshy" },
+                    "prompt": { "type": "string", "description": "Natural-language generation prompt" },
+                    "target_path": { "type": "string", "description": "Target path relative to the asset root" },
+                    "style": { "type": "string", "description": "Optional style hint or generator parameters" }
+                },
+                "required": ["tool", "prompt", "target_path"]
             }),
         },
         ToolDefinition {
@@ -2632,6 +4243,112 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
                     "query": { "type": "string", "description": "Natural language query: 'all enemies', 'entities with Camera', 'Player near Enemy', or direct name" }
                 },
                 "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_scene_info".into(),
+            description: "Return scene hierarchy, transforms, components, cameras, lights, and object summaries.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "include_components": { "type": "boolean", "description": "Include full component payloads instead of type summaries" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_object_info".into(),
+            description: "Return detailed component, transform, mesh, material, and bounds information for one object.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Entity name or ID" }
+                },
+                "required": ["entity"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_asset_info".into(),
+            description: "Return asset metadata and scene references for an asset path or GUID.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "asset": { "type": "string", "description": "Asset-root-relative path or GUID" }
+                },
+                "required": ["asset"]
+            }),
+        },
+        ToolDefinition {
+            name: "create_primitive".into(),
+            description: "Create a primitive mesh object with transform and material fields.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "name": { "type": "string", "description": "Object name" },
+                "primitive": { "type": "string", "description": "cube, sphere, plane, quad, capsule, or cylinder" },
+                "transform": transform_schema(),
+                "material": material_schema()
+            }), &["name", "primitive"]),
+        },
+        ToolDefinition {
+            name: "set_transform".into(),
+            description: "Set an object's transform using structured position, rotation, and scale values.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "entity": { "type": "string", "description": "Entity name or ID" },
+                "transform": transform_schema()
+            }), &["entity", "transform"]),
+        },
+        ToolDefinition {
+            name: "duplicate_object".into(),
+            description: "Duplicate an object with an optional repeated transform offset.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "entity": { "type": "string", "description": "Entity name or ID" },
+                "count": { "type": "integer", "description": "Number of copies" },
+                "offset": transform_schema()
+            }), &["entity"]),
+        },
+        ToolDefinition {
+            name: "set_material".into(),
+            description: "Create or assign material parameters for an object's MeshRenderer.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "entity": { "type": "string", "description": "Entity name or ID" },
+                "material": material_schema()
+            }), &["entity", "material"]),
+        },
+        ToolDefinition {
+            name: "create_mesh_asset".into(),
+            description: "Write a structured mesh asset descriptor and optionally assign it to an entity.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "path": { "type": "string", "description": "Asset-root-relative target path, e.g. models/crate.vmesh.json" },
+                "operations": mesh_operations_schema(),
+                "assign_to": { "type": "string", "description": "Optional entity name or ID to receive the mesh" }
+            }), &["path", "operations"]),
+        },
+        ToolDefinition {
+            name: "modify_mesh".into(),
+            description: "Record structured mesh operations into a derived mesh asset descriptor.".into(),
+            parameters: modeling_object_schema(serde_json::json!({
+                "source": { "type": "string", "description": "Source asset path/GUID or entity name/ID" },
+                "target_path": { "type": "string", "description": "Asset-root-relative target descriptor path" },
+                "operations": mesh_operations_schema()
+            }), &["source", "target_path", "operations"]),
+        },
+        ToolDefinition {
+            name: "capture_viewport".into(),
+            description: "Request viewport preview evidence for visual feedback.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": { "type": "string", "description": "Optional entity name or ID to frame" },
+                    "output_path": { "type": "string", "description": "Optional future screenshot path relative to project root" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "validate_scene".into(),
+            description: "Check scene references, missing assets, and basic authoring constraints.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "include_warnings": { "type": "boolean", "description": "Include advisory warnings" }
+                }
             }),
         },
         ToolDefinition {
@@ -2749,27 +4466,18 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
 /// spend context on long-running planning or memory-management tools that do
 /// not directly advance the visible editor task.
 pub fn copilot_tool_definitions() -> Vec<ToolDefinition> {
-    let allowed = [
-        "create_object",
-        "write_script",
-        "check_script",
-        "write_file",
-        "set_property",
-        "remove_component",
-        "destroy_object",
-        "read_file",
-        "create_task",
-        "update_task",
-        "execute_command",
-        "query_scene_semantic",
-        "move_entity_to",
-        "show_in_viewport",
-        "run_command",
-        "complete",
-    ];
+    tool_definitions_for_exposure(&[ToolExposure::Direct, ToolExposure::DirectModelOnly])
+}
+
+/// Returns tool definitions whose metadata has one of the requested exposures.
+pub fn tool_definitions_for_exposure(exposures: &[ToolExposure]) -> Vec<ToolDefinition> {
     agent_tool_definitions()
         .into_iter()
-        .filter(|tool| allowed.contains(&tool.name.as_str()))
+        .filter(|tool| {
+            tools::metadata_for_tool(&tool.name)
+                .map(|metadata| exposures.contains(&metadata.exposure))
+                .unwrap_or(false)
+        })
         .collect()
 }
 
@@ -2899,12 +4607,251 @@ mod tests {
         assert!(tools.contains("create_object"));
         assert!(tools.contains("create_task"));
         assert!(tools.contains("update_task"));
+        assert!(tools.contains("tool_search"));
+        assert!(tools.contains("request_capability"));
+        assert!(tools.contains("skill_search"));
+        assert!(tools.contains("skill_read"));
         assert!(tools.contains("check_script"));
         assert!(tools.contains("complete"));
         assert!(!tools.contains("update_project_memory"));
         assert!(!tools.contains("update_user_memory"));
         assert!(!tools.contains("query_dependency_graph"));
         assert!(!tools.contains("attach_behavior"));
+        assert!(!tools.contains("generate_asset"));
+    }
+
+    #[test]
+    fn non_hidden_registry_tools_have_native_definitions() {
+        let definitions = agent_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for metadata in tools::tool_registry() {
+            if metadata.exposure == ToolExposure::Hidden {
+                continue;
+            }
+            assert!(
+                definitions.contains(&metadata.name),
+                "tool registry metadata lacks native definition for {}",
+                metadata.name
+            );
+        }
+    }
+
+    #[test]
+    fn generate_asset_tool_call_maps_to_operation() {
+        let operation = tool_call_to_operation(&ToolCall {
+            id: "asset-1".into(),
+            name: "generate_asset".into(),
+            arguments: serde_json::json!({
+                "tool": "gpt-image",
+                "prompt": "small mossy rock texture",
+                "target_path": "textures/mossy_rock.png",
+                "style": "pbr albedo"
+            }),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            operation,
+            AgentOperation::GenerateAsset { ref tool, ref target_path, .. }
+                if tool == "gpt-image" && target_path == "textures/mossy_rock.png"
+        ));
+    }
+
+    #[test]
+    fn skill_tool_calls_map_to_read_only_operations() {
+        let search = tool_call_to_operation(&ToolCall {
+            id: "skill-search-1".into(),
+            name: "skill_search".into(),
+            arguments: serde_json::json!({
+                "query": "combat authoring",
+                "source": "project"
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            search,
+            AgentOperation::SkillSearch {
+                ref query,
+                source: Some(ref source),
+                ..
+            } if query == "combat authoring" && source == "project"
+        ));
+        assert!(!operation_access(&search).requires_write);
+
+        let read = tool_call_to_operation(&ToolCall {
+            id: "skill-read-1".into(),
+            name: "skill_read".into(),
+            arguments: serde_json::json!({
+                "id": "project://skills/combat",
+                "path": "references/moves.md"
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            read,
+            AgentOperation::SkillRead {
+                ref id,
+                path: Some(ref path),
+            } if id == "project://skills/combat" && path == "references/moves.md"
+        ));
+        assert!(!operation_access(&read).requires_write);
+    }
+
+    #[test]
+    fn request_capability_tool_call_preflights_without_granting_permission() {
+        let op = tool_call_to_operation(&ToolCall {
+            id: "cap-1".into(),
+            name: "request_capability".into(),
+            arguments: serde_json::json!({
+                "capabilities": ["scene.write.entity"],
+                "tools": ["generate_asset"],
+                "reason": "Create a generated crate and place it in scene"
+            }),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            op,
+            AgentOperation::RequestCapability {
+                ref capabilities,
+                ref tools,
+                ..
+            } if capabilities == &vec!["scene.write.entity".to_owned()]
+                && tools == &vec!["generate_asset".to_owned()]
+        ));
+        assert!(!operation_access(&op).requires_write);
+
+        let requested = operation_capabilities(&op);
+        assert!(requested.contains(&"scene.write.entity".to_owned()));
+        assert!(requested.contains(&"asset.write.generated".to_owned()));
+        let decisions = evaluate_capabilities(&requested, &PermissionPolicy::read_only());
+        assert!(decisions.iter().any(|result| {
+            result.capability == "scene.write.entity"
+                && result.decision == CapabilityDecision::RequiresUserApproval
+        }));
+    }
+
+    #[test]
+    fn modeling_tool_calls_map_to_operations_and_capabilities() {
+        let primitive = tool_call_to_operation(&ToolCall {
+            id: "primitive-1".into(),
+            name: "create_primitive".into(),
+            arguments: serde_json::json!({
+                "name": "Crate",
+                "primitive": "cube",
+                "transform": { "position": [1.0, 2.0, 3.0], "scale": [2.0, 2.0, 2.0] },
+                "material": { "builtin": "debug/default" }
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            primitive,
+            AgentOperation::CreatePrimitive {
+                ref name,
+                ref primitive,
+                ..
+            } if name == "Crate" && primitive == "cube"
+        ));
+        let capabilities = operation_capabilities(&primitive);
+        assert!(capabilities.contains(&"scene.write.entity".to_owned()));
+        assert!(capabilities.contains(&"scene.write.component".to_owned()));
+
+        let mesh = tool_call_to_operation(&ToolCall {
+            id: "mesh-1".into(),
+            name: "create_mesh_asset".into(),
+            arguments: serde_json::json!({
+                "path": "models/crate.vmesh.json",
+                "operations": [
+                    { "type": "cube", "params": { "size": [2.0, 1.0, 1.0] } },
+                    { "type": "bevel", "params": { "amount": 0.05 } }
+                ]
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            mesh,
+            AgentOperation::CreateMeshAsset { ref operations, .. } if operations.len() == 2
+        ));
+        assert!(operation_capabilities(&mesh).contains(&"asset.write.mesh".to_owned()));
+    }
+
+    #[test]
+    fn modeling_operations_create_scene_and_asset_evidence() {
+        let root = std::env::temp_dir().join(format!("varg-ai-modeling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ctx = temp_project_context_at(root.clone());
+        let mut session = AgentSession::new(ctx).unwrap();
+
+        session
+            .execute_operation(&AgentOperation::CreatePrimitive {
+                name: "AI_Crate".into(),
+                primitive: "cube".into(),
+                transform: Some(TransformSpec {
+                    position: Some([1.0, 2.0, 3.0]),
+                    rotation: None,
+                    scale: Some([2.0, 2.0, 2.0]),
+                }),
+                material: Some(MaterialSpec {
+                    builtin: Some("debug/default".into()),
+                    ..MaterialSpec::default()
+                }),
+            })
+            .unwrap();
+        let entity = session.context.scene.find_by_name("AI_Crate").unwrap();
+        let transform = session.context.scene.transforms().local(entity).unwrap();
+        assert!((transform.translation.z - 3.0).abs() < 0.001);
+        assert!(
+            session
+                .context
+                .scene
+                .components(entity)
+                .unwrap()
+                .iter()
+                .any(|component| component.type_id() == "MeshRenderer")
+        );
+
+        session
+            .execute_operation(&AgentOperation::CreateMeshAsset {
+                path: "models/crate.vmesh.json".into(),
+                operations: vec![MeshOperationSpec {
+                    operation_type: "cube".into(),
+                    params: serde_json::json!({ "size": [1.0, 1.0, 1.0] }),
+                }],
+                assign_to: Some("AI_Crate".into()),
+            })
+            .unwrap();
+        assert!(root.join("assets/models/crate.vmesh.json").exists());
+
+        session
+            .execute_operation(&AgentOperation::ValidateScene {
+                include_warnings: true,
+            })
+            .unwrap();
+        assert!(
+            session
+                .console
+                .entries()
+                .iter()
+                .any(|entry| entry.source.subsystem == "ai-agent-validation")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tool_search_discovery_does_not_approve_discovered_write_capability() {
+        let mut session = AgentSession::new(temp_project_context()).unwrap();
+        let model = StubModel::new(
+            r#"[{"action":"tool_search","query":"create scene object","capabilities":["scene.write.entity"]},{"action":"create_object","name":"Denied"}]"#,
+        );
+
+        let result = session.plan(&model, "find then create", PermissionPolicy::read_only());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("create_object requires write permission"));
     }
 
     #[test]

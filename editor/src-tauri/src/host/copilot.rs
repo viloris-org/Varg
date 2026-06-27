@@ -709,6 +709,8 @@ impl EditorHost {
                     "index": i,
                     "preview": op.preview,
                     "requires_write": op.requires_write,
+                    "capabilities": op.capabilities,
+                    "capability_decisions": op.capability_decisions,
                     "permission_kind": permission_kind,
                     "requires_approval": if command.is_some() {
                         !permanently_allowed && !approval_mode.auto_approves_command()
@@ -998,6 +1000,8 @@ mod tests {
             operation,
             preview: String::new(),
             requires_write,
+            capabilities: Vec::new(),
+            capability_decisions: Vec::new(),
         }
     }
 

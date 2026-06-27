@@ -12,6 +12,14 @@ impl Generation {
     /// Initial generation for a newly allocated slot.
     pub const FIRST: Self = Self(1);
 
+    /// Creates a generation from a raw non-zero value.
+    pub fn from_raw(value: u32) -> EngineResult<Self> {
+        if value == 0 {
+            return Err(EngineError::invalid_handle("generation must be non-zero"));
+        }
+        Ok(Self(value))
+    }
+
     /// Returns the raw generation value.
     pub const fn get(self) -> u32 {
         self.0

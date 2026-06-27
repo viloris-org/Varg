@@ -65,6 +65,7 @@ impl EditorHost {
         );
         let mut runtime =
             headless_services_from_scene(config, project.root.clone(), &project.scene)?;
+        runtime.enable_default_audio_output();
         runtime.set_script_roots(
             project
                 .manifest

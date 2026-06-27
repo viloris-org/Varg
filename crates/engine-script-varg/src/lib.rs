@@ -251,6 +251,8 @@ pub struct VargRuntimeOutput {
     pub audio_commands: Vec<VargAudioCommand>,
     /// Scene object creation requests emitted during this hook.
     pub spawn_requests: Vec<VargSpawnRequest>,
+    /// Scene object destruction requests emitted during this hook.
+    pub destroy_nearest_requests: Vec<VargDestroyNearestRequest>,
     /// Whether the script requested deferred destruction of its owning entity.
     pub destroy_self: bool,
     /// Optional request to capture or release the game window mouse.
@@ -314,6 +316,17 @@ pub struct VargSpawnRequest {
     pub size: Vec3,
     /// Optional Varg script to attach to the spawned object.
     pub script: Option<String>,
+}
+
+/// A scene object destruction request emitted by Varg gameplay scripts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VargDestroyNearestRequest {
+    /// User-visible tag to match.
+    pub tag: String,
+    /// Maximum local-space distance from `origin`.
+    pub radius: f32,
+    /// Local-space origin used for nearest-object selection.
+    pub origin: Vec3,
 }
 
 /// A retained UI draw request emitted by Varg scripts.
@@ -512,6 +525,10 @@ enum RuntimeStatement {
         position: Expression,
         radius: Expression,
         script: Expression,
+    },
+    DestroyNearestWithTag {
+        tag: Expression,
+        radius: Expression,
     },
     PlayTone {
         waveform: Expression,
@@ -891,6 +908,7 @@ impl VargScript {
             ui_commands: Vec::new(),
             audio_commands: Vec::new(),
             spawn_requests: Vec::new(),
+            destroy_nearest_requests: Vec::new(),
             destroy_self: false,
             mouse_capture: None,
         };
@@ -912,6 +930,7 @@ impl VargScript {
             ui_commands: &mut output.ui_commands,
             audio_commands: &mut output.audio_commands,
             spawn_requests: &mut output.spawn_requests,
+            destroy_nearest_requests: &mut output.destroy_nearest_requests,
             destroy_self: &mut output.destroy_self,
             mouse_capture: &mut output.mouse_capture,
             should_return: false,
@@ -2528,6 +2547,7 @@ struct RuntimeEnvironment<'a> {
     ui_commands: &'a mut Vec<VargUiCommand>,
     audio_commands: &'a mut Vec<VargAudioCommand>,
     spawn_requests: &'a mut Vec<VargSpawnRequest>,
+    destroy_nearest_requests: &'a mut Vec<VargDestroyNearestRequest>,
     destroy_self: &'a mut bool,
     mouse_capture: &'a mut Option<bool>,
     /// When true, the current function should return.
@@ -2763,6 +2783,14 @@ impl RuntimeEnvironment<'_> {
                     size: Vec3::new(diameter, diameter, diameter),
                     script: self.empty_string_as_none(script),
                 });
+            }
+            RuntimeStatement::DestroyNearestWithTag { tag, radius } => {
+                self.destroy_nearest_requests
+                    .push(VargDestroyNearestRequest {
+                        tag: self.eval_string(tag).unwrap_or_default(),
+                        radius: self.eval_number(radius).max(0.0),
+                        origin: self.transform.translation,
+                    });
             }
             RuntimeStatement::PlayTone {
                 waveform,
@@ -3410,6 +3438,21 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
             });
         }
     }
+    for method in [
+        "scene.destroyNearestWithTag",
+        "scene.destroyNearestTag",
+        "destroyNearestWithTag",
+    ] {
+        if let Some(content) = method_args(line, method) {
+            let args = split_top_level_commas(content);
+            if args.len() == 2 {
+                return Some(RuntimeStatement::DestroyNearestWithTag {
+                    tag: parse_expression(args[0])?,
+                    radius: parse_expression(args[1])?,
+                });
+            }
+        }
+    }
     for (method, spatial) in [
         ("Audio.playTone", false),
         ("audio.playTone", false),
@@ -3990,7 +4033,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
 
     (
         "unsupported runtime statement".to_string(),
-        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `scene.spawnBox(...)`, `scene.spawnSphere(...)`, `Audio.playTone(...)`, `Audio.playTone3D(...)`, `Audio.startLoop(...)`, `Audio.stopLoop(...)`, `Input.captureMouse(...)`, `Input.releaseMouse()`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
+        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `scene.spawnBox(...)`, `scene.spawnSphere(...)`, `scene.destroyNearestWithTag(...)`, `Audio.playTone(...)`, `Audio.playTone3D(...)`, `Audio.startLoop(...)`, `Audio.stopLoop(...)`, `Input.captureMouse(...)`, `Input.releaseMouse()`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
             .to_string(),
         "Rewrite this line using the supported MVP script API, or add runtime support before using this language construct."
             .to_string(),
@@ -5224,6 +5267,46 @@ mod tests {
         assert_eq!(
             output.spawn_requests[1].script.as_deref(),
             Some("scripts/bobber.varg")
+        );
+    }
+
+    #[test]
+    fn runtime_emits_destroy_nearest_requests() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/collector.varg",
+            r#"script Collector {
+    func update(_ dt: Float) {
+        scene.destroyNearestWithTag("Collectible", 1.5)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform {
+                    translation: Vec3::new(2.0, 0.0, 3.0),
+                    ..Transform::default()
+                },
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.destroy_nearest_requests.len(), 1);
+        assert_eq!(output.destroy_nearest_requests[0].tag, "Collectible");
+        assert_eq!(output.destroy_nearest_requests[0].radius, 1.5);
+        assert_eq!(
+            output.destroy_nearest_requests[0].origin,
+            Vec3::new(2.0, 0.0, 3.0)
         );
     }
 

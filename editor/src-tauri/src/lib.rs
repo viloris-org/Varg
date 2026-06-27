@@ -1734,6 +1734,17 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
         .iter()
         .map(|operation| operation.preview.clone())
         .collect();
+    let planned_capabilities: Vec<serde_json::Value> = plan
+        .operations
+        .iter()
+        .map(|operation| {
+            serde_json::json!({
+                "preview": operation.preview,
+                "capabilities": operation.capabilities,
+                "capability_decisions": operation.capability_decisions,
+            })
+        })
+        .collect();
     quest_store.append_timeline_event(
         id,
         "plan",
@@ -1741,6 +1752,7 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
         serde_json::json!({
             "operations": planned,
             "requires_write": plan.requires_write,
+            "capabilities": planned_capabilities,
         }),
     )?;
 
@@ -1806,6 +1818,17 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
             .iter()
             .map(|operation| operation.preview.clone())
             .collect();
+        let planned_repair_capabilities: Vec<serde_json::Value> = repair_plan
+            .operations
+            .iter()
+            .map(|operation| {
+                serde_json::json!({
+                    "preview": operation.preview,
+                    "capabilities": operation.capabilities,
+                    "capability_decisions": operation.capability_decisions,
+                })
+            })
+            .collect();
         quest_store.append_timeline_event(
             id,
             "repair_plan",
@@ -1814,6 +1837,7 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
                 "attempt": repair_attempts,
                 "operations": planned_repair,
                 "requires_write": repair_plan.requires_write,
+                "capabilities": planned_repair_capabilities,
             }),
         )?;
         let repair_apply_started_at = Instant::now();

@@ -22,6 +22,9 @@ script JumpPlayer {
     var checkpointX: Float = 0.0
     var checkpointZ: Float = 0.0
     var gameOver: Bool = false
+    var combo: Int = 0
+    var difficulty: Float = 0.0
+    var musicStarted: Bool = false
     var hudStatus: String = "Hold Space to charge"
 
     func start() {
@@ -38,19 +41,29 @@ script JumpPlayer {
         checkpointX = 0.0
         checkpointZ = 0.0
         gameOver = false
+        combo = 0
+        difficulty = 0.0
+        musicStarted = false
         position = Vec3(0, 1.1, 0)
         log("Jump Rush Endless: hold Space, aim with WASD, keep moving across generated islands.")
     }
 
     func update(_ dt: Float) {
+        if !musicStarted {
+            Audio.startLoop("jump_rush_bgm", "triangle", "C4 E4 G4 R E4 G4 B4 R", 132.0, 0.5, 0.12)
+            musicStarted = true
+        }
+
         if gameOver {
-            ui.rect("jump_hud_panel", 12.0, 12.0, 330.0, 112.0, 0.03, 0.04, 0.06, 0.86)
-            ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 112.0, 1.0, 0.44, 0.38, 1.0)
+            ui.rect("jump_hud_panel", 12.0, 12.0, 340.0, 132.0, 0.03, 0.04, 0.06, 0.88)
+            ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 132.0, 1.0, 0.44, 0.38, 1.0)
             ui.label("jump_hud_title", "Jump Rush Endless", 24.0, 22.0)
             ui.label("jump_hud_score", "Score: " + score, 24.0, 44.0)
             ui.label("jump_hud_distance", "Distance: " + floor(bestDistance), 154.0, 44.0)
             ui.label("jump_hud_attempts", "Attempts: " + attempts, 24.0, 66.0)
+            ui.label("jump_hud_combo", "Best combo: " + combo, 154.0, 66.0)
             ui.label("jump_hud_result", "Run ended. Space retries", 24.0, 90.0)
+            ui.label("jump_hud_tip", "Aim before release for safer arcs", 24.0, 112.0)
 
             if Input.pressed("Jump") {
                 charge = 0.0
@@ -58,6 +71,7 @@ script JumpPlayer {
                 jumpTime = 0.0
                 gameOver = false
                 position = Vec3(checkpointX, 1.1, checkpointZ)
+                Audio.playTone("triangle", 523.25, 0.08, 0.22)
                 log("Retried from the last safe island.")
             }
             return
@@ -67,14 +81,16 @@ script JumpPlayer {
         if position.x > bestDistance {
             bestDistance = position.x
         }
+        difficulty = clamp(bestDistance / 90.0, 0.0, 1.0)
 
         while nextSpawnX < position.x + spawnAhead {
             let lane: Float = spawnIndex - floor(spawnIndex / 4.0) * 4.0
             let wobble: Float = sin(spawnIndex * 1.7) * 0.9
             let platformZ: Float = nextSpawnZ + wobble
-            let platformWidth: Float = 2.6 + abs(sin(spawnIndex * 0.9)) * 0.7
+            let platformWidth: Float = 2.7 + abs(sin(spawnIndex * 0.9)) * 0.7 - difficulty * 0.65
+            let platformDepth: Float = 2.8 - difficulty * 0.45
 
-            scene.spawnBox("Generated Platform", "Platform", Vec3(nextSpawnX, 0.0, platformZ), Vec3(platformWidth, 0.5, 2.8), "scripts/despawn_far.varg")
+            scene.spawnBox("Generated Platform", "Platform", Vec3(nextSpawnX, 0.0, platformZ), Vec3(platformWidth, 0.5, platformDepth), "scripts/despawn_far.varg")
 
             if lane == 1.0 {
                 scene.spawnSphere("Generated Crystal", "Collectible", Vec3(nextSpawnX, 1.15, platformZ), 0.35, "scripts/despawn_far.varg")
@@ -84,8 +100,8 @@ script JumpPlayer {
                 scene.spawnBox("Generated Hot Zone", "Hazard", Vec3(nextSpawnX + 0.55, 0.35, platformZ), Vec3(0.75, 0.18, 0.9), "scripts/despawn_far.varg")
             }
 
-            nextSpawnX += segmentLength
-            nextSpawnZ += 1.25 + sin(spawnIndex * 0.6) * 0.35
+            nextSpawnX += segmentLength + difficulty * 0.38
+            nextSpawnZ += 0.72 + sin(spawnIndex * 0.6) * 0.25 + difficulty * 0.1
             spawnIndex += 1
         }
 
@@ -104,19 +120,24 @@ script JumpPlayer {
                 let aimZ: Float = Input.value("MoveY")
                 startX = position.x
                 startZ = position.z
+                var routeSlope: Float = 0.82
+                if position.x > 18.0 {
+                    routeSlope = 0.42 + difficulty * 0.08
+                }
 
                 if aimX == 0.0 && aimZ == 0.0 {
                     targetX = position.x + charge * jumpScale
-                    targetZ = position.z + charge * jumpScale * 0.82
+                    targetZ = position.z + charge * jumpScale * routeSlope
                 } else {
-                    targetX = position.x + charge * jumpScale * aimX
-                    targetZ = position.z + charge * jumpScale * aimZ
+                    targetX = position.x + charge * jumpScale * (1.0 + aimX * 0.45)
+                    targetZ = position.z + charge * jumpScale * (routeSlope + aimZ * 0.55)
                 }
 
                 jumpTime = 0.0
                 attempts += 1
                 phase = 1
                 hudStatus = "Airborne"
+                Audio.playTone3D("sine", 360.0 + charge * 260.0, 0.08, 0.22)
                 log("Leap committed.")
             }
         }
@@ -148,32 +169,42 @@ script JumpPlayer {
 
                 if landed {
                     score += 1
+                    combo += 1
                     checkpointX = position.x
                     checkpointZ = position.z
                     if scene.distanceToTag("Collectible") <= 1.45 {
-                        score += 10
+                        score += 10 + combo
+                        scene.destroyNearestWithTag("Collectible", 1.45)
+                        Audio.playTone3D("triangle", 880.0 + combo * 18.0, 0.12, 0.34)
+                        hudStatus = "Crystal +" + (10 + combo)
                         log("Crystal collected.")
+                    } else {
+                        Audio.playTone3D("square", 220.0 + combo * 8.0, 0.06, 0.12)
+                        hudStatus = "Safe landing"
                     }
-                    hudStatus = "Safe landing"
                     log("Safe landing.")
                 } else {
                     position.y = -1.2
                     gameOver = true
+                    combo = 0
+                    Audio.playTone("noise", 120.0, 0.18, 0.28)
                     log("Missed the platform. Press Space to retry.")
                 }
             }
         }
 
         let chargeWidth: Float = 160.0 * clamp(charge / maxCharge, 0.0, 1.0)
-        ui.rect("jump_hud_panel", 12.0, 12.0, 330.0, 136.0, 0.03, 0.04, 0.06, 0.86)
-        ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 136.0, 1.0, 0.44, 0.38, 1.0)
+        ui.rect("jump_hud_panel", 12.0, 12.0, 340.0, 154.0, 0.03, 0.04, 0.06, 0.86)
+        ui.rect("jump_hud_accent", 12.0, 12.0, 4.0, 154.0, 1.0, 0.44, 0.38, 1.0)
         ui.label("jump_hud_title", "Jump Rush Endless", 24.0, 22.0)
         ui.label("jump_hud_score", "Score: " + score, 24.0, 42.0)
         ui.label("jump_hud_distance", "Distance: " + floor(bestDistance), 154.0, 42.0)
         ui.label("jump_hud_attempts", "Attempts: " + attempts, 24.0, 62.0)
-        ui.label("jump_hud_status", hudStatus, 24.0, 82.0)
-        ui.rect("jump_hud_charge_bg", 24.0, 108.0, 160.0, 10.0, 0.18, 0.2, 0.24, 1.0)
-        ui.rect("jump_hud_charge", 24.0, 108.0, chargeWidth, 10.0, 0.34, 0.75, 0.92, 1.0)
-        ui.label("jump_hud_controls", "WASD aim / Space jump", 24.0, 126.0)
+        ui.label("jump_hud_combo", "Combo: " + combo, 154.0, 62.0)
+        ui.label("jump_hud_status", hudStatus, 24.0, 84.0)
+        ui.label("jump_hud_level", "Risk: " + floor(difficulty * 100.0), 24.0, 104.0)
+        ui.rect("jump_hud_charge_bg", 24.0, 128.0, 160.0, 10.0, 0.18, 0.2, 0.24, 1.0)
+        ui.rect("jump_hud_charge", 24.0, 128.0, chargeWidth, 10.0, 0.34, 0.75, 0.92, 1.0)
+        ui.label("jump_hud_controls", "WASD steer / Space jump", 24.0, 146.0)
     }
 }
