@@ -89,9 +89,9 @@ class AiPanelBoundary extends React.Component<
   }
 }
 
-type NavSection = 'scene' | 'assets' | 'scripts' | 'build' | 'ai';
+type NavSection = 'scene' | 'assets' | 'scripts' | 'animation' | 'audio' | 'materials' | 'build' | 'settings' | 'version' | 'ai';
 type TransformTool = 'select' | 'move' | 'rotate' | 'scale';
-type BottomTab = 'console' | 'problems' | 'tasks' | 'assets';
+type BottomTab = 'console' | 'problems' | 'tasks' | 'assets' | 'performance';
 type InspectorSection = 'transform' | 'script' | 'input' | 'physics' | 'render' | 'tags';
 type SceneViewMode = '2d' | '3d';
 type ViewMode = SceneViewMode | 'scripts';
@@ -164,6 +164,54 @@ interface EditorConsoleEntry {
   file?: string | null;
   line?: number | null;
   message: string;
+}
+
+interface AssetReferenceRow {
+  kind: string;
+  label: string;
+  detail: string;
+}
+
+interface PerformanceSnapshot {
+  entity_count: number;
+  component_count: number;
+  asset_count: number;
+  problem_count: number;
+  scene_version: number;
+  play_version: number;
+  playing: boolean;
+}
+
+interface ProjectSettingsSummary {
+  project: {
+    name: string;
+    root: string;
+    asset_root: string;
+    default_scene: string;
+    script_roots: string[];
+    build_config: string;
+  };
+  build?: {
+    target: string;
+    release: boolean;
+    features: string[];
+    render: {
+      quality: string;
+      upscaler: string;
+      dynamic_resolution: boolean;
+      target_fps: number;
+      min_render_scale_percent: number;
+      max_render_scale_percent: number;
+      sharpness_percent: number;
+      anti_aliasing: string;
+    };
+  } | null;
+}
+
+interface VersionControlStatus {
+  available: boolean;
+  branch?: string | null;
+  entries: Array<{ status: string; path: string }>;
 }
 
 function isWaylandEmbeddedCompositorPresentation(mode: ViewportPresentationMode | null) {
@@ -388,7 +436,7 @@ const buildTargets: BuildTargetOption[] = [
   },
 ];
 
-const componentTypes = ['Camera', 'Light', 'MeshRenderer', 'RigidBody', 'Collider', 'Script', 'AudioSource'];
+const componentTypes = ['Camera', 'Light', 'MeshRenderer', 'Rigidbody', 'Collider', 'Script', 'AudioSource', 'AnimationPlayer', 'AudioStreamPlayer2D', 'AudioStreamPlayer3D'];
 const pickRadiusPx = 30;
 const viewportFovDeg = 60;
 const editorViewportTargetFps = 75;
@@ -433,7 +481,12 @@ function iconForNav(section: NavSection) {
   if (section === 'scene') return <IconView />;
   if (section === 'assets') return <IconPackage />;
   if (section === 'scripts') return <IconCode />;
+  if (section === 'animation') return <IconRotate />;
+  if (section === 'audio') return <IconSend />;
+  if (section === 'materials') return <IconModel />;
   if (section === 'build') return <IconModel />;
+  if (section === 'settings') return <IconSettings />;
+  if (section === 'version') return <IconFolder />;
   return <IconBot />;
 }
 
@@ -1202,6 +1255,13 @@ export default function CalmEditorPrototype({
   const [buildBusy, setBuildBusy] = useState(false);
   const [buildMessage, setBuildMessage] = useState<string | null>(null);
   const [addComponentType, setAddComponentType] = useState('Camera');
+  const [selectedAssetPath, setSelectedAssetPath] = useState<string | null>(null);
+  const [assetReferences, setAssetReferences] = useState<AssetReferenceRow[]>([]);
+  const [assetReferenceBusy, setAssetReferenceBusy] = useState(false);
+  const [sceneValidationRows, setSceneValidationRows] = useState<Array<{ severity: 'error' | 'warning'; title: string; file: string; line: number }>>([]);
+  const [performanceSnapshot, setPerformanceSnapshot] = useState<PerformanceSnapshot | null>(null);
+  const [projectSettingsSummary, setProjectSettingsSummary] = useState<ProjectSettingsSummary | null>(null);
+  const [versionControlStatus, setVersionControlStatus] = useState<VersionControlStatus | null>(null);
   const [hierarchyContextMenu, setHierarchyContextMenu] = useState<{
     x: number;
     y: number;
@@ -1270,6 +1330,15 @@ export default function CalmEditorPrototype({
       .filter((asset) => /script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path))
       .map((asset) => asset.path)
   ), [projectAssets]);
+  const animationAssets = useMemo(() => (
+    projectAssets.filter((asset) => /animation/i.test(asset.kind) || /(^|\/)animations?\//i.test(asset.path) || /\.(anim|vanim)$/i.test(asset.path))
+  ), [projectAssets]);
+  const audioAssets = useMemo(() => (
+    projectAssets.filter((asset) => /audio/i.test(asset.kind) || /(^|\/)audio\//i.test(asset.path) || /\.(wav|ogg|mp3|flac)$/i.test(asset.path))
+  ), [projectAssets]);
+  const materialAssets = useMemo(() => (
+    projectAssets.filter((asset) => /material/i.test(asset.kind) || /(^|\/)materials?\//i.test(asset.path))
+  ), [projectAssets]);
   const selectedEditorPath = selectedProjectFile?.path ?? selectedScript;
   const selectedDiagnosticPath = selectedProjectFile?.asset_path ?? selectedScript;
   const visibleProjectFiles = useMemo(() => (
@@ -1298,6 +1367,9 @@ export default function CalmEditorPrototype({
       })
   ), [collapsedProjectFolders, projectFileSearch, projectFiles]);
   const selectedBuildTarget = buildTargets.find((target) => target.id === buildTarget) ?? buildTargets[0];
+  const selectedAsset = selectedAssetPath
+    ? projectAssets.find((asset) => asset.path === selectedAssetPath) ?? null
+    : null;
   const problemRows = consoleEntries
     .filter((entry) => /error|warn/i.test(entry.level))
     .map((entry) => ({
@@ -1306,7 +1378,9 @@ export default function CalmEditorPrototype({
       line: entry.line ?? 0,
       title: entry.message,
     }));
-  const visibleProblems = problemRows.length > 0 ? problemRows : mockProblems;
+  const visibleProblems = sceneValidationRows.length > 0
+    ? sceneValidationRows
+    : problemRows.length > 0 ? problemRows : mockProblems;
   const sceneObjects = useMemo<SceneObject[]>(() => entities.map((entity) => ({
     id: entity.id,
     name: entity.name,
@@ -1366,6 +1440,33 @@ export default function CalmEditorPrototype({
       setConsoleEntries(result.entries);
     } catch {
       setConsoleEntries([]);
+    }
+  };
+
+  const refreshPerformance = async () => {
+    try {
+      const snapshot = await rpc<PerformanceSnapshot>('performance/get_snapshot');
+      setPerformanceSnapshot(snapshot);
+    } catch {
+      setPerformanceSnapshot(null);
+    }
+  };
+
+  const refreshProjectSettings = async () => {
+    try {
+      const summary = await rpc<ProjectSettingsSummary>('project/get_settings_summary');
+      setProjectSettingsSummary(summary);
+    } catch {
+      setProjectSettingsSummary(null);
+    }
+  };
+
+  const refreshVersionControl = async () => {
+    try {
+      const status = await rpc<VersionControlStatus>('project/version_control_status');
+      setVersionControlStatus(status);
+    } catch {
+      setVersionControlStatus(null);
     }
   };
 
@@ -1529,6 +1630,13 @@ export default function CalmEditorPrototype({
     await refreshSceneTree();
   };
 
+  const addComponentOfType = async (componentType: string) => {
+    if (!backendReady || !inspectorEntity?.id) return;
+    setAddComponentType(componentType);
+    await rpc('shell/add_component', { id: inspectorEntity.id, component_type: componentType }).catch(() => {});
+    await refreshSceneTree();
+  };
+
   const removeComponent = async (componentType: string) => {
     if (!backendReady || !inspectorEntity?.id) return;
     await rpc('shell/remove_component', { id: inspectorEntity.id, component_type: componentType }).catch(() => {});
@@ -1602,7 +1710,12 @@ export default function CalmEditorPrototype({
     { id: 'scene', label: 'Scene' },
     { id: 'assets', label: 'Assets' },
     { id: 'scripts', label: 'Scripts' },
+    { id: 'animation', label: 'Animation' },
+    { id: 'audio', label: 'Audio' },
+    { id: 'materials', label: 'Materials' },
     { id: 'build', label: 'Build' },
+    { id: 'settings', label: 'Settings' },
+    { id: 'version', label: 'Version Control' },
     { id: 'ai', label: 'AI' },
   ];
 
@@ -1611,6 +1724,7 @@ export default function CalmEditorPrototype({
     { title: 'Open Selected Script', detail: selectedEditorPath ?? 'No script selected' },
     { title: 'Run Scene Validation', detail: 'Check components, assets, and policy rules' },
     { title: 'Package Current Build', detail: `${selectedBuildTarget.label} / ${buildFormat} / ${buildChannel}` },
+    { title: 'Reset Layout', detail: 'Restore editor panels to the default workspace' },
     { title: isPlaying ? 'Stop Play Mode' : 'Enter Play Mode', detail: 'Run Meadow.scene in editor' },
   ];
 
@@ -1630,6 +1744,9 @@ export default function CalmEditorPrototype({
     refreshSceneTree();
     refreshAssets();
     refreshConsole();
+    refreshPerformance();
+    refreshProjectSettings();
+    refreshVersionControl();
     viewportPresentationCapabilities()
       .then((capabilities) => {
         setViewportPresentationAdapters(capabilities.adapters);
@@ -1648,6 +1765,8 @@ export default function CalmEditorPrototype({
     const interval = window.setInterval(() => {
       refreshShellState();
       refreshConsole();
+      refreshPerformance();
+      refreshVersionControl();
     }, 2000);
     return () => window.clearInterval(interval);
   }, []);
@@ -1780,6 +1899,24 @@ export default function CalmEditorPrototype({
   }, [showHiddenFiles]);
 
   useEffect(() => {
+    if (!selectedAssetPath && projectAssets.length > 0) {
+      setSelectedAssetPath(projectAssets[0].path);
+    }
+  }, [projectAssets, selectedAssetPath]);
+
+  useEffect(() => {
+    if (!backendReady || !selectedAssetPath) {
+      setAssetReferences([]);
+      return;
+    }
+    setAssetReferenceBusy(true);
+    rpc<{ references: AssetReferenceRow[] }>('project/list_asset_references', { path: selectedAssetPath })
+      .then((result) => setAssetReferences(result.references))
+      .catch(() => setAssetReferences([]))
+      .finally(() => setAssetReferenceBusy(false));
+  }, [backendReady, selectedAssetPath, sceneVersion]);
+
+  useEffect(() => {
     setSelectedScript((current) => {
       if (selectedProjectFile) return current;
       if (current && scriptAssets.includes(current)) return current;
@@ -1887,6 +2024,119 @@ export default function CalmEditorPrototype({
     await refreshSceneTree();
   };
 
+  const renameSceneObject = async (id: string) => {
+    if (!backendReady) return;
+    const current = entities.find((entity) => entity.id === id);
+    const name = window.prompt('Rename object', current?.name ?? 'GameObject')?.trim();
+    if (!name) return;
+    await rpc('shell/rename_object', { id, name }).catch(() => {});
+    await refreshSceneTree();
+  };
+
+  const duplicateSceneObject = async (id: string) => {
+    if (!backendReady) return;
+    const created = await rpc<SceneObject>('shell/duplicate_object', { id }).catch(() => null);
+    await refreshSceneTree();
+    if (created) selectEntity(created.id);
+  };
+
+  const createChildObject = async (parentId: string) => {
+    if (!backendReady) return;
+    const created = await rpc<SceneObject>('shell/create_object', { name: 'Child Object', parent_id: parentId }).catch(() => null);
+    await refreshSceneTree();
+    if (created) selectEntity(created.id);
+  };
+
+  const reparentSceneObjectToRoot = async (id: string) => {
+    if (!backendReady) return;
+    await rpc('shell/reparent_object', { id }).catch(() => {});
+    await refreshSceneTree();
+  };
+
+  const renameSelectedAsset = async () => {
+    if (!backendReady || !selectedAsset) return;
+    const stem = selectedAsset.name.replace(/\.[^.]+$/, '');
+    const newName = window.prompt('Rename asset', stem)?.trim();
+    if (!newName) return;
+    await rpc('project/rename_asset', { old_path: selectedAsset.path, new_name: newName }).catch(() => {});
+    await refreshAssets();
+    await refreshConsole();
+  };
+
+  const deleteSelectedAsset = async () => {
+    if (!backendReady || !selectedAsset) return;
+    if (!window.confirm(`Delete ${selectedAsset.path}?`)) return;
+    await rpc('project/delete_asset', { path: selectedAsset.path }).catch(() => {});
+    setSelectedAssetPath(null);
+    await refreshAssets();
+    await refreshConsole();
+  };
+
+  const reimportSelectedAsset = async () => {
+    if (!backendReady || !selectedAsset) return;
+    await rpc('project/reimport_asset', { path: selectedAsset.path }).catch(() => {});
+    await refreshAssets();
+    await refreshConsole();
+  };
+
+  const runSceneValidation = async () => {
+    const rows: Array<{ severity: 'error' | 'warning'; title: string; file: string; line: number }> = [];
+    const ids = new Set<string>();
+    for (const entity of entities) {
+      if (ids.has(entity.id)) {
+        rows.push({ severity: 'error', title: `Duplicate entity id ${entity.id}`, file: entity.name, line: 0 });
+      }
+      ids.add(entity.id);
+      if (!entity.name.trim()) {
+        rows.push({ severity: 'warning', title: 'Scene object has no display name', file: entity.id, line: 0 });
+      }
+      if (entity.parentId && !entities.some((candidate) => candidate.id === entity.parentId)) {
+        rows.push({ severity: 'error', title: `${entity.name} has a missing parent`, file: entity.id, line: 0 });
+      }
+      if ((entity.components ?? []).some((component) => component.type === 'Script')) {
+        const script = entity.components?.find((component) => component.type === 'Script');
+        const source = script?.data?.source ?? script?.data?.script;
+        if (typeof source !== 'string' || source.trim() === '') {
+          rows.push({ severity: 'warning', title: `${entity.name} has an empty Script source`, file: entity.name, line: 0 });
+        }
+      }
+    }
+    if (rows.length === 0) {
+      rows.push({ severity: 'warning', title: 'Scene validation passed with no blocking issues', file: shellState?.project_name ?? 'Scene', line: 0 });
+    }
+    setSceneValidationRows(rows);
+    setBottomTab('problems');
+    setShowDrawer(true);
+  };
+
+  const resetEditorLayout = () => {
+    setLeftDashboardWidth(leftDashboardDefaultWidth);
+    setRightDashboardWidth(rightDashboardDefaultWidth);
+    setBottomDashboardHeight(bottomDashboardDefaultHeight);
+    setShowDrawer(true);
+    setBottomTab('problems');
+  };
+
+  const createNamedAsset = async (kind: 'material' | 'animation' | 'audio_bus') => {
+    if (!backendReady) return;
+    const label = kind === 'audio_bus' ? 'audio bus' : kind;
+    const fallback = kind === 'audio_bus' ? 'SFX' : kind === 'animation' ? 'Idle' : 'Material';
+    const name = window.prompt(`Create ${label}`, fallback)?.trim();
+    if (!name) return;
+    const method = kind === 'material'
+      ? 'project/create_material'
+      : kind === 'animation'
+        ? 'project/create_animation'
+        : 'project/create_audio_bus';
+    const created = await rpc<{ path: string }>(method, { name }).catch(() => null);
+    await refreshAssets();
+    await refreshConsole();
+    if (created?.path) {
+      setSelectedAssetPath(created.path);
+      if (kind !== 'audio_bus') openScript(created.path);
+    }
+  };
+
   const runGame = async () => {
     if (backendReady) {
       await openGameView().catch(() => setIsPlaying((value) => !value));
@@ -1898,8 +2148,9 @@ export default function CalmEditorPrototype({
   const runCommand = async (title: string) => {
     if (title === 'Create Camera') await createCameraObject();
     else if (title === 'Open Selected Script' && selectedEditorPath) setViewMode('scripts');
-    else if (title === 'Run Scene Validation') setBottomTab('problems');
+    else if (title === 'Run Scene Validation') await runSceneValidation();
     else if (title === 'Package Current Build') await runBuild();
+    else if (title === 'Reset Layout') resetEditorLayout();
     else if (title.includes('Play') || title.includes('Stop')) await runGame();
     setCommandOpen(false);
   };
@@ -2044,7 +2295,7 @@ export default function CalmEditorPrototype({
           <div className="flex h-11 items-center justify-between border-b border-[var(--border)] px-3">
             <div>
               <div className="text-[12px] font-semibold text-[var(--text-primary)]">
-                {activeNav === 'scene' ? 'Scene' : activeNav === 'assets' ? 'Assets' : activeNav === 'scripts' ? 'Scripts' : activeNav === 'build' ? 'Build' : 'AI'}
+                {navItems.find((item) => item.id === activeNav)?.label ?? 'Editor'}
               </div>
               <div className="font-mono text-[10px] text-[var(--text-muted)]">{backendReady ? 'Live backend' : 'Prototype data'}</div>
             </div>
@@ -2063,10 +2314,10 @@ export default function CalmEditorPrototype({
               <IconSearch size={13} />
               <input
                 className="min-w-0 flex-1 bg-transparent text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
-                placeholder={activeNav === 'assets' ? 'Filter assets' : activeNav === 'scripts' ? 'Filter files' : 'Filter entities'}
-                value={activeNav === 'assets' ? assetSearch : activeNav === 'scripts' ? projectFileSearch : sceneSearch}
+                placeholder={activeNav === 'assets' || activeNav === 'animation' || activeNav === 'audio' || activeNav === 'materials' ? 'Filter assets' : activeNav === 'scripts' ? 'Filter files' : activeNav === 'version' ? 'Filter changes' : 'Filter entities'}
+                value={activeNav === 'assets' || activeNav === 'animation' || activeNav === 'audio' || activeNav === 'materials' ? assetSearch : activeNav === 'scripts' ? projectFileSearch : sceneSearch}
                 onChange={(event) => {
-                  if (activeNav === 'assets') setAssetSearch(event.target.value);
+                  if (activeNav === 'assets' || activeNav === 'animation' || activeNav === 'audio' || activeNav === 'materials') setAssetSearch(event.target.value);
                   else if (activeNav === 'scripts') setProjectFileSearch(event.target.value);
                   else setSceneSearch(event.target.value);
                 }}
@@ -2080,8 +2331,12 @@ export default function CalmEditorPrototype({
                 <button
                   key={asset.path}
                   type="button"
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]"
+                  className={cx(
+                    'flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]',
+                    selectedAssetPath === asset.path && 'bg-[rgba(34,197,94,0.10)]',
+                  )}
                   onClick={() => {
+                    setSelectedAssetPath(asset.path);
                     if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
                   }}
                 >
@@ -2156,6 +2411,90 @@ export default function CalmEditorPrototype({
                     <span className="min-w-0 flex-1 truncate">{path}</span>
                     {selectedScript === path && <IconCheck size={12} className="text-[var(--brand)]" />}
                   </button>
+                ))}
+              </div>
+            ) : activeNav === 'animation' ? (
+              <div className="space-y-3 p-3">
+                <div className="grid grid-cols-2 gap-1">
+                  <button type="button" className="h-8 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => createNamedAsset('animation')}>New Clip</button>
+                  <button type="button" className="h-8 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady || !inspectorEntity?.id} onClick={() => addComponentOfType('AnimationPlayer')}>Add Player</button>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3 text-[11px] leading-5 text-[var(--text-muted)]">
+                  <div className="flex justify-between"><span>Selected</span><span className="font-mono text-[var(--text-secondary)]">{inspectorEntity.name}</span></div>
+                  <div className="flex justify-between"><span>Clips</span><span className="font-mono text-[var(--text-secondary)]">{animationAssets.length}</span></div>
+                </div>
+                {animationAssets.filter((asset) => `${asset.name} ${asset.path}`.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => (
+                  <button key={asset.path} type="button" className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-2 text-left text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={() => openScript(asset.path)}>
+                    <IconRotate size={13} />
+                    <span className="min-w-0 flex-1 truncate">{asset.name}</span>
+                    <span className="font-mono text-[10px] text-[var(--text-muted)]">{asset.kind}</span>
+                  </button>
+                ))}
+              </div>
+            ) : activeNav === 'audio' ? (
+              <div className="space-y-3 p-3">
+                <div className="grid grid-cols-2 gap-1">
+                  <button type="button" className="h-8 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => createNamedAsset('audio_bus')}>New Bus</button>
+                  <button type="button" className="h-8 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady || !inspectorEntity?.id} onClick={() => addComponentOfType('AudioSource')}>Add Source</button>
+                </div>
+                <div className="grid grid-cols-3 gap-1 text-center text-[11px]">
+                  {['Master', 'SFX', 'Music'].map((bus) => (
+                    <div key={bus} className="rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 py-2 text-[var(--text-secondary)]">{bus}</div>
+                  ))}
+                </div>
+                {audioAssets.filter((asset) => `${asset.name} ${asset.path}`.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => (
+                  <button key={asset.path} type="button" className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-2 text-left text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={() => setSelectedAssetPath(asset.path)}>
+                    <IconSend size={13} />
+                    <span className="min-w-0 flex-1 truncate">{asset.name}</span>
+                    <span className="font-mono text-[10px] text-[var(--text-muted)]">{asset.kind}</span>
+                  </button>
+                ))}
+              </div>
+            ) : activeNav === 'materials' ? (
+              <div className="space-y-3 p-3">
+                <button type="button" className="h-8 w-full rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => createNamedAsset('material')}>New Material</button>
+                {materialAssets.filter((asset) => `${asset.name} ${asset.path}`.toLowerCase().includes(assetSearch.toLowerCase())).map((asset) => (
+                  <button key={asset.path} type="button" className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-2 text-left text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={() => {
+                    setSelectedAssetPath(asset.path);
+                    if (/\.vasset$/i.test(asset.path)) openScript(asset.path);
+                  }}>
+                    <IconModel size={13} />
+                    <span className="min-w-0 flex-1 truncate">{asset.name}</span>
+                    <span className="font-mono text-[10px] text-[var(--text-muted)]">{asset.kind}</span>
+                  </button>
+                ))}
+              </div>
+            ) : activeNav === 'settings' ? (
+              <div className="space-y-3 p-3">
+                <button type="button" className="h-8 w-full rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={refreshProjectSettings}>Refresh Settings</button>
+                {[
+                  ['Project', projectSettingsSummary?.project.name ?? shellState?.project_name ?? 'Unknown'],
+                  ['Root', projectSettingsSummary?.project.root ?? '--'],
+                  ['Assets', projectSettingsSummary?.project.asset_root ?? '--'],
+                  ['Default Scene', projectSettingsSummary?.project.default_scene ?? '--'],
+                  ['Build Target', projectSettingsSummary?.build?.target ?? '--'],
+                  ['Render Quality', projectSettingsSummary?.build?.render.quality ?? '--'],
+                  ['Target FPS', projectSettingsSummary?.build?.render.target_fps ?? '--'],
+                  ['AA', projectSettingsSummary?.build?.render.anti_aliasing ?? '--'],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2">
+                    <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{label}</div>
+                    <div className="mt-1 break-words font-mono text-[11px] text-[var(--text-secondary)]">{value}</div>
+                  </div>
+                ))}
+              </div>
+            ) : activeNav === 'version' ? (
+              <div className="space-y-2 p-3">
+                <button type="button" className="h-8 w-full rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={refreshVersionControl}>Refresh Git Status</button>
+                <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2 text-[11px] text-[var(--text-muted)]">
+                  <div>Branch: <span className="font-mono text-[var(--text-secondary)]">{versionControlStatus?.branch ?? 'unknown'}</span></div>
+                  <div>Changes: <span className="font-mono text-[var(--text-secondary)]">{versionControlStatus?.entries.length ?? 0}</span></div>
+                </div>
+                {(versionControlStatus?.entries ?? []).filter((entry) => `${entry.status} ${entry.path}`.toLowerCase().includes(sceneSearch.toLowerCase())).map((entry) => (
+                  <div key={`${entry.status}-${entry.path}`} className="grid grid-cols-[44px_1fr] gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 font-mono text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">
+                    <span className="text-[var(--warning)]">{entry.status}</span>
+                    <span className="truncate">{entry.path}</span>
+                  </div>
                 ))}
               </div>
             ) : activeNav === 'build' ? (
@@ -2236,11 +2575,26 @@ export default function CalmEditorPrototype({
                     <button
                       key={entity.id}
                       type="button"
+                      draggable={backendReady}
                       className={cx(
                         'flex h-8 w-full items-center gap-2 px-3 text-left transition-colors',
                         selectedEntity.id === entity.id ? 'bg-[rgba(34,197,94,0.10)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
                       )}
+                      style={{ paddingLeft: 12 + Math.min(4, entity.parentId ? 1 : 0) * 14 }}
                       onClick={() => selectEntity(entity.id)}
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData('application/x-varg-entity', entity.id);
+                      }}
+                      onDragOver={(event) => {
+                        if (event.dataTransfer.types.includes('application/x-varg-entity')) event.preventDefault();
+                      }}
+                      onDrop={(event) => {
+                        const draggedId = event.dataTransfer.getData('application/x-varg-entity');
+                        if (!draggedId || draggedId === entity.id) return;
+                        rpc('shell/reparent_object', { id: draggedId, parent_id: entity.id })
+                          .then(() => refreshSceneTree())
+                          .catch(() => {});
+                      }}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         selectEntity(entity.id);
@@ -2262,18 +2616,39 @@ export default function CalmEditorPrototype({
           </div>
 
           <div className="border-t border-[var(--border)] p-2">
-            <div className="mb-2 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
-              <span>Recent Assets</span>
-              <span>{projectAssets.length}</span>
-            </div>
-            <div className="space-y-1">
-              {projectAssets.slice(0, 3).map((asset) => (
-                <button key={asset.path} type="button" className="flex h-7 w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">
-                  <IconFile size={12} />
-                  <span className="min-w-0 flex-1 truncate">{asset.name}</span>
-                </button>
-              ))}
-            </div>
+            {activeNav === 'assets' && selectedAsset ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+                  <span>Import Settings</span>
+                  <span className="font-mono">{selectedAsset.kind}</span>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2 text-[11px] leading-5 text-[var(--text-secondary)]">
+                  <div className="truncate font-mono text-[10px] text-[var(--text-muted)]">{selectedAsset.path}</div>
+                  <div>Importer: {selectedAsset.updated}</div>
+                  <div>References: {assetReferenceBusy ? 'loading' : assetReferences.length}</div>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={reimportSelectedAsset}>Reimport</button>
+                  <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={renameSelectedAsset}>Rename</button>
+                  <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[rgba(248,113,113,0.28)] text-[11px] text-[var(--danger)] hover:bg-[var(--danger-dim)] disabled:opacity-40" disabled={!backendReady} onClick={deleteSelectedAsset}>Delete</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="mb-2 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+                  <span>Recent Assets</span>
+                  <span>{projectAssets.length}</span>
+                </div>
+                <div className="space-y-1">
+                  {projectAssets.slice(0, 3).map((asset) => (
+                    <button key={asset.path} type="button" className="flex h-7 w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={() => setSelectedAssetPath(asset.path)}>
+                      <IconFile size={12} />
+                      <span className="min-w-0 flex-1 truncate">{asset.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </aside>
 
@@ -2528,7 +2903,7 @@ export default function CalmEditorPrototype({
               >
               <div className="flex h-9 items-center justify-between border-b border-[var(--border)] px-2">
                 <div className="flex items-center gap-1">
-                  {(['console', 'problems', 'tasks', 'assets'] as BottomTab[]).map((tab) => (
+                  {(['console', 'problems', 'tasks', 'assets', 'performance'] as BottomTab[]).map((tab) => (
                     <button
                       key={tab}
                       type="button"
@@ -2576,12 +2951,45 @@ export default function CalmEditorPrototype({
                   </div>
                 ))}
                 {bottomTab === 'assets' && filteredAssets.map((asset) => (
-                  <div key={asset.path} className="grid grid-cols-[1fr_72px_84px] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-[12px]">
+                  <button key={asset.path} type="button" className="grid w-full grid-cols-[1fr_72px_84px] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-left text-[12px] hover:bg-[var(--bg-hover)]" onClick={() => setSelectedAssetPath(asset.path)}>
                     <span className="truncate">{asset.path}</span>
                     <span className="font-mono text-[10px] text-[var(--text-muted)]">{asset.kind}</span>
                     <span className="text-right text-[11px] text-[var(--text-muted)]">{asset.updated}</span>
-                  </div>
+                  </button>
                 ))}
+                {bottomTab === 'assets' && selectedAsset && (
+                  <div className="border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-[12px]">
+                    <div className="mb-2 font-semibold text-[var(--text-primary)]">References for {selectedAsset.name}</div>
+                    {assetReferences.length === 0 ? (
+                      <div className="text-[var(--text-muted)]">{assetReferenceBusy ? 'Loading references...' : 'No references found.'}</div>
+                    ) : assetReferences.map((row) => (
+                      <div key={`${row.kind}-${row.label}-${row.detail}`} className="grid grid-cols-[88px_140px_1fr] gap-2 py-1 font-mono text-[11px]">
+                        <span className="text-[var(--text-muted)]">{row.kind}</span>
+                        <span className="truncate text-[var(--text-secondary)]">{row.label}</span>
+                        <span className="truncate text-[var(--text-primary)]">{row.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {bottomTab === 'performance' && (
+                  <div className="grid grid-cols-2 gap-2 p-3 text-[12px] md:grid-cols-4">
+                    {[
+                      ['Entities', performanceSnapshot?.entity_count ?? entities.length],
+                      ['Components', performanceSnapshot?.component_count ?? entities.reduce((count, entity) => count + (entity.components?.length ?? 0), 0)],
+                      ['Assets', performanceSnapshot?.asset_count ?? projectAssets.length],
+                      ['Problems', performanceSnapshot?.problem_count ?? visibleProblems.length],
+                      ['Scene Version', performanceSnapshot?.scene_version ?? sceneVersion],
+                      ['Play Version', performanceSnapshot?.play_version ?? 0],
+                      ['Play Mode', performanceSnapshot?.playing ? 'running' : 'stopped'],
+                      ['UI FPS', measuredFps === null ? '--' : measuredFps],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3">
+                        <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{label}</div>
+                        <div className="mt-1 font-mono text-[18px] text-[var(--text-primary)]">{value}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
             </>
@@ -2623,10 +3031,16 @@ export default function CalmEditorPrototype({
               <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 <IconView size={13} />
               </button>
-              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
+              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]" onClick={resetEditorLayout} title="Reset layout">
                 <IconSettings size={13} />
               </button>
             </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 border-b border-[var(--border)] p-2">
+            <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => renameSceneObject(inspectorEntity.id)}>Rename</button>
+            <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => duplicateSceneObject(inspectorEntity.id)}>Duplicate</button>
+            <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={() => createChildObject(inspectorEntity.id)}>Child</button>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -2742,6 +3156,54 @@ export default function CalmEditorPrototype({
               }}
             >
               <IconView size={13} /> Inspect
+            </button>
+            <button
+              type="button"
+              className={hierarchyContextMenuClass.item}
+              disabled={!backendReady}
+              onClick={() => {
+                const id = hierarchyContextMenu.entity.id;
+                setHierarchyContextMenu(null);
+                renameSceneObject(id);
+              }}
+            >
+              <IconEdit size={13} /> Rename
+            </button>
+            <button
+              type="button"
+              className={hierarchyContextMenuClass.item}
+              disabled={!backendReady}
+              onClick={() => {
+                const id = hierarchyContextMenu.entity.id;
+                setHierarchyContextMenu(null);
+                duplicateSceneObject(id);
+              }}
+            >
+              <IconPackage size={13} /> Duplicate
+            </button>
+            <button
+              type="button"
+              className={hierarchyContextMenuClass.item}
+              disabled={!backendReady}
+              onClick={() => {
+                const id = hierarchyContextMenu.entity.id;
+                setHierarchyContextMenu(null);
+                createChildObject(id);
+              }}
+            >
+              <IconPlus size={13} /> Create Child
+            </button>
+            <button
+              type="button"
+              className={hierarchyContextMenuClass.item}
+              disabled={!backendReady || !hierarchyContextMenu.entity.parentId}
+              onClick={() => {
+                const id = hierarchyContextMenu.entity.id;
+                setHierarchyContextMenu(null);
+                reparentSceneObjectToRoot(id);
+              }}
+            >
+              <IconFolder size={13} /> Move to Root
             </button>
             <div className={hierarchyContextMenuClass.separator} />
             <button

@@ -1,0 +1,61 @@
+script FpsCamera {
+    @export var eyeHeight: Float = 0.84
+    @export var mouseSensitivity: Float = 0.065
+    @export var gamepadLookSpeed: Float = 82.0
+    @export var minPitch: Float = -62.0
+    @export var maxPitch: Float = 45.0
+    @export var bobAmount: Float = 0.035
+    @export var bobSpeed: Float = 8.5
+
+    var yaw: Float = 0.0
+    var pitch: Float = -5.0
+    var initialized: Bool = false
+    var mouseCaptured: Bool = true
+    var bobTimer: Float = 0.0
+
+    func start() {
+        yaw = 0.0
+        pitch = -5.0
+        initialized = true
+        mouseCaptured = true
+        bobTimer = 0.0
+        Input.captureMouse(mouseCaptured)
+        log("FPS camera tuned: wider view, steadier mouse, movement bob enabled.")
+    }
+
+    func update(_ dt: Float) {
+        if !initialized {
+            yaw = 0.0
+            pitch = -5.0
+            initialized = true
+        }
+
+        if Input.pressed("Fire") {
+            mouseCaptured = true
+        }
+
+        Input.captureMouse(mouseCaptured)
+
+        if mouseCaptured {
+            yaw += Input.mouseDeltaX() * mouseSensitivity
+            pitch -= Input.mouseDeltaY() * mouseSensitivity
+        }
+
+        yaw += Input.value("LookX") * gamepadLookSpeed * dt
+        pitch += Input.value("LookY") * gamepadLookSpeed * dt * 0.35
+        pitch = clamp(pitch, minPitch, maxPitch)
+
+        let movePower: Float = abs(Input.value("MoveX")) + abs(Input.value("MoveY"))
+        if movePower > 0.1 {
+            bobTimer += dt * bobSpeed
+        } else {
+            bobTimer += dt * 2.0
+        }
+        let bob: Float = sin(bobTimer) * bobAmount * clamp(movePower, 0.0, 1.0)
+
+        position.x = scene.xOf("Player")
+        position.y = scene.yOf("Player") + eyeHeight + bob
+        position.z = scene.zOf("Player")
+        rotation = Vec3(pitch, yaw, 0.0)
+    }
+}

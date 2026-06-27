@@ -102,6 +102,11 @@ mod tests {
         assert!(prompt.contains("Short build example"));
         assert!(prompt.contains("Incorrect tool flow"));
         assert!(prompt.contains("No orphan scripts"));
+        assert!(prompt.contains("System Skills"));
+        assert!(prompt.contains("skill_search"));
+        assert!(prompt.contains("system://skills/name"));
+        assert!(prompt.contains("Game-Making Standard"));
+        assert!(prompt.contains("Playable over decorative"));
     }
 
     #[test]
@@ -111,6 +116,11 @@ mod tests {
         assert!(prompt.contains("scripts/player.varg"));
         assert!(prompt.contains("### 16. Timed projectile lifetime"));
         assert!(prompt.contains("Do not validate after every individual write"));
+        assert!(prompt.contains("Player verb"));
+        assert!(prompt.contains("Goal"));
+        assert!(prompt.contains("Pressure"));
+        assert!(prompt.contains("Feedback"));
+        assert!(prompt.contains("Tuning hooks"));
         assert!(!prompt.contains("scripts/player.aster"));
     }
 

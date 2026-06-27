@@ -1,0 +1,6 @@
+version = 1
+guid = "0000000000000001f267a940a0aa00a3"
+source_path = "scripts/fps_camera.varg"
+kind = "script"
+importer = "script-varg"
+dependencies = []

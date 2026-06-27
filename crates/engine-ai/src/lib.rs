@@ -26,6 +26,7 @@ pub use tools::{
     VargToolMetadata, search_tools,
 };
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use engine_core::{EngineError, EngineResult};
@@ -167,6 +168,59 @@ impl ChatMessage {
     }
 }
 
+/// Structured model-visible result for one executed tool call.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolResultMessage {
+    /// Provider-assigned tool call ID this result answers.
+    pub call_id: String,
+    /// Tool/function name.
+    pub tool_name: String,
+    /// Whether the tool completed successfully.
+    pub success: bool,
+    /// Text payload exposed back to the model.
+    pub content: String,
+}
+
+impl ToolResultMessage {
+    /// Converts the structured result into a compatibility chat message.
+    ///
+    /// Current providers only accept user/assistant text messages. This keeps
+    /// the loop shape explicit while preserving compatibility until providers
+    /// can emit native function_call_output items.
+    pub fn to_chat_message(&self) -> ChatMessage {
+        ChatMessage::user(format!(
+            "Tool result for call_id={} tool={} success={}:\n{}",
+            self.call_id, self.tool_name, self.success, self.content
+        ))
+    }
+
+    /// Parses a compatibility chat message back into a structured tool result.
+    pub fn from_chat_message(message: &ChatMessage) -> Option<Self> {
+        let content = message.content.strip_prefix("Tool result for ")?;
+        let (header, body) = content.split_once(":\n")?;
+
+        let mut call_id = None;
+        let mut tool_name = None;
+        let mut success = None;
+        for part in header.split_whitespace() {
+            if let Some(value) = part.strip_prefix("call_id=") {
+                call_id = Some(value.to_owned());
+            } else if let Some(value) = part.strip_prefix("tool=") {
+                tool_name = Some(value.to_owned());
+            } else if let Some(value) = part.strip_prefix("success=") {
+                success = value.parse::<bool>().ok();
+            }
+        }
+
+        Some(Self {
+            call_id: call_id?,
+            tool_name: tool_name?,
+            success: success?,
+            content: body.to_owned(),
+        })
+    }
+}
+
 /// Thinking effort level for models that support extended reasoning.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ThinkingEffort {
@@ -222,6 +276,23 @@ pub struct AiResponse {
     pub thinking: String,
     /// Tool calls requested by the model (native tool calling).
     pub tool_calls: Vec<ToolCall>,
+}
+
+/// Result of one model request after resolving tool-result continuations.
+#[derive(Clone, Debug)]
+pub struct AgentModelResponse {
+    /// Final model text content after any safe tool continuations.
+    pub content: String,
+    /// Provider-exposed reasoning text or reasoning summary.
+    pub thinking: String,
+    /// Tool calls from the final model turn.
+    pub tool_calls: Vec<ToolCall>,
+    /// Safe read-only tool calls executed before the final model turn.
+    pub resolved_tool_calls: Vec<ToolCall>,
+    /// Structured tool results fed back into follow-up model turns.
+    pub resolved_tool_results: Vec<ToolResultMessage>,
+    /// Safe operations executed before the final model turn.
+    pub resolved_operations: Vec<AgentOperation>,
 }
 
 /// An operation the AI agent requests the engine to perform.
@@ -406,7 +477,7 @@ pub enum AgentOperation {
     SkillSearch {
         /// Natural-language search text.
         query: String,
-        /// Optional source filter: "project" or "global".
+        /// Optional source filter: "project", "global", or "system".
         #[serde(default)]
         source: Option<String>,
         /// Maximum number of results to return.
@@ -832,6 +903,103 @@ impl AgentSession {
         } else {
             self.plan_from_response(&response.content, policy)
         }
+    }
+
+    /// Runs a model request and resolves safe read-only tool calls by feeding
+    /// their results back into a follow-up model turn.
+    pub fn respond_with_tool_results_streaming(
+        &mut self,
+        model: &dyn AiModel,
+        request: AiRequest,
+        policy: PermissionPolicy,
+        on_delta: &mut dyn FnMut(AiStreamDelta),
+    ) -> EngineResult<AgentModelResponse> {
+        let mut request = request;
+        let mut response = model.chat_stream(request.clone(), on_delta)?;
+        let mut resolved_tool_calls = Vec::new();
+        let mut resolved_tool_results = Vec::new();
+        let mut resolved_operations = Vec::new();
+        let mut seen_tool_signatures: HashMap<String, usize> = HashMap::new();
+
+        loop {
+            if response.tool_calls.is_empty() {
+                break;
+            }
+
+            let plan =
+                self.plan_from_tool_calls(&response.tool_calls, &response.content, policy.clone())?;
+            let executable_tool_ops: Vec<PlannedOperation> = plan
+                .operations
+                .into_iter()
+                .filter(|planned| !matches!(planned.operation, AgentOperation::Complete { .. }))
+                .collect();
+
+            if executable_tool_ops.is_empty()
+                || !executable_tool_ops
+                    .iter()
+                    .all(|planned| operation_can_feed_model(&planned.operation))
+            {
+                break;
+            }
+
+            let signatures = response
+                .tool_calls
+                .iter()
+                .map(tool_call_signature)
+                .collect::<Vec<_>>();
+            if signatures.iter().any(|signature| {
+                let count = seen_tool_signatures.entry(signature.clone()).or_insert(0);
+                *count += 1;
+                *count > 1
+            }) {
+                break;
+            }
+
+            let before_console = self.console.entries().len();
+            resolved_operations.extend(
+                executable_tool_ops
+                    .iter()
+                    .map(|planned| planned.operation.clone()),
+            );
+            let followup_plan = AgentPlan {
+                operations: executable_tool_ops,
+                read_only: true,
+                requires_write: false,
+                policy: policy.clone(),
+            };
+            let outcome = self.apply_plan(&followup_plan)?;
+            let console_entries = self
+                .console
+                .entries()
+                .iter()
+                .skip(before_console)
+                .cloned()
+                .collect::<Vec<_>>();
+            let tool_result_messages =
+                format_tool_result_messages(&response.tool_calls, &outcome, &console_entries);
+
+            resolved_tool_calls.extend(response.tool_calls.clone());
+            request
+                .messages
+                .push(ChatMessage::assistant(tool_call_summary_message(
+                    &resolved_tool_calls,
+                )));
+            for tool_result in &tool_result_messages {
+                request.messages.push(tool_result.to_chat_message());
+            }
+            resolved_tool_results.extend(tool_result_messages);
+
+            response = model.chat_stream(request.clone(), on_delta)?;
+        }
+
+        Ok(AgentModelResponse {
+            content: response.content,
+            thinking: response.thinking,
+            tool_calls: response.tool_calls,
+            resolved_tool_calls,
+            resolved_tool_results,
+            resolved_operations,
+        })
     }
 
     /// Builds a provider request without performing network I/O.
@@ -2986,6 +3154,115 @@ struct OperationAccess {
     requires_process_execution: bool,
 }
 
+fn operation_can_feed_model(operation: &AgentOperation) -> bool {
+    matches!(
+        operation,
+        AgentOperation::ReadFile { .. }
+            | AgentOperation::CheckScript { .. }
+            | AgentOperation::CreateTask { .. }
+            | AgentOperation::UpdateTask { .. }
+            | AgentOperation::ToolSearch { .. }
+            | AgentOperation::SkillSearch { .. }
+            | AgentOperation::SkillRead { .. }
+            | AgentOperation::RequestCapability { .. }
+            | AgentOperation::GetSceneInfo { .. }
+            | AgentOperation::GetObjectInfo { .. }
+            | AgentOperation::GetAssetInfo { .. }
+            | AgentOperation::CaptureViewport { .. }
+            | AgentOperation::ValidateScene { .. }
+            | AgentOperation::QueryDependencyGraph { .. }
+            | AgentOperation::QuerySceneSemantic { .. }
+    )
+}
+
+fn tool_call_signature(tool_call: &ToolCall) -> String {
+    format!("{}:{}", tool_call.name, tool_call.arguments)
+}
+
+fn tool_call_summary_message(tool_calls: &[ToolCall]) -> String {
+    let calls = tool_calls
+        .iter()
+        .map(|tool| format!("- {}({})", tool.name, tool.arguments))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Called tool(s):\n{calls}")
+}
+
+fn format_tool_result_messages(
+    tool_calls: &[ToolCall],
+    outcome: &AgentOutcome,
+    console_entries: &[ConsoleEntry],
+) -> Vec<ToolResultMessage> {
+    let content = format_tool_result_content(tool_calls, outcome, console_entries);
+    tool_calls
+        .iter()
+        .map(|tool_call| ToolResultMessage {
+            call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            success: !outcome
+                .trace_entries
+                .iter()
+                .rev()
+                .take(tool_calls.len())
+                .any(|entry| entry.result.starts_with("failed:")),
+            content: content.clone(),
+        })
+        .collect()
+}
+
+fn format_tool_result_content(
+    tool_calls: &[ToolCall],
+    outcome: &AgentOutcome,
+    console_entries: &[ConsoleEntry],
+) -> String {
+    let mut sections = Vec::new();
+    sections.push("Tool results are available. Use them to continue the task.".to_owned());
+    sections.push(tool_call_summary_message(tool_calls));
+    if !console_entries.is_empty() {
+        let console = console_entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "[{}] {}",
+                    entry.source.subsystem,
+                    truncate_tool_result(&entry.message)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        sections.push(format!("Console output:\n{console}"));
+    }
+    if !outcome.trace_entries.is_empty() {
+        let trace = outcome
+            .trace_entries
+            .iter()
+            .rev()
+            .take(tool_calls.len())
+            .rev()
+            .map(|entry| format!("- {}: {}", entry.tool, entry.result))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("Trace:\n{trace}"));
+    }
+    sections.join("\n\n")
+}
+
+fn truncate_tool_result(message: &str) -> String {
+    const MAX_TOOL_RESULT_CHARS: usize = 12_000;
+    if message.len() <= MAX_TOOL_RESULT_CHARS {
+        return message.to_owned();
+    }
+    let mut end = MAX_TOOL_RESULT_CHARS;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[truncated {} additional bytes]",
+        &message[..end],
+        message.len() - end
+    )
+}
+
 fn operation_access(operation: &AgentOperation) -> OperationAccess {
     match operation {
         AgentOperation::ReadFile { .. }
@@ -4519,6 +4796,31 @@ mod tests {
         }
     }
 
+    struct MultiTurnStubModel {
+        responses: std::sync::Mutex<Vec<AiResponse>>,
+        requests: std::sync::Mutex<Vec<AiRequest>>,
+    }
+
+    impl MultiTurnStubModel {
+        fn new(responses: Vec<AiResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AiModel for MultiTurnStubModel {
+        fn chat(&self, request: AiRequest) -> EngineResult<AiResponse> {
+            self.requests.lock().unwrap().push(request);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err(EngineError::other("no stub response available"));
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
     fn temp_project_context() -> ProjectContext {
         use engine_ecs::ProjectManifest;
 
@@ -4869,6 +5171,139 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("create_object requires write permission"));
+    }
+
+    #[test]
+    fn safe_tool_result_is_sent_to_followup_model_turn() {
+        let root =
+            std::env::temp_dir().join(format!("varg-ai-tool-followup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ctx = temp_project_context_at(root.clone());
+        std::fs::write(root.join("README.md"), "Quest facts: spawn at dawn.").unwrap();
+
+        let mut session = AgentSession::new(ctx).unwrap();
+        let request =
+            session.prepare_request("Summarize README.md", &[], Some(ThinkingEffort::Off));
+        let model = MultiTurnStubModel::new(vec![
+            AiResponse {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "read-1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({ "path": "README.md" }),
+                }],
+            },
+            AiResponse {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "complete-1".into(),
+                    name: "complete".into(),
+                    arguments: serde_json::json!({
+                        "summary": "README says to spawn at dawn."
+                    }),
+                }],
+            },
+        ]);
+
+        let response = session
+            .respond_with_tool_results_streaming(
+                &model,
+                request,
+                PermissionPolicy::read_only(),
+                &mut |_| {},
+            )
+            .unwrap();
+
+        assert_eq!(response.resolved_tool_calls.len(), 1);
+        assert_eq!(response.resolved_tool_results.len(), 1);
+        assert_eq!(response.resolved_tool_results[0].call_id, "read-1");
+        assert_eq!(response.resolved_tool_results[0].tool_name, "read_file");
+        assert!(response.resolved_tool_results[0].success);
+        assert_eq!(response.tool_calls.len(), 1);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let followup = &requests[1];
+        assert!(
+            followup
+                .messages
+                .iter()
+                .any(|message| message.content.contains("Quest facts: spawn at dawn."))
+        );
+        assert!(
+            followup
+                .messages
+                .iter()
+                .any(|message| message.content.contains("call_id=read-1"))
+        );
+
+        let plan = session
+            .plan_from_tool_calls(
+                &response.tool_calls,
+                &response.content,
+                PermissionPolicy::read_only(),
+            )
+            .unwrap();
+        assert!(matches!(
+            plan.operations[0].operation,
+            AgentOperation::Complete { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn task_tool_updates_do_not_stop_tool_result_continuation() {
+        let mut session = AgentSession::new(temp_project_context()).unwrap();
+        let request = session.prepare_request(
+            "Track the work, then continue.",
+            &[],
+            Some(ThinkingEffort::Off),
+        );
+        let model = MultiTurnStubModel::new(vec![
+            AiResponse {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "task-1".into(),
+                    name: "create_task".into(),
+                    arguments: serde_json::json!({
+                        "id": "inspect-fps",
+                        "title": "Inspect FPS script and scene"
+                    }),
+                }],
+            },
+            AiResponse {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "complete-1".into(),
+                    name: "complete".into(),
+                    arguments: serde_json::json!({
+                        "summary": "Task card created and planning continued."
+                    }),
+                }],
+            },
+        ]);
+
+        let response = session
+            .respond_with_tool_results_streaming(
+                &model,
+                request,
+                PermissionPolicy::read_only(),
+                &mut |_| {},
+            )
+            .unwrap();
+
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert_eq!(response.resolved_tool_calls.len(), 1);
+        assert_eq!(response.resolved_tool_results[0].call_id, "task-1");
+        assert!(matches!(
+            response.resolved_operations[0],
+            AgentOperation::CreateTask { .. }
+        ));
+        assert_eq!(response.tool_calls[0].name, "complete");
     }
 
     #[test]

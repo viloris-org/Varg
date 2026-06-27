@@ -506,6 +506,52 @@ impl EditorHost {
         }))
     }
 
+    pub(crate) fn project_create_animation(&mut self, params: &Value) -> EngineResult<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let content = varg_animation_template(name);
+        let (asset_path, full_path) =
+            write_project_asset(project, &format!("animations/{name}.vasset"), &content)?;
+        project.rescan_assets()?;
+        push_created_asset_console(&mut self.console, "animation", &full_path);
+
+        Ok(serde_json::json!({
+            "path": asset_path,
+            "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    pub(crate) fn project_create_audio_bus(&mut self, params: &Value) -> EngineResult<Value> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| EngineError::config("missing 'name'"))?;
+        validate_file_name(name)?;
+
+        let Some(project) = self.shell.project_mut() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let content = varg_audio_bus_template(name);
+        let (asset_path, full_path) =
+            write_project_asset(project, &format!("audio/{name}.vasset"), &content)?;
+        project.rescan_assets()?;
+        push_created_asset_console(&mut self.console, "audio bus", &full_path);
+
+        Ok(serde_json::json!({
+            "path": asset_path,
+            "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
     pub(crate) fn project_create_prefab(&mut self, params: &Value) -> EngineResult<Value> {
         let name = params
             .get("name")
@@ -526,6 +572,100 @@ impl EditorHost {
         Ok(serde_json::json!({
             "path": asset_path,
             "full_path": full_path.to_string_lossy(),
+        }))
+    }
+
+    pub(crate) fn project_get_settings_summary(&mut self, _params: &Value) -> EngineResult<Value> {
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let build_path = project.root.join(&project.manifest.build_config);
+        let build = std::fs::read_to_string(&build_path)
+            .ok()
+            .and_then(|text| toml::from_str::<engine_ecs::BuildConfiguration>(&text).ok());
+
+        Ok(serde_json::json!({
+            "project": {
+                "name": project.manifest.name.clone(),
+                "root": project.root.to_string_lossy(),
+                "asset_root": project.manifest.asset_root.clone(),
+                "default_scene": project.manifest.default_scene.clone(),
+                "script_roots": project.manifest.script_roots.clone(),
+                "build_config": project.manifest.build_config.clone(),
+            },
+            "build": build.map(|build| serde_json::json!({
+                "target": build.target,
+                "release": build.release,
+                "features": build.features,
+                "render": {
+                    "quality": build.render.quality,
+                    "upscaler": build.render.upscaler,
+                    "dynamic_resolution": build.render.dynamic_resolution,
+                    "target_fps": build.render.target_fps,
+                    "min_render_scale_percent": build.render.min_render_scale_percent,
+                    "max_render_scale_percent": build.render.max_render_scale_percent,
+                    "sharpness_percent": build.render.sharpness_percent,
+                    "anti_aliasing": build.render.anti_aliasing,
+                }
+            })),
+        }))
+    }
+
+    pub(crate) fn project_version_control_status(
+        &mut self,
+        _params: &Value,
+    ) -> EngineResult<Value> {
+        let Some(project) = self.shell.project() else {
+            return Err(EngineError::config("no project open"));
+        };
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&project.root)
+            .arg("status")
+            .arg("--porcelain=v1")
+            .output();
+
+        let Ok(output) = output else {
+            return Ok(serde_json::json!({
+                "available": false,
+                "branch": null,
+                "entries": [],
+            }));
+        };
+
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&project.root)
+            .arg("branch")
+            .arg("--show-current")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|branch| branch.trim().to_owned())
+            .filter(|branch| !branch.is_empty());
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let entries = stdout
+            .lines()
+            .filter_map(|line| {
+                if line.len() < 4 {
+                    return None;
+                }
+                let status = line[..2].trim();
+                let path = line[3..].to_owned();
+                Some(serde_json::json!({
+                    "status": if status.is_empty() { "modified" } else { status },
+                    "path": path,
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!({
+            "available": output.status.success(),
+            "branch": branch,
+            "entries": entries,
         }))
     }
 

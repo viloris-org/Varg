@@ -1,6 +1,39 @@
 use crate::*;
 
 impl EditorHost {
+    pub(crate) fn performance_get_snapshot(&mut self, _params: &Value) -> EngineResult<Value> {
+        let project = self.shell.project();
+        let (entity_count, component_count) = project
+            .map(|project| {
+                project.scene.objects().iter().fold(
+                    (0usize, 0usize),
+                    |(objects, components), (_, object)| {
+                        (objects + 1, components + object.components.len())
+                    },
+                )
+            })
+            .unwrap_or((0, 0));
+        let asset_count = project
+            .map(|project| project.sorted_assets().len())
+            .unwrap_or(0);
+        let problem_count = self
+            .console
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.level, ConsoleLevel::Warn | ConsoleLevel::Error))
+            .count();
+
+        Ok(serde_json::json!({
+            "entity_count": entity_count,
+            "component_count": component_count,
+            "asset_count": asset_count,
+            "problem_count": problem_count,
+            "scene_version": self.scene_version,
+            "play_version": self.play_version,
+            "playing": self.play_runtime.is_some(),
+        }))
+    }
+
     pub(crate) fn console_get_entries(&mut self, _params: &Value) -> EngineResult<Value> {
         let entries: Vec<Value> = self
             .console

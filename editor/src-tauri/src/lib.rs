@@ -620,7 +620,8 @@ pub(crate) struct CompletedCopilotRequest {
     original_prompt: String,
     response: Result<String, String>,
     tool_calls: Vec<engine_ai::ToolCall>,
-    cached_context: engine_editor::ProjectContext,
+    resolved_operations: Vec<engine_ai::AgentOperation>,
+    cached_context: Option<engine_editor::ProjectContext>,
     knowledge_entries_used: usize,
     approval_mode: CopilotApprovalMode,
 }
@@ -1353,8 +1354,12 @@ impl EditorHost {
             "project/import_file" => self.project_import_file(params),
             "project/create_script" => self.project_create_script(params),
             "project/create_material" => self.project_create_material(params),
+            "project/create_animation" => self.project_create_animation(params),
+            "project/create_audio_bus" => self.project_create_audio_bus(params),
             "project/create_prefab" => self.project_create_prefab(params),
             "project/create_scene" => self.project_create_scene(params),
+            "project/get_settings_summary" => self.project_get_settings_summary(params),
+            "project/version_control_status" => self.project_version_control_status(params),
             "project/list_asset_references" => self.project_list_asset_references(params),
             "project/rename_asset" => self.project_rename_asset(params),
             "project/delete_asset" => self.project_delete_asset(params),
@@ -1413,6 +1418,7 @@ impl EditorHost {
             "console/get_entries" => self.console_get_entries(params),
             "console/clear" => self.console_clear(params),
             "console/push_entry" => self.console_push_entry(params),
+            "performance/get_snapshot" => self.performance_get_snapshot(params),
 
             // ── Viewport ──
             "viewport/readback" => self.viewport_readback(params),
@@ -1714,14 +1720,26 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
     let model = create_quest_model_from_prepared(prepared.model_provider)?;
     let first_action_started_at = Instant::now();
     let mut planning_trace = QuestModelTraceCapture::default();
-    let plan = session.plan_with_history_streaming(
-        model.as_ref(),
+    let plan_request = session.prepare_request(
         &prompt,
         &[],
-        PermissionPolicy::worktree_write(),
         parse_thinking_effort(&detail.record.model_config.thinking_effort),
+    );
+    let plan_response = session.respond_with_tool_results_streaming(
+        model.as_ref(),
+        plan_request,
+        PermissionPolicy::worktree_write(),
         &mut |delta| planning_trace.push(delta),
     )?;
+    let plan = if plan_response.tool_calls.is_empty() {
+        session.plan_from_response(&plan_response.content, PermissionPolicy::worktree_write())?
+    } else {
+        session.plan_from_tool_calls(
+            &plan_response.tool_calls,
+            &plan_response.content,
+            PermissionPolicy::worktree_write(),
+        )?
+    };
     quest_store.write_thinking_trace(
         id,
         "initial-plan",
@@ -1798,14 +1816,27 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
         let repair_started_at = Instant::now();
         let repair_trace_id = format!("repair-plan-{repair_attempts}");
         let mut repair_trace = QuestModelTraceCapture::default();
-        let repair_plan = session.plan_with_history_streaming(
-            model.as_ref(),
+        let repair_request = session.prepare_request(
             &repair_prompt,
             &[],
-            PermissionPolicy::worktree_write(),
             parse_thinking_effort(&detail.record.model_config.thinking_effort),
+        );
+        let repair_response = session.respond_with_tool_results_streaming(
+            model.as_ref(),
+            repair_request,
+            PermissionPolicy::worktree_write(),
             &mut |delta| repair_trace.push(delta),
         )?;
+        let repair_plan = if repair_response.tool_calls.is_empty() {
+            session
+                .plan_from_response(&repair_response.content, PermissionPolicy::worktree_write())?
+        } else {
+            session.plan_from_tool_calls(
+                &repair_response.tool_calls,
+                &repair_response.content,
+                PermissionPolicy::worktree_write(),
+            )?
+        };
         quest_store.write_thinking_trace(
             id,
             &repair_trace_id,
@@ -2350,6 +2381,36 @@ fn varg_material_template(name: &str) -> String {
     baseColor: Color("#7aa2ff")
     roughness: 0.7
     metallic: 0.0
+}}
+"##
+    )
+}
+
+fn varg_animation_template(name: &str) -> String {
+    format!(
+        r##"animation {name} {{
+    duration: 1.0
+    looping: false
+
+    track "Transform.position" {{
+        key 0.0: Vec3(0, 0, 0)
+        key 1.0: Vec3(0, 1, 0)
+    }}
+}}
+"##
+    )
+}
+
+fn varg_audio_bus_template(name: &str) -> String {
+    format!(
+        r##"audio_bus {name} {{
+    volume: 1.0
+    muted: false
+    solo: false
+
+    send "Master" {{
+        gain: 1.0
+    }}
 }}
 "##
     )

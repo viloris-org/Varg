@@ -5,6 +5,7 @@
 
 use crate::{
     AiModel, AiRequest, AiResponse, AiStreamDelta, ChatMessage, ChatRole, ToolCall, ToolCallDelta,
+    ToolResultMessage,
 };
 use engine_core::{EngineError, EngineResult};
 use std::collections::HashMap;
@@ -484,6 +485,14 @@ fn messages_to_responses_input(messages: &[ChatMessage]) -> Vec<serde_json::Valu
         .iter()
         .filter(|message| message.role != ChatRole::System)
         .map(|message| {
+            if let Some(tool_result) = ToolResultMessage::from_chat_message(message) {
+                return serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": tool_result.call_id,
+                    "output": format!("success={}\n{}", tool_result.success, tool_result.content),
+                });
+            }
+
             let content_type = if message.role == ChatRole::Assistant {
                 "output_text"
             } else {
@@ -1194,6 +1203,26 @@ mod tests {
         .unwrap();
         assert_eq!(disabled["thinking"]["type"], "disabled");
         assert!(disabled.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn responses_input_preserves_tool_results_as_function_call_output() {
+        let tool_result = ToolResultMessage {
+            call_id: "call-read".into(),
+            tool_name: "read_file".into(),
+            success: true,
+            content: "README contents".into(),
+        };
+
+        let input = messages_to_responses_input(&[
+            ChatMessage::user("inspect README"),
+            tool_result.to_chat_message(),
+        ]);
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call-read");
+        assert_eq!(input[1]["output"], "success=true\nREADME contents");
     }
 
     #[test]

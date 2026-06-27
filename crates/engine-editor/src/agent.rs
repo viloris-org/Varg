@@ -2,7 +2,7 @@
 
 //! Optional agent tooling contracts for sandbox, worktree, transaction, and trace smoke paths.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use engine_core::{EngineError, EngineResult};
 
@@ -99,6 +99,82 @@ impl Default for PermissionPolicy {
     }
 }
 
+/// Structured external command requested by an agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCommand {
+    /// Command argv. The first item is the executable name.
+    pub argv: Vec<String>,
+    /// Working directory for the command.
+    pub cwd: PathBuf,
+    /// Paths the command is expected to read or write.
+    pub touched_paths: Vec<PathBuf>,
+    /// Whether the command needs outbound network access.
+    pub network_required: bool,
+}
+
+impl AgentCommand {
+    /// Creates a structured command request.
+    pub fn new(argv: impl IntoIterator<Item = impl Into<String>>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            argv: argv.into_iter().map(Into::into).collect(),
+            cwd: cwd.into(),
+            touched_paths: Vec::new(),
+            network_required: false,
+        }
+    }
+
+    /// Adds expected touched paths.
+    pub fn with_touched_paths(
+        mut self,
+        paths: impl IntoIterator<Item = impl Into<PathBuf>>,
+    ) -> Self {
+        self.touched_paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Marks whether the command needs outbound network access.
+    pub const fn with_network_required(mut self, required: bool) -> Self {
+        self.network_required = required;
+        self
+    }
+}
+
+/// Deterministic risk classification for an agent command request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCommandRisk {
+    /// Routine command inside the sandbox, such as validation or formatting.
+    Low,
+    /// Command is not allowlisted but has no obvious sandbox escape.
+    Medium,
+    /// Command is destructive or writes outside the sandbox.
+    High,
+    /// Command requests network, shell/interpreter execution, or invalid argv.
+    Critical,
+}
+
+/// Authorization decision for a structured agent command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentCommandAuthorization {
+    /// The command may run under the current sandbox policy.
+    AllowSandboxed,
+    /// The command requires an explicit user or organization approval.
+    RequiresApproval {
+        /// Deterministic risk classification.
+        risk: AgentCommandRisk,
+        /// Why approval is required.
+        reason: String,
+        /// Codex-style argv prefix that could be approved for future runs.
+        suggested_prefix_rule: Option<Vec<String>>,
+    },
+    /// The command is malformed or cannot be represented safely.
+    Deny {
+        /// Deterministic risk classification.
+        risk: AgentCommandRisk,
+        /// Why the command is denied.
+        reason: String,
+    },
+}
+
 /// Sandbox boundary for file, network, process, and environment access.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SandboxPolicy {
@@ -130,7 +206,11 @@ impl SandboxPolicy {
 
     /// Returns true when a path is inside an allowed root.
     pub fn allows_path(&self, path: &Path) -> bool {
-        self.allowed_roots.iter().any(|root| path.starts_with(root))
+        let path = normalize_path(path);
+        self.allowed_roots
+            .iter()
+            .map(|root| normalize_path(root))
+            .any(|root| path.starts_with(root))
     }
 
     /// Returns true when the command starts with an allowlisted prefix.
@@ -148,6 +228,150 @@ impl SandboxPolicy {
     pub const fn allows_network(&self) -> bool {
         self.network_enabled
     }
+
+    /// Authorizes a structured command request.
+    ///
+    /// This mirrors the Codex-style command gate used by Varg's AI
+    /// specification: commands are argv arrays, allow rules are argv prefixes,
+    /// and sandbox escapes become explicit approval requests.
+    pub fn authorize_command(&self, command: &AgentCommand) -> AgentCommandAuthorization {
+        if command.argv.is_empty() {
+            return AgentCommandAuthorization::Deny {
+                risk: AgentCommandRisk::Critical,
+                reason: "agent command argv must not be empty".into(),
+            };
+        }
+
+        if !self.allows_path(&command.cwd) {
+            return AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::Critical,
+                reason: format!(
+                    "agent command cwd '{}' is outside the sandbox",
+                    command.cwd.display()
+                ),
+                suggested_prefix_rule: None,
+            };
+        }
+
+        if let Some(path) = command
+            .touched_paths
+            .iter()
+            .map(|path| command_path(&command.cwd, path))
+            .find(|path| !self.allows_path(path))
+        {
+            return AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::High,
+                reason: format!(
+                    "agent command touches '{}' outside the sandbox",
+                    path.display()
+                ),
+                suggested_prefix_rule: None,
+            };
+        }
+
+        if command.network_required && !self.network_enabled {
+            return AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::Critical,
+                reason: "agent command requires network but sandbox network is disabled".into(),
+                suggested_prefix_rule: suggested_prefix_rule(&command.argv),
+            };
+        }
+
+        if self.allows_command(&command.argv) {
+            return AgentCommandAuthorization::AllowSandboxed;
+        }
+
+        let risk = classify_command(&command.argv);
+        AgentCommandAuthorization::RequiresApproval {
+            risk,
+            reason: match risk {
+                AgentCommandRisk::Critical => {
+                    "agent command uses a shell or interpreter and needs explicit approval".into()
+                }
+                AgentCommandRisk::High => {
+                    "agent command appears destructive and needs explicit approval".into()
+                }
+                AgentCommandRisk::Medium | AgentCommandRisk::Low => {
+                    "agent command is not allowlisted by the sandbox policy".into()
+                }
+            },
+            suggested_prefix_rule: if matches!(
+                risk,
+                AgentCommandRisk::Critical | AgentCommandRisk::High
+            ) {
+                None
+            } else {
+                suggested_prefix_rule(&command.argv)
+            },
+        }
+    }
+}
+
+fn classify_command(argv: &[String]) -> AgentCommandRisk {
+    let executable = argv[0].as_str();
+    if matches!(
+        executable,
+        "bash" | "sh" | "zsh" | "fish" | "python" | "python3" | "node" | "bun" | "deno"
+    ) {
+        return AgentCommandRisk::Critical;
+    }
+
+    if matches!(
+        executable,
+        "rm" | "rmdir" | "git" | "cargo" | "npm" | "pnpm" | "yarn"
+    ) && argv.iter().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-rf"
+                | "-fr"
+                | "--force"
+                | "reset"
+                | "clean"
+                | "publish"
+                | "login"
+                | "owner"
+                | "unpublish"
+        )
+    }) {
+        return AgentCommandRisk::High;
+    }
+
+    AgentCommandRisk::Medium
+}
+
+fn suggested_prefix_rule(argv: &[String]) -> Option<Vec<String>> {
+    if argv.is_empty() {
+        return None;
+    }
+
+    let len = argv.len().min(2);
+    Some(argv[..len].to_vec())
+}
+
+fn command_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        normalize_path(&cwd.join(path))
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
 }
 
 /// Metadata for an isolated agent worktree.
@@ -289,9 +513,101 @@ mod tests {
 
         assert!(sandbox.allows_path(&root.join("src/lib.rs")));
         assert!(!sandbox.allows_path(Path::new("/etc/passwd")));
+        assert!(!sandbox.allows_path(Path::new("/project/../etc/passwd")));
         assert!(sandbox.allows_command(&["cargo".into(), "test".into(), "--workspace".into()]));
         assert!(!sandbox.allows_command(&["cargo".into(), "publish".into()]));
         assert!(!sandbox.allows_network());
+    }
+
+    #[test]
+    fn sandbox_authorizes_allowlisted_structured_command() {
+        let root = PathBuf::from("/project");
+        let mut sandbox = SandboxPolicy::new([root.clone()]);
+        sandbox.allow_command(["cargo", "test"]);
+
+        let command = AgentCommand::new(["cargo", "test", "--workspace"], root.clone())
+            .with_touched_paths([root.join("target")]);
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::AllowSandboxed
+        );
+    }
+
+    #[test]
+    fn sandbox_resolves_relative_touched_paths_from_command_cwd() {
+        let root = PathBuf::from("/project");
+        let mut sandbox = SandboxPolicy::new([root.clone()]);
+        sandbox.allow_command(["cargo", "test"]);
+
+        let command = AgentCommand::new(["cargo", "test"], root.join("crates/engine-editor"))
+            .with_touched_paths([PathBuf::from("../../target")]);
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::AllowSandboxed
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_approval_for_network_command_when_network_disabled() {
+        let root = PathBuf::from("/project");
+        let sandbox = SandboxPolicy::new([root.clone()]);
+        let command = AgentCommand::new(["git", "fetch"], root).with_network_required(true);
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::Critical,
+                reason: "agent command requires network but sandbox network is disabled".into(),
+                suggested_prefix_rule: Some(vec!["git".into(), "fetch".into()]),
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_approval_for_paths_outside_allowed_roots() {
+        let sandbox = SandboxPolicy::new([PathBuf::from("/project")]);
+        let command = AgentCommand::new(["cargo", "test"], "/project")
+            .with_touched_paths([PathBuf::from("/tmp/outside")]);
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::High,
+                reason: "agent command touches '/tmp/outside' outside the sandbox".into(),
+                suggested_prefix_rule: None,
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_requires_explicit_approval_for_destructive_commands() {
+        let sandbox = SandboxPolicy::new([PathBuf::from("/project")]);
+        let command = AgentCommand::new(["rm", "-rf", "target"], "/project");
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::RequiresApproval {
+                risk: AgentCommandRisk::High,
+                reason: "agent command appears destructive and needs explicit approval".into(),
+                suggested_prefix_rule: None,
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_denies_empty_command() {
+        let sandbox = SandboxPolicy::new([PathBuf::from("/project")]);
+        let command = AgentCommand::new(Vec::<String>::new(), "/project");
+
+        assert_eq!(
+            sandbox.authorize_command(&command),
+            AgentCommandAuthorization::Deny {
+                risk: AgentCommandRisk::Critical,
+                reason: "agent command argv must not be empty".into(),
+            }
+        );
     }
 
     #[test]

@@ -365,7 +365,7 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
         ),
         meta(
             "skill_search",
-            "Search Varg project skills in .varg/skills and user-global skills in ~/.varg/skills.",
+            "Search built-in Varg system skills, project skills in .varg/skills, and user-global skills in ~/.varg/skills.",
             ToolExposure::Direct,
             ToolType::Skill,
             &[ToolStage::Inspect],
@@ -377,6 +377,7 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
                 "skills",
                 "instructions",
                 "references",
+                "system skills",
                 "project skills",
                 "global skills",
             ],

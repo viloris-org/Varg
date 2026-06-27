@@ -1,8 +1,9 @@
 //! Varg skill discovery and scoped skill reading.
 //!
-//! Project skills live under `<project>/.varg/skills`; user-global skills live
-//! under `~/.varg/skills`. Project skills shadow global skills with the same
-//! name during search, but resolved IDs keep the source explicit.
+//! System skills are compiled into the engine. Project skills live under
+//! `<project>/.varg/skills`; user-global skills live under `~/.varg/skills`.
+//! Project skills shadow global and system skills with the same name during
+//! search, but resolved IDs keep the source explicit.
 
 use std::{
     collections::BTreeMap,
@@ -24,6 +25,8 @@ pub enum SkillSource {
     Project,
     /// Skill stored in the user's global Varg home at `~/.varg/skills`.
     Global,
+    /// Skill compiled into Varg Engine.
+    System,
 }
 
 impl SkillSource {
@@ -31,6 +34,7 @@ impl SkillSource {
         match self {
             Self::Project => "project",
             Self::Global => "global",
+            Self::System => "system",
         }
     }
 
@@ -38,6 +42,7 @@ impl SkillSource {
         match value {
             "project" => Some(Self::Project),
             "global" => Some(Self::Global),
+            "system" => Some(Self::System),
             _ => None,
         }
     }
@@ -65,6 +70,7 @@ impl SkillRegistryConfig {
         match source {
             SkillSource::Project => self.project_root.join(".varg/skills"),
             SkillSource::Global => self.global_varg_root.join("skills"),
+            SkillSource::System => PathBuf::new(),
         }
     }
 }
@@ -74,7 +80,7 @@ impl SkillRegistryConfig {
 pub struct SkillSearchQuery {
     /// Natural-language search text.
     pub query: String,
-    /// Optional source filter: `project` or `global`.
+    /// Optional source filter: `project`, `global`, or `system`.
     #[serde(default)]
     pub source: Option<String>,
     /// Maximum result count.
@@ -124,6 +130,31 @@ pub struct SkillReadResult {
     pub content: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SystemSkill {
+    name: &'static str,
+    content: &'static str,
+}
+
+const SYSTEM_SKILLS: &[SystemSkill] = &[
+    SystemSkill {
+        name: "playable-prototype",
+        content: include_str!("system_skills/playable-prototype/SKILL.md"),
+    },
+    SystemSkill {
+        name: "combat-encounter",
+        content: include_str!("system_skills/combat-encounter/SKILL.md"),
+    },
+    SystemSkill {
+        name: "level-layout",
+        content: include_str!("system_skills/level-layout/SKILL.md"),
+    },
+    SystemSkill {
+        name: "game-feel-juice",
+        content: include_str!("system_skills/game-feel-juice/SKILL.md"),
+    },
+];
+
 #[derive(Clone, Debug)]
 struct SkillRecord {
     id: String,
@@ -139,14 +170,14 @@ pub fn skill_search_definition() -> ToolDefinition {
     ToolDefinition {
         name: "skill_search".into(),
         description:
-            "Search Varg project skills in .varg/skills and user-global skills in ~/.varg/skills."
+            "Search built-in Varg system skills, project skills in .varg/skills, and user-global skills in ~/.varg/skills."
                 .into(),
         parameters: serde_json::json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "query": { "type": "string", "description": "Natural-language search text" },
-                "source": { "type": "string", "description": "Optional source filter: project or global" },
+                "source": { "type": "string", "description": "Optional source filter: project, global, or system" },
                 "limit": { "type": "integer", "description": "Maximum number of results" }
             },
             "required": ["query"]
@@ -233,6 +264,26 @@ pub fn read_skill(
     request: &SkillReadRequest,
 ) -> EngineResult<SkillReadResult> {
     let (source, name) = parse_skill_id(&request.id)?;
+    if source == SkillSource::System {
+        let relative = request.path.as_deref().unwrap_or("SKILL.md");
+        let safe_relative = validate_skill_relative_path(relative)?;
+        if safe_relative != PathBuf::from("SKILL.md") {
+            return Err(EngineError::config(
+                "system skill reference is not embedded in this build",
+            ));
+        }
+        let skill = SYSTEM_SKILLS
+            .iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| EngineError::config(format!("unknown system skill: {name}")))?;
+        return Ok(SkillReadResult {
+            id: request.id.clone(),
+            source,
+            path: "SKILL.md".into(),
+            content: skill.content.to_owned(),
+        });
+    }
+
     let skill_root = config.source_root(source).join(&name);
     let relative = request.path.as_deref().unwrap_or("SKILL.md");
     let safe_relative = validate_skill_relative_path(relative)?;
@@ -257,6 +308,13 @@ pub fn read_skill(
 
 fn discover_skills(config: &SkillRegistryConfig) -> EngineResult<Vec<SkillRecord>> {
     let mut records_by_name: BTreeMap<String, Vec<SkillRecord>> = BTreeMap::new();
+    for record in system_skill_records()? {
+        records_by_name
+            .entry(record.name.clone())
+            .or_default()
+            .push(record);
+    }
+
     for source in [SkillSource::Project, SkillSource::Global] {
         for record in scan_skill_root(config, source)? {
             records_by_name
@@ -269,15 +327,29 @@ fn discover_skills(config: &SkillRegistryConfig) -> EngineResult<Vec<SkillRecord
     let mut records = Vec::new();
     for mut group in records_by_name.into_values() {
         group.sort_by_key(|record| record.source);
-        let has_project = group
-            .iter()
-            .any(|record| record.source == SkillSource::Project);
-        for mut record in group {
-            record.shadows = record.source == SkillSource::Project && has_project;
+        for index in 0..group.len() {
+            let mut record = group[index].clone();
+            record.shadows = index == 0 && group.len() > 1;
             records.push(record);
         }
     }
     Ok(records)
+}
+
+fn system_skill_records() -> EngineResult<Vec<SkillRecord>> {
+    SYSTEM_SKILLS
+        .iter()
+        .map(|skill| {
+            Ok(SkillRecord {
+                id: format!("system://skills/{}", skill.name),
+                name: skill.name.to_owned(),
+                source: SkillSource::System,
+                display_path: format!("system_skills/{}/SKILL.md", skill.name),
+                description: extract_description_from_content(skill.content),
+                shadows: false,
+            })
+        })
+        .collect()
 }
 
 fn scan_skill_root(
@@ -313,6 +385,7 @@ fn scan_skill_root(
         let display_path = match source {
             SkillSource::Project => format!(".varg/skills/{name}/SKILL.md"),
             SkillSource::Global => format!("skills/{name}/SKILL.md"),
+            SkillSource::System => format!("system_skills/{name}/SKILL.md"),
         };
         records.push(SkillRecord {
             id: format!("{}://skills/{name}", source.as_str()),
@@ -331,6 +404,10 @@ fn extract_description(path: &Path) -> EngineResult<String> {
         path: path.to_path_buf(),
         source,
     })?;
+    Ok(extract_description_from_content(&content))
+}
+
+fn extract_description_from_content(content: &str) -> String {
     let mut heading = None;
     for line in content.lines() {
         let trimmed = line.trim();
@@ -342,10 +419,10 @@ fn extract_description(path: &Path) -> EngineResult<String> {
             continue;
         }
         if !trimmed.starts_with('#') {
-            return Ok(trimmed.to_owned());
+            return trimmed.to_owned();
         }
     }
-    Ok(heading.unwrap_or_else(|| "Varg skill".to_owned()))
+    heading.unwrap_or_else(|| "Varg skill".to_owned())
 }
 
 fn parse_skill_id(id: &str) -> EngineResult<(SkillSource, String)> {
@@ -364,6 +441,7 @@ fn parse_source(value: &str) -> EngineResult<SkillSource> {
     match normalize(value).as_str() {
         "project" => Ok(SkillSource::Project),
         "global" => Ok(SkillSource::Global),
+        "system" => Ok(SkillSource::System),
         other => Err(EngineError::config(format!(
             "unknown skill source: {other}"
         ))),
@@ -522,6 +600,78 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid skill read path"));
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(global);
+    }
+
+    #[test]
+    fn system_game_making_skill_keywords_are_searchable() {
+        let project = temp_root("game-skill-project");
+        let global = temp_root("game-skill-global");
+        let config = SkillRegistryConfig::new(&project, &global);
+
+        let prototype = search_skills(
+            &config,
+            &SkillSearchQuery {
+                query: "playable game loop feedback win fail".into(),
+                ..SkillSearchQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(prototype[0].id, "system://skills/playable-prototype");
+        assert_eq!(prototype[0].source, SkillSource::System);
+
+        let combat = search_skills(
+            &config,
+            &SkillSearchQuery {
+                query: "combat enemy cooldown damage arena".into(),
+                ..SkillSearchQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(combat[0].id, "system://skills/combat-encounter");
+        assert_eq!(combat[0].source, SkillSource::System);
+
+        let read = read_skill(
+            &config,
+            &SkillReadRequest {
+                id: "system://skills/playable-prototype".into(),
+                path: None,
+            },
+        )
+        .unwrap();
+        assert!(read.content.contains("Prototype Contract"));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(global);
+    }
+
+    #[test]
+    fn project_skill_shadows_system_skill_with_same_name() {
+        let project = temp_root("system-shadow-project");
+        let global = temp_root("system-shadow-global");
+        write_skill(
+            &project,
+            ".varg/skills",
+            "playable-prototype",
+            "# Playable Prototype\nProject-specific prototype rules.",
+        );
+        let config = SkillRegistryConfig::new(&project, &global);
+
+        let results = search_skills(
+            &config,
+            &SkillSearchQuery {
+                query: "playable prototype".into(),
+                ..SkillSearchQuery::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(results[0].id, "project://skills/playable-prototype");
+        assert_eq!(results[1].id, "system://skills/playable-prototype");
+        assert!(results[0].shadows);
+        assert!(!results[1].shadows);
+
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(global);
     }

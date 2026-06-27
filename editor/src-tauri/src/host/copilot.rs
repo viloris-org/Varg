@@ -463,12 +463,19 @@ impl EditorHost {
             prepared.mimo_config.as_ref(),
             prepared.glm_config.as_ref(),
         )?;
-        let response = model.chat_stream(prepared.request, on_delta)?;
+        let mut session = AgentSession::new(prepared.cached_context)?;
+        let response = session.respond_with_tool_results_streaming(
+            model.as_ref(),
+            prepared.request,
+            prepared.approval_mode.planning_policy(),
+            on_delta,
+        )?;
         self.finish_copilot_response_with_tools(
             &prepared.original_prompt,
             &response.content,
             &response.tool_calls,
-            prepared.cached_context,
+            &response.resolved_operations,
+            session.context,
             prepared.knowledge_entries_used,
             prepared.approval_mode,
         )
@@ -640,6 +647,7 @@ impl EditorHost {
         original_prompt: &str,
         response: &str,
         tool_calls: &[engine_ai::ToolCall],
+        resolved_operations: &[engine_ai::AgentOperation],
         cached_context: engine_editor::ProjectContext,
         knowledge_entries_used: usize,
         approval_mode: CopilotApprovalMode,
@@ -668,7 +676,10 @@ impl EditorHost {
                 engine_ai::AgentOperation::Complete { .. }
             )
         });
-        let mut task_updates = Vec::new();
+        let mut task_updates: Vec<serde_json::Value> = resolved_operations
+            .iter()
+            .filter_map(copilot_task_update)
+            .collect();
         plan.operations.retain(|planned| {
             if let Some(update) = copilot_task_update(&planned.operation) {
                 task_updates.push(update);

@@ -18,7 +18,6 @@ pub(crate) fn start_copilot_plan(
     let requests = requests.requests.clone();
     std::thread::spawn(move || {
         let original_prompt = prepared.original_prompt.clone();
-        let cached_context = prepared.cached_context;
         let knowledge_entries_used = prepared.knowledge_entries_used;
         let approval_mode = prepared.approval_mode;
         let result = engine_ai::providers::create_provider(
@@ -32,30 +31,37 @@ pub(crate) fn start_copilot_plan(
             prepared.glm_config.as_ref(),
         )
         .and_then(|model| {
-            model.chat_stream(prepared.request, &mut |delta| {
-                if requests
-                    .lock()
-                    .expect("poisoned lock")
-                    .cancelled
-                    .contains(&request_id)
-                {
-                    return;
-                }
-                let delta_payload = match &delta {
-                    engine_ai::AiStreamDelta::ToolCallDelta(tc) => {
-                        serde_json::to_string(tc).unwrap_or_default()
+            let mut session = engine_ai::AgentSession::new(prepared.cached_context)?;
+            let response = session.respond_with_tool_results_streaming(
+                model.as_ref(),
+                prepared.request,
+                approval_mode.planning_policy(),
+                &mut |delta| {
+                    if requests
+                        .lock()
+                        .expect("poisoned lock")
+                        .cancelled
+                        .contains(&request_id)
+                    {
+                        return;
                     }
-                    _ => delta.text().to_owned(),
-                };
-                let _ = app.emit(
-                    "copilot-stream",
-                    serde_json::json!({
-                        "request_id": request_id,
-                        "kind": delta.kind(),
-                        "delta": delta_payload,
-                    }),
-                );
-            })
+                    let delta_payload = match &delta {
+                        engine_ai::AiStreamDelta::ToolCallDelta(tc) => {
+                            serde_json::to_string(tc).unwrap_or_default()
+                        }
+                        _ => delta.text().to_owned(),
+                    };
+                    let _ = app.emit(
+                        "copilot-stream",
+                        serde_json::json!({
+                            "request_id": request_id,
+                            "kind": delta.kind(),
+                            "delta": delta_payload,
+                        }),
+                    );
+                },
+            )?;
+            Ok((response, session.context))
         });
         let mut request_state = requests.lock().expect("poisoned lock");
         if request_state.cancelled.remove(&request_id) {
@@ -66,9 +72,14 @@ pub(crate) fn start_copilot_plan(
             );
             return;
         }
-        let (content_result, tool_calls) = match result {
-            Ok(response) => (Ok(response.content), response.tool_calls),
-            Err(e) => (Err(e.to_string()), Vec::new()),
+        let (content_result, tool_calls, resolved_operations, cached_context) = match result {
+            Ok((response, cached_context)) => (
+                Ok(response.content),
+                response.tool_calls,
+                response.resolved_operations,
+                Some(cached_context),
+            ),
+            Err(e) => (Err(e.to_string()), Vec::new(), Vec::new(), None),
         };
         request_state.completed.insert(
             request_id.clone(),
@@ -76,6 +87,7 @@ pub(crate) fn start_copilot_plan(
                 original_prompt,
                 response: content_result,
                 tool_calls,
+                resolved_operations,
                 cached_context,
                 knowledge_entries_used,
                 approval_mode,
@@ -104,13 +116,17 @@ pub(crate) fn finish_copilot_plan(
         .remove(&request_id)
         .ok_or_else(|| "copilot request has not completed".to_owned())?;
     let response = completed.response?;
+    let cached_context = completed
+        .cached_context
+        .ok_or_else(|| "copilot request did not retain project context".to_owned())?;
     state
         .with_host(|host| {
             host.finish_copilot_response_with_tools(
                 &completed.original_prompt,
                 &response,
                 &completed.tool_calls,
-                completed.cached_context,
+                &completed.resolved_operations,
+                cached_context,
                 completed.knowledge_entries_used,
                 completed.approval_mode,
             )

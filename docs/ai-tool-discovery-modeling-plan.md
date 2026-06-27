@@ -219,14 +219,16 @@ varg-asset-pipeline
 Varg skills are split by scope:
 
 ```text
+system://skills/...       # built-in engine skills, compiled into engine-ai
 <project>/.varg/skills/   # project skills, highest priority
 ~/.varg/skills/           # user-global skills
 ```
 
-Project skills are for project-specific conventions such as asset naming,
-gameplay architecture, world style, and local scripting patterns. User-global
-skills are for reusable personal workflows and preferences that should not be
-committed into every project.
+System skills are Varg's default production guidance for game creation,
+authoring, and engine workflows. Project skills are for project-specific
+conventions such as asset naming, gameplay architecture, world style, and local
+scripting patterns. User-global skills are for reusable personal workflows and
+preferences that should not be committed into every project.
 
 Suggested project skill layout:
 
@@ -248,13 +250,15 @@ Suggested user-global skill layout:
 
 `SKILL.md` should be concise. Deeper examples and syntax references should live in referenced files and be loaded only when needed.
 
-When project and global skills have the same name, the project skill should take
-priority in search ranking. Search results must still expose resolved IDs that
+When project, global, and system skills have the same name, the project skill
+should take priority in search ranking, followed by global, then system. Search
+results must still expose resolved IDs that
 include the source, for example:
 
 ```text
 project://skills/varg-modeling
 global://skills/varg-modeling
+system://skills/playable-prototype
 ```
 
 `skill_read` should require one of these resolved IDs and an optional path inside

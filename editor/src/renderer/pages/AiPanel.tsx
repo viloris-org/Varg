@@ -1193,7 +1193,6 @@ export default function AiPanel({
   const [copilotTasks, setCopilotTasks] = useState<CopilotTask[]>([]);
   const [taskCardVisible, setTaskCardVisible] = useState(false);
   const [taskCardCollapsed, setTaskCardCollapsed] = useState(false);
-  const continuationDepthRef = useRef(0);
   const activeRequestRef = useRef(false);
   const interruptRequestedRef = useRef(false);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -1381,8 +1380,7 @@ export default function AiPanel({
       });
       addMessage('assistant', summary);
       applyTaskUpdates(result.task_updates);
-      if (result.needs_continuation && continuationDepthRef.current < 4) {
-        continuationDepthRef.current += 1;
+      if (result.needs_continuation) {
         setPendingContinuation(result.continuation_reason ?? 'Continue the original task.');
         addMessage('system', t('ai_continuing'));
       } else {
@@ -1407,7 +1405,6 @@ export default function AiPanel({
   ) => {
     if (!prompt.trim() || activeRequestRef.current) return;
 
-    if (!continuation) continuationDepthRef.current = 0;
     if (!continuation) lastPromptRef.current = prompt;
 
     activeRequestRef.current = true;
@@ -1535,8 +1532,7 @@ export default function AiPanel({
           })()
         : message));
       if (result.operations.length > 0) setWorkspaceView('changes');
-      if (result.needs_continuation && continuationDepthRef.current < 4) {
-        continuationDepthRef.current += 1;
+      if (result.needs_continuation) {
         setPendingContinuation(result.continuation_reason ?? 'Continue the original task.');
         addMessage('system', t('ai_continuing'));
       }
