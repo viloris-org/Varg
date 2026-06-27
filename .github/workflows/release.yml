@@ -74,11 +74,37 @@ jobs:
       - name: Prepare release assets
         shell: bash
         run: |
+          bundle_root="target/release/bundle"
+          if [ ! -d "$bundle_root" ]; then
+            bundle_root="editor/src-tauri/target/release/bundle"
+          fi
+          if [ ! -d "$bundle_root" ]; then
+            echo "Tauri bundle output directory not found"
+            exit 1
+          fi
+
           mkdir -p "release-assets/${{ matrix.platform }}"
+          asset_patterns=(
+            "*.AppImage"
+            "*.deb"
+            "*.rpm"
+            "*.msi"
+            "*.exe"
+            "*.dmg"
+          )
           while IFS= read -r -d '' artifact; do
             filename="$(basename "$artifact")"
             cp "$artifact" "release-assets/${{ matrix.platform }}/${{ matrix.platform }}-$filename"
-          done < <(find target/release/bundle -type f -print0)
+          done < <(
+            find "$bundle_root" -maxdepth 2 -type f \( \
+              -name "${asset_patterns[0]}" \
+              -o -name "${asset_patterns[1]}" \
+              -o -name "${asset_patterns[2]}" \
+              -o -name "${asset_patterns[3]}" \
+              -o -name "${asset_patterns[4]}" \
+              -o -name "${asset_patterns[5]}" \
+            \) -print0
+          )
 
           find "release-assets/${{ matrix.platform }}" -maxdepth 1 -type f -print
 

@@ -69,15 +69,48 @@ jobs:
         working-directory: editor
         run: bun tauri build --bundles ${{ matrix.bundles }}
 
-      - name: List build artifacts
+      - name: Prepare release assets
+        shell: bash
         run: |
-          ls -la editor/src-tauri/target/release/bundle/
+          bundle_root="target/release/bundle"
+          if [ ! -d "$bundle_root" ]; then
+            bundle_root="editor/src-tauri/target/release/bundle"
+          fi
+          if [ ! -d "$bundle_root" ]; then
+            echo "Tauri bundle output directory not found"
+            exit 1
+          fi
+
+          mkdir -p "release-assets/${{ matrix.platform }}"
+          asset_patterns=(
+            "*.AppImage"
+            "*.deb"
+            "*.rpm"
+            "*.msi"
+            "*.exe"
+            "*.dmg"
+          )
+          while IFS= read -r -d '' artifact; do
+            filename="$(basename "$artifact")"
+            cp "$artifact" "release-assets/${{ matrix.platform }}/${{ matrix.platform }}-$filename"
+          done < <(
+            find "$bundle_root" -maxdepth 2 -type f \( \
+              -name "${asset_patterns[0]}" \
+              -o -name "${asset_patterns[1]}" \
+              -o -name "${asset_patterns[2]}" \
+              -o -name "${asset_patterns[3]}" \
+              -o -name "${asset_patterns[4]}" \
+              -o -name "${asset_patterns[5]}" \
+            \) -print0
+          )
+
+          find "release-assets/${{ matrix.platform }}" -maxdepth 1 -type f -print
 
       - uses: actions/upload-artifact@v4
         with:
-          name: aster-editor-${{ matrix.platform }}
-          path: |
-            editor/src-tauri/target/release/bundle/**/*
+          name: varg-editor-${{ matrix.platform }}
+          path: release-assets/${{ matrix.platform }}/*
+          if-no-files-found: error
 
   release:
     name: Publish nightly release
@@ -89,8 +122,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: aster-editor-*
+          pattern: varg-editor-*
           path: artifacts
+          merge-multiple: true
 
       - name: Delete old nightly release
         run: gh release delete nightly --yes --cleanup-tag 2>/dev/null || true

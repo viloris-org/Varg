@@ -55,8 +55,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace
       - name: Test workspace
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
         run: cargo test --workspace
+      - name: Test workspace (Windows)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: cargo test --workspace --exclude engine-render-wgpu
+      - name: Test wgpu unit coverage (Windows)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: cargo test -p engine-render-wgpu --lib
       - name: Build runtime-min (minimal profile)
         if: ${{ !cancelled() }}
         run: cargo build -p runtime-min --no-default-features --features runtime-min
