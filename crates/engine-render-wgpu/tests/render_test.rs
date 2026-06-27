@@ -32,11 +32,6 @@ fn render_one_frame_with_debug_cube_succeeds() {
         use winit::platform::windows::EventLoopBuilderExtWindows;
         builder.with_any_thread(true);
     }
-    #[cfg(target_os = "macos")]
-    {
-        use winit::platform::macos::EventLoopBuilderExtMacOS;
-        builder.with_any_thread(true);
-    }
     let Ok(event_loop) = builder.build() else {
         eprintln!("skipping wgpu render test: failed to create event loop");
         return;

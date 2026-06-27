@@ -24,6 +24,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       RUSTC_WRAPPER: ""
+      RUSTFLAGS: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +43,7 @@ jobs:
             file \
             libssl-dev \
             libudev-dev \
+            libasound2-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \

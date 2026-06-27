@@ -7,145 +7,180 @@
 
 [English](README.md) | 简体中文 | [繁體中文](README.zh-Hant.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md)
 
-Varg 是一个 AI 原生的游戏引擎。用自然语言描述你想做的游戏，多个自治 Agent 会帮你构建——场景、逻辑、UI，全部搞定。完整的可视化编辑器也在那儿，随时供你微调、打磨、完全掌控。
+Varg 是一个实验性的游戏引擎和编辑器，围绕 Rust 运行时、Tauri/React 桌面编辑器以及 AI 辅助创作工作流构建。当前代码库重点在安全的 ECS/运行时基础、原生编辑器外壳、Varg 创作语言、项目打包，以及 Quest/Copilot 风格的编辑器自动化。
 
-![Varg Editor](docs/screenshots/editor.png)
+项目仍处于 pre-1.0 阶段。部分文档描述的是目标设计，而本 README 记录的是当前仓库中已经体现的内容。
 
-> **截图占位**——等 UI 稳定后请替换为实际编辑器截图。
+![Varg 编辑器](docs/screenshots/editor.png)
 
 ## 快速上手
+
+前提条件：
+
+- [Rust](https://rustup.rs/) 1.96 或更新版本
+- 用于编辑器前端的 [Bun](https://bun.sh/)
+- [Tauri v2 系统依赖](https://v2.tauri.app/start/prerequisites/)
+
+在 Debian/Ubuntu 类 Linux 发行版上，Tauri 依赖通常包括：
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev
+```
+
+克隆并运行编辑器：
 
 ```sh
 git clone https://github.com/viloris-org/Varg
 cd Varg
 
-# 启动编辑器
 cd editor
 bun install
 bun run dev:tauri
 ```
 
-> **前提条件：** [Rust ≥ 1.96](https://rustup.rs/)、[Bun ≥ 1.3.14](https://bun.sh/)、
-> [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。
-> Linux 用户：`sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev
-> libayatana-appindicator3-dev librsvg2-dev`
+构建 Rust workspace：
 
-## 功能特性
+```sh
+cargo build --workspace
+```
 
-- **AI 原生内核**——不是外挂的 AI 助手，而是多 Agent 集群自主规划、构建、审查你的游戏。自然语言输入，可游玩场景输出。沙箱审查保障项目安全。
-- **声明式游戏描述**——六套完整声明式系统（行为树、场景图、UI 布局、系统配置、资源清单、项目结构），让 Agent 生成结构化 JSON 而非代码。LLM 生成成功率从 ~50% 跃升至 ~90%。
-- **可视化场景编辑器**——通过直观界面放置对象、调整变换、添加组件。两全其美：让 AI 完成繁重工作，再手工打磨每个细节。
-- **实时播放模式**——点击 Play，物理和脚本开始运行；点击 Stop，零清理。编辑场景从不被修改。
-- **资源管线**——将 glTF/PNG 拖入项目面板。文件监听自动触发导入，热重载实时推送更新。
-- **可插拔渲染**——无需修改引擎代码即可切换后端。自带 WGPU。
-- **无头运行时**——同一引擎用于服务器、CI 管线或自动化构建。无需窗口。
-- **零不安全代码**——每个 crate 使用 `#![forbid(unsafe_code)]`。默认安全。
+## 当前能力
+
+- **Rust 运行时基础**：ECS、项目清单、资源、平台输入、渲染 trait、WGPU 集成、物理、音频、UI、动画、骨骼、shader、policy、AI 和打包 crate。
+- **Tauri 编辑器**：React/TypeScript 桌面应用，由 Rust 命令支持 Hub/项目工作流、视口宿主、Copilot、Quest、打包、对话框和原生窗口/面板。
+- **Varg 创作语言**：`.varg`、`.vscene`、`.vasset` 解析、诊断、MVP 脚本运行时、行为声明和 `varg-lsp` 二进制。
+- **声明式脚本实验**：`engine-script-declarative` 下的 JSON 行为、场景、UI、系统、项目和资源结构。
+- **打包管线**：`cargo xtask package` 可为桌面项目构建运行时文件夹，并校验若干未来 target/format 组合。
+- **安全 Rust 策略**：引擎 crate 使用 `#![forbid(unsafe_code)]`。
 
 ## 项目结构
 
-```
+```text
 Varg/
-├── editor/                  # Tauri 桌面应用（React + Rust）
-├── crates/
-│   ├── engine-editor/       # 编辑器工作流、服务、Agent 工具
-│   ├── engine-ecs/          # 场景、实体、变换、世界
-│   ├── engine-assets/       # 数据库、导入器、热重载
-│   ├── engine-render/       # 渲染图、设备 trait
-│   ├── engine-render-wgpu/  # WGPU 后端
-│   ├── engine-physics/      # 物理（rapier3d）
-│   ├── engine-audio/        # 音频管线
-│   ├── engine-core/         # ID、错误、数学、配置
-│   ├── engine-platform/     # 窗口、输入、文件系统
-│   ├── engine-script-rhai/  # Rhai 脚本
-│   ├── engine-animation/    # 动画系统
-│   ├── engine-ai/           # AI 规划器与系统提示
-│   ├── engine-agent-cluster/# Agent 编排
-│   ├── runtime-min/         # 组合根
-│   └── …                    # i18n、shader、policy、skeleton 等
-├── xtask/                   # 构建与自动化任务
-├── examples/                # 示例项目与场景
-└── docs/                    # 设计笔记
+├── crates/                         # 引擎和运行时 crate
+│   ├── engine-core/                # ID、错误、数学、配置
+│   ├── engine-ecs/                 # 场景、实体、变换、组件
+│   ├── engine-assets/              # 资源数据库、导入器、清单
+│   ├── engine-render/              # 渲染 trait 和共享渲染模型
+│   ├── engine-render-wgpu/         # WGPU 后端和视口实验
+│   ├── engine-platform/            # 窗口、输入、文件系统抽象
+│   ├── engine-script-varg/         # Varg 解析器、诊断、运行时、LSP
+│   ├── engine-script-declarative/  # 声明式 JSON 创作实验
+│   ├── engine-editor/              # 编辑器服务和 AI/工具支持
+│   ├── engine-packager/            # 项目打包管线
+│   └── runtime-min/                # 运行时组合根
+├── editor/                         # Tauri/React 桌面编辑器
+├── examples/                       # 示例项目、行为和脚本
+├── docs/                           # 设计笔记、PRD 和 ADR
+├── schema/                         # JSON schema
+├── scripts/                        # 工具脚本和测试
+└── xtask/                          # workspace 自动化命令
 ```
 
-## 编辑场景
-
-1. 启动编辑器 → **Hub** 画面
-2. 创建或打开一个项目
-3. **Hierarchy** 面板列出场景中的所有对象
-4. **Inspector** 显示选中对象的变换和组件
-5. **Scene View** 渲染 3D 视口——旋转、平移、缩放
-6. 点击 **Play** 在 **Game View** 中运行物理和脚本
-7. 添加组件（Camera、Light、MeshRenderer、Rigidbody、Collider……）或编写 Rhai 脚本
-
-## 构建 Profile
-
-Profile 在编译时选择链接哪些子系统：
-
-| Profile | 包含内容 |
-|---|---|
-| `editor` | 为 Tauri 前端提供编辑器服务、wgpu 视口和 Agent 工具 |
-| `runtime-min` | 无头模式——CI 测试、服务器、自动化构建 |
-| `runtime-game` | 无头 + 窗口支持 |
-| `dev-full` | 全部：编辑器、物理、音频、脚本、Agent、渲染 |
-
-```sh
-cargo build -p runtime-min --no-default-features --features editor
-cargo build -p runtime-min --no-default-features --features runtime-min
-```
-
-## 打包游戏项目
-
-```sh
-# 示例项目的原生可运行目录
-cargo xtask package --project examples/project --target native --format folder --debug
-
-# Release 目录
-cargo xtask package --project examples/project --target native --format folder --release
-```
-
-包会写入 `exports/<project>/<target>/<channel>/`，包含运行时二进制、启动脚本、项目清单、默认场景、复制后的资源、`asset-manifest.json` 和 `package-manifest.json`。
-
-当前支持：
-
-| Target | Host 支持 | Formats |
-|---|---|---|
-| `linux-x64` | Linux | `folder` |
-| `windows-x64` | Windows | `folder` |
-| `macos-universal` | macOS | `folder` |
-| `android-arm64` | Linux、Windows | 计划支持 `apk`、`aab`；会校验 Android SDK/NDK 与 Rust target |
-| `ios-universal` | macOS | 计划支持 `ipa`；会校验 Xcode 与 Rust iOS targets |
-
-Android 与 iOS target 已接入共享打包管线和工具链校验，但生成签名移动端产物前仍需要移动运行时适配器和平台项目模板。
-
-## 构建编辑器
+## 编辑器开发
 
 ```sh
 cd editor
 bun install
 
-# 开发模式（前端 + Rust 后端热重载）
 bun run dev:tauri
-
-# 分发包
+bun run build
 bun run tauri build
-# → editor/src-tauri/target/release/bundle/
 ```
 
-## 测试
+常用路径：
+
+- 渲染器 UI：`editor/src/renderer/`
+- Tauri 命令和宿主服务：`editor/src-tauri/src/`
+- Tauri 权限：`editor/src-tauri/capabilities/`
+
+## 运行时 Feature
+
+`runtime-min` 是组合 crate。Feature 集也列在根 `Cargo.toml` 的 workspace metadata 中。
+
+| Feature | 用途 |
+|---|---|
+| `runtime-min` | 最小无头运行时路径 |
+| `runtime-game` | 带资源导入和窗口支持的运行时路径 |
+| `wgpu` | WGPU 渲染后端 |
+| `physics` | 物理子系统 |
+| `audio` | 音频子系统 |
+| `editor` | 编辑器服务 |
+| `agent-tools` | AI/编辑器工具支持 |
+| `dev-full` | 较完整的开发构建，包含运行时、编辑器、Agent、物理、音频、shader、2D/UI、动画和骨骼功能 |
+
+示例：
 
 ```sh
-# 完整引擎测试套件
+cargo build -p runtime-min --no-default-features --features runtime-min
+cargo build -p runtime-min --no-default-features --features runtime-game,wgpu,physics,audio
+cargo xtask runtime-min
+cargo xtask build-editor
+```
+
+## Varg 语言工具
+
+运行语言服务器：
+
+```sh
+cargo xtask varg-lsp
+```
+
+将 `.vscene` 编译为场景 JSON：
+
+```sh
+cargo xtask vscene compile path/to/input.vscene --out path/to/output.scene.json
+```
+
+目标语言方向见 [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md)。该文档包含一些超出 MVP 运行时的计划语法。
+
+## 打包项目
+
+为当前桌面宿主打包默认示例项目：
+
+```sh
+cargo xtask package --project examples/project/fps_arena --target native --format folder --debug
+```
+
+文件夹包会写入项目目录下，例如：
+
+```text
+examples/project/fps_arena/exports/<project>/<target>/<channel>/
+```
+
+其中包含运行时二进制、启动脚本、复制后的项目内容、资源清单和 `package-manifest.json`。
+
+当前打包状态：
+
+| Target | 当前支持 |
+|---|---|
+| `native`、`linux-x64`、`windows-x64`、`macos-universal` | 在匹配桌面宿主上生成 `folder` 包 |
+| `android-arm64` | 已有工具链校验；尚未实现签名 APK/AAB 生成 |
+| `ios-universal` | 已有工具链校验；尚未实现签名 IPA 生成 |
+| 桌面安装包（`appimage`、`deb`、`rpm`、`exe`、`msi`、`nsis`、`dmg`） | CLI 能识别，但 Varg 项目打包目前会返回 unsupported capability |
+
+## 测试与检查
+
+```sh
 cargo test --workspace
+cargo xtask check
+cargo fmt --check
+cargo clippy --workspace
 
-# 仅无头运行时（快速）
 cargo test -p runtime-min --no-default-features --features runtime-min
-
-# 编辑器服务
+cargo test -p engine-render-wgpu
 cargo test -p engine-editor --no-default-features --features agent-tools
 
-# WGPU 后端
-cargo test -p engine-render-wgpu
+pytest scripts/tests
 ```
+
+## 文档
+
+- [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md)：Varg 创作语言方向和 MVP 子集说明。
+- [`docs/ai-agent-unified-spec.md`](docs/ai-agent-unified-spec.md)：AI Agent 工作流方向。
+- [`docs/quest-workflow-ui-reference.md`](docs/quest-workflow-ui-reference.md)：Quest 工作流 UI 参考。
+- [`docs/adr/`](docs/adr/)：架构决策记录。
 
 ## 许可证
 

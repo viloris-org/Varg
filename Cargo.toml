@@ -33,7 +33,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/viloris-org/Varg"
-rust-version = "1.85"
+rust-version = "1.96"
 
 [workspace.dependencies]
 bitflags = "2.6"

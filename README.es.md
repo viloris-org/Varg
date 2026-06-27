@@ -7,101 +7,180 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | Español
 
-Varg es un motor de juegos nativo de IA. Describe tu juego en lenguaje natural y un clúster de agentes autónomos construye la escena, la lógica y la UI. También incluye un editor visual completo para ajustar, pulir y tomar el control cuando quieras.
+Varg es un motor de juegos y editor experimental construido alrededor de un runtime en Rust, un editor de escritorio Tauri/React y flujos de autoría asistidos por IA. El código actual se centra en una base segura de ECS/runtime, una shell nativa de editor, el lenguaje de autoría Varg, empaquetado de proyectos y automatización de editor estilo Quest/Copilot.
 
-![Varg Editor](docs/screenshots/editor.png)
+El proyecto sigue en fase pre-1.0. Algunos documentos describen diseños objetivo; este README sigue lo que está representado en el repositorio actual.
 
-> **Captura provisional**: reemplaza `docs/screenshots/editor.png` por una captura real del editor cuando la UI se estabilice.
+![Editor de Varg](docs/screenshots/editor.png)
 
 ## Primeros Pasos
+
+Requisitos:
+
+- [Rust](https://rustup.rs/) 1.96 o más reciente
+- [Bun](https://bun.sh/) para el frontend del editor
+- [Dependencias de sistema de Tauri v2](https://v2.tauri.app/start/prerequisites/)
+
+En distribuciones tipo Debian/Ubuntu, las dependencias de Tauri suelen incluir:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev
+```
+
+Clona y ejecuta el editor:
 
 ```sh
 git clone https://github.com/viloris-org/Varg
 cd Varg
 
-# Iniciar el editor
 cd editor
 bun install
 bun run dev:tauri
 ```
 
-> **Requisitos:** [Rust ≥ 1.96](https://rustup.rs/), [Bun ≥ 1.3.14](https://bun.sh/),
-> [dependencias de sistema de Tauri](https://v2.tauri.app/start/prerequisites/).
-> Linux: `sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev
-> libayatana-appindicator3-dev librsvg2-dev`
+Construye el workspace de Rust:
 
-## Funciones
+```sh
+cargo build --workspace
+```
 
-- **Núcleo nativo de IA**: no es un asistente añadido encima. Un clúster multiagente planifica, construye y revisa tu juego de forma autónoma.
-- **Descripción declarativa del juego**: sistemas declarativos para comportamiento, escena, UI, configuración, assets y estructura de proyecto permiten generar datos estructurados en vez de código frágil.
-- **Editor visual de escenas**: coloca objetos, ajusta transformaciones y añade componentes desde una interfaz pulida.
-- **Modo Play en vivo**: pulsa Play para ejecutar física y scripts; pulsa Stop para volver sin ensuciar la escena de edición.
-- **Pipeline de assets**: arrastra glTF/PNG al panel del proyecto. El watcher importa y el hot reload actualiza en vivo.
-- **Renderizado enchufable**: cambia backend sin tocar el código del motor. Incluye WGPU.
-- **Runtime headless**: el mismo motor funciona en servidores, CI y builds automatizados.
-- **Cero código unsafe**: todos los crates usan `#![forbid(unsafe_code)]`.
+## Capacidades Actuales
+
+- **Base runtime en Rust**: ECS, manifiestos de proyecto, assets, entrada de plataforma, traits de render, integración WGPU, física, audio, UI, animación, skeleton, shader, policy, IA y crates de empaquetado.
+- **Editor Tauri**: app de escritorio React/TypeScript respaldada por comandos Rust para flujos de hub/proyecto, hosting de viewport, Copilot, Quest, empaquetado, diálogos y ventanas/paneles nativos.
+- **Lenguaje de autoría Varg**: parsing de `.varg`, `.vscene` y `.vasset`, diagnósticos, runtime MVP de scripts, declaraciones de behavior y binario `varg-lsp`.
+- **Experimentos de scripting declarativo**: estructuras JSON de behavior, scene, UI, system, project y asset bajo `engine-script-declarative`.
+- **Pipeline de empaquetado**: `cargo xtask package` crea una carpeta runtime para proyectos de escritorio y valida varias combinaciones futuras de target/format.
+- **Política de Rust seguro**: los crates del motor usan `#![forbid(unsafe_code)]`.
 
 ## Estructura del Proyecto
 
 ```text
 Varg/
-├── editor/                  # App de escritorio Tauri (React + Rust)
-├── crates/                  # ECS, assets, render, física, audio, IA, etc.
-├── xtask/                   # Tareas de build y automatización
-├── examples/                # Proyecto y escenas de ejemplo
-└── docs/                    # Notas de diseño
+├── crates/                         # Crates del motor y runtime
+│   ├── engine-core/                # IDs, errores, matemáticas, configuración
+│   ├── engine-ecs/                 # Escenas, entidades, transforms, componentes
+│   ├── engine-assets/              # Base de assets, importadores, manifiestos
+│   ├── engine-render/              # Traits de render y modelo compartido
+│   ├── engine-render-wgpu/         # Backend WGPU y experimentos de viewport
+│   ├── engine-platform/            # Abstracciones de ventana, entrada y filesystem
+│   ├── engine-script-varg/         # Parser Varg, diagnósticos, runtime, LSP
+│   ├── engine-script-declarative/  # Experimentos de autoría JSON declarativa
+│   ├── engine-editor/              # Servicios de editor y soporte IA/herramientas
+│   ├── engine-packager/            # Pipeline de empaquetado de proyectos
+│   └── runtime-min/                # Raíz de composición runtime
+├── editor/                         # Editor de escritorio Tauri/React
+├── examples/                       # Proyectos, behaviors y scripts de ejemplo
+├── docs/                           # Notas de diseño, PRDs y ADRs
+├── schema/                         # JSON schemas
+├── scripts/                        # Scripts de utilidad y tests
+└── xtask/                          # Comandos de automatización del workspace
 ```
 
-## Editar una Escena
-
-1. Inicia el editor y abre **Hub**
-2. Crea o abre un proyecto
-3. **Hierarchy** lista todos los objetos de la escena
-4. **Inspector** muestra transformaciones y componentes del objeto seleccionado
-5. **Scene View** renderiza el viewport 3D con orbit, pan y zoom
-6. Pulsa **Play** para ejecutar física y scripts en **Game View**
-7. Añade Camera, Light, MeshRenderer, Rigidbody, Collider, etc., o escribe scripts Varg
-
-## Perfiles de Build
-
-| Profile | Qué incluye |
-|---|---|
-| `editor` | Servicios del editor, viewports wgpu y herramientas de Agent para Tauri |
-| `runtime-min` | Headless: smoke tests de CI, servidores y builds automatizados |
-| `runtime-game` | Headless + ventanas |
-| `dev-full` | Todo: editor, física, audio, scripts, Agent y render |
-
-```sh
-cargo build -p runtime-min --no-default-features --features editor
-cargo build -p runtime-min --no-default-features --features runtime-min
-```
-
-## Empaquetar un Juego
-
-```sh
-cargo xtask package --project examples/project --target native --format folder --debug
-cargo xtask package --project examples/project --target native --format folder --release
-```
-
-El paquete se escribe en `exports/<project>/<target>/<channel>/` e incluye el binario runtime, script de lanzamiento, manifiesto del proyecto, escena por defecto, assets copiados y manifiestos de paquete.
-
-## Construir el Editor
+## Desarrollo del Editor
 
 ```sh
 cd editor
 bun install
+
 bun run dev:tauri
+bun run build
 bun run tauri build
 ```
 
-## Tests
+Rutas útiles:
+
+- UI del renderer: `editor/src/renderer/`
+- Comandos y servicios host de Tauri: `editor/src-tauri/src/`
+- Permisos de Tauri: `editor/src-tauri/capabilities/`
+
+## Features del Runtime
+
+`runtime-min` es el crate de composición. Los conjuntos de features también están listados en la metadata del workspace del `Cargo.toml` raíz.
+
+| Feature | Propósito |
+|---|---|
+| `runtime-min` | Ruta runtime headless mínima |
+| `runtime-game` | Ruta runtime con importación de assets y soporte de ventanas |
+| `wgpu` | Backend de render WGPU |
+| `physics` | Subsistema de física |
+| `audio` | Subsistema de audio |
+| `editor` | Servicios orientados al editor |
+| `agent-tools` | Soporte para herramientas de IA/editor |
+| `dev-full` | Build de desarrollo amplio con runtime, editor, Agent, física, audio, shader, 2D/UI, animación y skeleton |
+
+Ejemplos:
+
+```sh
+cargo build -p runtime-min --no-default-features --features runtime-min
+cargo build -p runtime-min --no-default-features --features runtime-game,wgpu,physics,audio
+cargo xtask runtime-min
+cargo xtask build-editor
+```
+
+## Herramientas del Lenguaje Varg
+
+Ejecuta el servidor de lenguaje:
+
+```sh
+cargo xtask varg-lsp
+```
+
+Compila un `.vscene` a JSON de escena:
+
+```sh
+cargo xtask vscene compile path/to/input.vscene --out path/to/output.scene.json
+```
+
+La dirección del lenguaje objetivo está documentada en [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md). Ese documento incluye sintaxis planeada más allá del runtime MVP.
+
+## Empaquetar un Proyecto
+
+Empaqueta el proyecto de ejemplo predeterminado para el host de escritorio actual:
+
+```sh
+cargo xtask package --project examples/project/fps_arena --target native --format folder --debug
+```
+
+El paquete de carpeta se escribe bajo el proyecto, por ejemplo:
+
+```text
+examples/project/fps_arena/exports/<project>/<target>/<channel>/
+```
+
+Incluye binario runtime, script lanzador, payload copiado del proyecto, manifiesto de assets y `package-manifest.json`.
+
+Estado actual del empaquetado:
+
+| Target | Soporte actual |
+|---|---|
+| `native`, `linux-x64`, `windows-x64`, `macos-universal` | Paquetes `folder` en hosts de escritorio compatibles |
+| `android-arm64` | Existe validación de toolchain; generación de APK/AAB firmado aún no implementada |
+| `ios-universal` | Existe validación de toolchain; generación de IPA firmado aún no implementada |
+| Instaladores de escritorio (`appimage`, `deb`, `rpm`, `exe`, `msi`, `nsis`, `dmg`) | La CLI los reconoce, pero el empaquetado de proyectos Varg actualmente devuelve unsupported capability |
+
+## Tests y Checks
 
 ```sh
 cargo test --workspace
+cargo xtask check
+cargo fmt --check
+cargo clippy --workspace
+
 cargo test -p runtime-min --no-default-features --features runtime-min
-cargo test -p engine-editor --no-default-features --features agent-tools
 cargo test -p engine-render-wgpu
+cargo test -p engine-editor --no-default-features --features agent-tools
+
+pytest scripts/tests
 ```
+
+## Documentación
+
+- [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md): dirección del lenguaje de autoría Varg y notas del subconjunto MVP.
+- [`docs/ai-agent-unified-spec.md`](docs/ai-agent-unified-spec.md): dirección del flujo de trabajo de AI Agent.
+- [`docs/quest-workflow-ui-reference.md`](docs/quest-workflow-ui-reference.md): referencia UI del flujo Quest.
+- [`docs/adr/`](docs/adr/): registros de decisiones de arquitectura.
 
 ## Licencia
 

@@ -7,145 +7,180 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | 日本語 | [한국어](README.ko.md) | [Español](README.es.md)
 
-Varg は AI ネイティブなゲームエンジンです。自然言語で作りたいゲームを説明すれば、自律エージェント群がシーン、ロジック、UI まですべて構築します。本格的なビジュアルエディタも搭載しており、細部の調整や仕上げも思いのままです。
+Varg は、Rust ランタイム、Tauri/React デスクトップエディタ、AI 支援のオーサリングワークフローを中心に構築されている実験的なゲームエンジン兼エディタです。現在のコードベースは、安全な ECS/ランタイム基盤、ネイティブエディタシェル、Varg オーサリング言語、プロジェクトパッケージング、Quest/Copilot 型のエディタ自動化に重点を置いています。
 
-![Varg Editor](docs/screenshots/editor.png)
+このプロジェクトはまだ pre-1.0 です。一部のドキュメントは目標設計を説明していますが、この README は現在のリポジトリに存在する内容を追跡します。
 
-> **スクリーンショットプレースホルダー** — UI が安定したら実際のエディタ画像に差し替えてください。
+![Varg エディタ](docs/screenshots/editor.png)
 
 ## クイックスタート
+
+前提条件：
+
+- [Rust](https://rustup.rs/) 1.96 以降
+- エディタフロントエンド用の [Bun](https://bun.sh/)
+- [Tauri v2 システム依存関係](https://v2.tauri.app/start/prerequisites/)
+
+Debian/Ubuntu 系 Linux では、Tauri の依存関係には通常次が含まれます：
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev
+```
+
+クローンしてエディタを起動します：
 
 ```sh
 git clone https://github.com/viloris-org/Varg
 cd Varg
 
-# エディタを起動
 cd editor
 bun install
 bun run dev:tauri
 ```
 
-> **前提条件：** [Rust ≥ 1.96](https://rustup.rs/)、[Bun ≥ 1.3.14](https://bun.sh/)、
-> [Tauri システム依存関係](https://v2.tauri.app/start/prerequisites/)。
-> Linux ユーザー：`sudo apt install libwebkit2gtk-4.1-dev build-essential libssl-dev
-> libayatana-appindicator3-dev librsvg2-dev`
+Rust workspace をビルドします：
 
-## 機能
+```sh
+cargo build --workspace
+```
 
-- **AI ネイティブコア** — 単なる後付けの AI アシスタントではなく、複数のエージェントが自律的に計画・構築・レビューします。自然言語を入力し、プレイ可能なシーンを出力。サンドボックスレビューがプロジェクトを安全に保ちます。
-- **宣言型ゲーム記述** — 6 つの宣言型システム（ビヘイビアツリー、シーングラフ、UI レイアウト、システム設定、アセットマニフェスト、プロジェクト構造）により、エージェントはコードの代わりに構造化 JSON を生成。LLM の成功率が約 50% から約 90% に向上します。
-- **ビジュアルシーンエディタ** — 直感的なインターフェースでオブジェクトの配置、トランスフォーム調整、コンポーネント追加が可能。AI に重労働を任せ、細部は手作業で磨き上げる、両方のいいとこ取りです。
-- **ライブプレイモード** — Play を押せば物理とスクリプトが実行され、Stop でゼロクリーンアップ。編集シーンは決して変更されません。
-- **アセットパイプライン** — glTF/PNG をプロジェクトパネルにドロップ。ファイルウォッチャーが自動インポートをトリガーし、ホットリロードが即座に反映されます。
-- **プラグ可能なレンダリング** — エンジンコードに触れずにバックエンドを切り替え可能。WGPU 搭載。
-- **ヘッドレスランタイム** — 同じエンジンがサーバー、CI パイプライン、自動ビルドで動作。ウィンドウ不要。
-- **ゼロ unsafe コード** — すべての crate が `#![forbid(unsafe_code)]` を使用。デフォルトで安全。
+## 現在の機能
+
+- **Rust ランタイム基盤**：ECS、プロジェクトマニフェスト、アセット、プラットフォーム入力、レンダリング trait、WGPU 統合、物理、オーディオ、UI、アニメーション、スケルトン、shader、policy、AI、パッケージング crate。
+- **Tauri エディタ**：Hub/プロジェクトワークフロー、ビューポートホスト、Copilot、Quest、パッケージング、ダイアログ、ネイティブウィンドウ/パネルを Rust コマンドで支える React/TypeScript デスクトップアプリ。
+- **Varg オーサリング言語**：`.varg`、`.vscene`、`.vasset` の解析、診断、MVP スクリプトランタイム、behavior 宣言、`varg-lsp` バイナリ。
+- **宣言型スクリプト実験**：`engine-script-declarative` 配下の JSON behavior、scene、UI、system、project、asset 構造。
+- **パッケージングパイプライン**：`cargo xtask package` はデスクトッププロジェクト用のランタイムフォルダを作成し、将来の target/format 組み合わせをいくつか検証します。
+- **安全な Rust 方針**：エンジン crate は `#![forbid(unsafe_code)]` を使用します。
 
 ## プロジェクト構造
 
-```
+```text
 Varg/
-├── editor/                  # Tauri デスクトップアプリ（React + Rust）
-├── crates/
-│   ├── engine-editor/       # エディタワークフロー、サービス、Agent ツール
-│   ├── engine-ecs/          # シーン、エンティティ、トランスフォーム、ワールド
-│   ├── engine-assets/       # データベース、インポーター、ホットリロード
-│   ├── engine-render/       # レンダーグラフ、デバイストレイト
-│   ├── engine-render-wgpu/  # WGPU バックエンド
-│   ├── engine-physics/      # 物理（rapier3d）
-│   ├── engine-audio/        # オーディオパイプライン
-│   ├── engine-core/         # ID、エラー、数学、設定
-│   ├── engine-platform/     # ウィンドウ、入力、ファイルシステム
-│   ├── engine-script-rhai/  # Rhai スクリプト
-│   ├── engine-animation/    # アニメーションシステム
-│   ├── engine-ai/           # AI プランナーとシステムプロンプト
-│   ├── engine-agent-cluster/# Agent オーケストレーション
-│   ├── runtime-min/         # コンポジションルート
-│   └── …                    # i18n、shader、policy、skeleton 等
-├── xtask/                   # ビルドと自動化タスク
-├── examples/                # サンプルプロジェクトとシーン
-└── docs/                    # 設計メモ
+├── crates/                         # エンジンとランタイム crate
+│   ├── engine-core/                # ID、エラー、数学、設定
+│   ├── engine-ecs/                 # シーン、エンティティ、transform、コンポーネント
+│   ├── engine-assets/              # アセット DB、インポーター、マニフェスト
+│   ├── engine-render/              # レンダリング trait と共有レンダーモデル
+│   ├── engine-render-wgpu/         # WGPU バックエンドとビューポート実験
+│   ├── engine-platform/            # ウィンドウ、入力、ファイルシステム抽象
+│   ├── engine-script-varg/         # Varg パーサー、診断、ランタイム、LSP
+│   ├── engine-script-declarative/  # 宣言型 JSON オーサリング実験
+│   ├── engine-editor/              # エディタサービスと AI/ツール支援
+│   ├── engine-packager/            # プロジェクトパッケージングパイプライン
+│   └── runtime-min/                # ランタイム合成ルート
+├── editor/                         # Tauri/React デスクトップエディタ
+├── examples/                       # サンプルプロジェクト、behavior、script
+├── docs/                           # 設計メモ、PRD、ADR
+├── schema/                         # JSON schema
+├── scripts/                        # ユーティリティスクリプトとテスト
+└── xtask/                          # workspace 自動化コマンド
 ```
 
-## シーン編集
-
-1. エディタ起動 → **Hub** 画面
-2. プロジェクトを作成または開く
-3. **Hierarchy** パネルにシーン内の全オブジェクトが表示
-4. **Inspector** で選択オブジェクトのトランスフォームとコンポーネントを確認
-5. **Scene View** で 3D ビューポートをレンダリング — 回転、パン、ズーム
-6. **Play** をクリックして **Game View** で物理とスクリプトを実行
-7. コンポーネント（Camera、Light、MeshRenderer、Rigidbody、Collider…）を追加、または Rhai スクリプトを作成
-
-## ビルドプロファイル
-
-プロファイルはコンパイル時にリンクするサブシステムを選択します：
-
-| プロファイル | 内容 |
-|---|---|
-| `editor` | Tauri フロントエンド向けのエディタサービス、wgpu ビューポート、Agent ツール |
-| `runtime-min` | ヘッドレス — CI テスト、サーバー、自動ビルド |
-| `runtime-game` | ヘッドレス + ウィンドウ表示 |
-| `dev-full` | すべて：エディタ、物理、オーディオ、スクリプト、Agent、レンダリング |
-
-```sh
-cargo build -p runtime-min --no-default-features --features editor
-cargo build -p runtime-min --no-default-features --features runtime-min
-```
-
-## ゲームプロジェクトのパッケージング
-
-```sh
-# サンプルプロジェクトのネイティブ実行フォルダ
-cargo xtask package --project examples/project --target native --format folder --debug
-
-# リリースフォルダ
-cargo xtask package --project examples/project --target native --format folder --release
-```
-
-パッケージは `exports/<project>/<target>/<channel>/` に出力され、ランタイムバイナリ、ランチャースクリプト、プロジェクトマニフェスト、既定シーン、コピー済みアセット、`asset-manifest.json`、`package-manifest.json` を含みます。
-
-現在の対応状況：
-
-| Target | ホスト対応 | Formats |
-|---|---|---|
-| `linux-x64` | Linux | `folder` |
-| `windows-x64` | Windows | `folder` |
-| `macos-universal` | macOS | `folder` |
-| `android-arm64` | Linux、Windows | `apk`、`aab` は予定；Android SDK/NDK と Rust target を検証 |
-| `ios-universal` | macOS | `ipa` は予定；Xcode と Rust iOS targets を検証 |
-
-Android と iOS target は共有パッケージングパイプラインとツールチェーン検証に接続済みですが、署名済みモバイル成果物を生成するには、モバイルランタイムアダプターとプラットフォーム用プロジェクトテンプレートが必要です。
-
-## エディタのビルド
+## エディタ開発
 
 ```sh
 cd editor
 bun install
 
-# 開発モード（フロントエンド + Rust バックエンドのホットリロード）
 bun run dev:tauri
-
-# 配布用バンドル
+bun run build
 bun run tauri build
-# → editor/src-tauri/target/release/bundle/
 ```
 
-## テスト
+よく使うパス：
+
+- Renderer UI：`editor/src/renderer/`
+- Tauri コマンドとホストサービス：`editor/src-tauri/src/`
+- Tauri 権限：`editor/src-tauri/capabilities/`
+
+## ランタイム Feature
+
+`runtime-min` は合成 crate です。Feature セットはルート `Cargo.toml` の workspace metadata にも記載されています。
+
+| Feature | 用途 |
+|---|---|
+| `runtime-min` | 最小ヘッドレスランタイムパス |
+| `runtime-game` | アセットインポートとウィンドウ対応を含むランタイムパス |
+| `wgpu` | WGPU レンダリングバックエンド |
+| `physics` | 物理サブシステム |
+| `audio` | オーディオサブシステム |
+| `editor` | エディタ向けサービス |
+| `agent-tools` | AI/エディタツール支援 |
+| `dev-full` | ランタイム、エディタ、Agent、物理、オーディオ、shader、2D/UI、アニメーション、スケルトンを含む広めの開発ビルド |
+
+例：
 
 ```sh
-# 完全なエンジンテストスイート
+cargo build -p runtime-min --no-default-features --features runtime-min
+cargo build -p runtime-min --no-default-features --features runtime-game,wgpu,physics,audio
+cargo xtask runtime-min
+cargo xtask build-editor
+```
+
+## Varg 言語ツール
+
+言語サーバーを起動します：
+
+```sh
+cargo xtask varg-lsp
+```
+
+`.vscene` を scene JSON にコンパイルします：
+
+```sh
+cargo xtask vscene compile path/to/input.vscene --out path/to/output.scene.json
+```
+
+目標言語の方向性は [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md) にあります。この文書には MVP ランタイムを超える予定構文も含まれています。
+
+## プロジェクトのパッケージング
+
+現在のデスクトップホスト向けに既定のサンプルプロジェクトをパッケージします：
+
+```sh
+cargo xtask package --project examples/project/fps_arena --target native --format folder --debug
+```
+
+フォルダパッケージはプロジェクト配下に書き込まれます。例：
+
+```text
+examples/project/fps_arena/exports/<project>/<target>/<channel>/
+```
+
+ランタイムバイナリ、ランチャースクリプト、コピー済みプロジェクトペイロード、アセットマニフェスト、`package-manifest.json` が含まれます。
+
+現在のパッケージング状況：
+
+| Target | 現在の対応 |
+|---|---|
+| `native`、`linux-x64`、`windows-x64`、`macos-universal` | 対応するデスクトップホストで `folder` パッケージを生成 |
+| `android-arm64` | ツールチェーン検証あり。署名済み APK/AAB 生成は未実装 |
+| `ios-universal` | ツールチェーン検証あり。署名済み IPA 生成は未実装 |
+| デスクトップインストーラー（`appimage`、`deb`、`rpm`、`exe`、`msi`、`nsis`、`dmg`） | CLI は認識しますが、Varg プロジェクトパッケージ生成は現在 unsupported capability を返します |
+
+## テストとチェック
+
+```sh
 cargo test --workspace
+cargo xtask check
+cargo fmt --check
+cargo clippy --workspace
 
-# ヘッドレスランタイムのみ（高速）
 cargo test -p runtime-min --no-default-features --features runtime-min
-
-# エディタサービス
+cargo test -p engine-render-wgpu
 cargo test -p engine-editor --no-default-features --features agent-tools
 
-# WGPU バックエンド
-cargo test -p engine-render-wgpu
+pytest scripts/tests
 ```
+
+## ドキュメント
+
+- [`docs/varg-language-family-spec.md`](docs/varg-language-family-spec.md)：Varg オーサリング言語の方向性と MVP サブセットの説明。
+- [`docs/ai-agent-unified-spec.md`](docs/ai-agent-unified-spec.md)：AI Agent ワークフローの方向性。
+- [`docs/quest-workflow-ui-reference.md`](docs/quest-workflow-ui-reference.md)：Quest ワークフロー UI リファレンス。
+- [`docs/adr/`](docs/adr/)：アーキテクチャ決定記録。
 
 ## ライセンス
 
