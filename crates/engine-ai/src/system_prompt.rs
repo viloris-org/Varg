@@ -117,6 +117,7 @@ mod tests {
     #[test]
     fn every_varg_example_passes_language_service_validation() {
         let prompt = build(&[]);
+        let prompt = prompt.replace("\r\n", "\n");
         let examples = prompt
             .split("```varg\n")
             .skip(1)

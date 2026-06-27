@@ -193,12 +193,6 @@ fn measure_native_surface(config: BenchConfig, world: &RenderWorld) -> PathResul
         use winit::platform::windows::EventLoopBuilderExtWindows;
         builder.with_any_thread(true);
     }
-    #[cfg(target_os = "macos")]
-    {
-        use winit::platform::macos::EventLoopBuilderExtMacOS;
-        builder.with_any_thread(true);
-    }
-
     let event_loop = match builder.build() {
         Ok(event_loop) => event_loop,
         Err(error) => {

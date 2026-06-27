@@ -1299,6 +1299,10 @@ fn decode_post_normal(encoded: vec3<f32>) -> vec3<f32> {
     return normalize(encoded * 2.0 - 1.0);
 }
 
+fn sample_post_depth(uv: vec2<f32>) -> f32 {
+    return textureSample(depth_tex, lin_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
 fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
     if (post.ssr_enabled < 0.5) {
         return vec3<f32>(0.0);
@@ -1307,7 +1311,7 @@ fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
         clamp(i32(uv.x * post.render_width), 0, i32(post.render_width) - 1),
         clamp(i32(uv.y * post.render_height), 0, i32(post.render_height) - 1)
     );
-    let depth = textureLoad(depth_tex, pixel, 0);
+    let depth = sample_post_depth(uv);
     if (depth >= 0.9999) {
         return vec3<f32>(0.0);
     }
@@ -1325,11 +1329,7 @@ fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
         if (sample_uv.x <= 0.0 || sample_uv.x >= 1.0 || sample_uv.y <= 0.0 || sample_uv.y >= 1.0) {
             break;
         }
-        let sample_pixel = vec2<i32>(
-            clamp(i32(sample_uv.x * post.render_width), 0, i32(post.render_width) - 1),
-            clamp(i32(sample_uv.y * post.render_height), 0, i32(post.render_height) - 1)
-        );
-        let sample_depth = textureLoad(depth_tex, sample_pixel, 0);
+        let sample_depth = sample_post_depth(sample_uv);
         let expected_depth = depth - r.z * 0.012 * t;
         if (sample_depth < 0.9999 && abs(sample_depth - expected_depth) < 0.025 + t * 0.035) {
             let edge_fade = smoothstep(0.0, 0.12, sample_uv.x) * smoothstep(1.0, 0.88, sample_uv.x)

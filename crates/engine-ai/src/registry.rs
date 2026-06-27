@@ -908,7 +908,7 @@ mod tests {
         detect_available_models, is_openai_chat_model,
     };
     use engine_editor::{BillingMode, GlmRegion, MimoRegion};
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -988,6 +988,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
             let body = r#"{"data":[{"id":"gpt-5"},{"id":"gpt-image-1"}]}"#;
             write!(
                 stream,
