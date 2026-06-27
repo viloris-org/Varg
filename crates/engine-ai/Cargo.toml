@@ -18,4 +18,5 @@ engine-editor = { workspace = true, features = ["agent-tools"] }
 engine-script-varg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 ureq = { version = "3", features = ["json"] }

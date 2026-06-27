@@ -1,32 +1,41 @@
 scene JumpJump {
     camera "Main Camera" {
         transform {
-            position: Vec3(9.5, 11.5, 24.0)
-            rotation: Vec3(-42, 0, 0)
+            position: Vec3(0.0, 1.75, 0.0)
+            rotation: Vec3(-9, -34, 0)
         }
 
         perspective {
-            fov: 52
+            fov: 78
             near: 0.01
             far: 1000
         }
 
         primary: true
 
-        script CameraFollow {
-            source: "scripts/camera_follow.varg"
-            offsetX: 9.5
-            offsetY: 11.5
-            offsetZ: 24.0
-            followSpeed: 6.0
+        script FirstPersonCamera {
+            source: "scripts/first_person_camera.varg"
+            eyeHeight: 0.65
+            mouseSensitivity: 0.08
+            routeYaw: -34.0
+            minPitch: -36.0
+            maxPitch: 18.0
         }
     }
 
     light "Sun" {
         kind: directional
-        intensity: 3.5
-        color: Vec3(1.0, 0.94, 0.84)
-        rotation: Vec3(-50, 35, 0)
+        intensity: 4.2
+        color: Vec3(1.0, 0.94, 0.82)
+        rotation: Vec3(-52, 34, 0)
+    }
+
+    light "Crystal Fill" {
+        kind: point
+        intensity: 1.6
+        range: 18.0
+        color: Vec3(0.45, 0.78, 1.0)
+        position: Vec3(10.0, 7.0, 5.0)
     }
 
     entity "Player" {
@@ -36,11 +45,12 @@ scene JumpJump {
             position: Vec3(0, 1.1, 0)
         }
 
-        mesh: Box(size: Vec3(0.8, 0.8, 0.8))
+        mesh: Sphere(radius: 0.42)
 
         material {
-            baseColor: Color("#ff6f61")
-            roughness: 0.55
+            baseColor: Color("#ff705f")
+            roughness: 0.42
+            emissive: Vec3(0.18, 0.04, 0.03)
         }
 
         rigidbody {
@@ -59,6 +69,52 @@ scene JumpJump {
             arcHeight: 3.0
             spawnAhead: 36.0
             segmentLength: 2.9
+            routeYaw: -34.0
+            mouseSensitivity: 0.08
+            gamepadLookSpeed: 74.0
+            giIntensity: 1.35
+        }
+    }
+
+    entity "Player Visor" {
+        transform {
+            position: Vec3(0.0, 1.22, 0.34)
+        }
+
+        mesh: Box(size: Vec3(0.48, 0.14, 0.08))
+
+        material {
+            baseColor: Color("#1be7ff")
+            roughness: 0.18
+            emissive: Vec3(0.0, 0.35, 0.48)
+        }
+    }
+
+    entity "Player Left Thruster" {
+        transform {
+            position: Vec3(-0.33, 0.82, -0.1)
+            rotation: Vec3(0, 0, -8)
+        }
+
+        mesh: Cylinder(radius: 0.1, height: 0.55)
+
+        material {
+            baseColor: Color("#3a4050")
+            roughness: 0.6
+        }
+    }
+
+    entity "Player Right Thruster" {
+        transform {
+            position: Vec3(0.33, 0.82, -0.1)
+            rotation: Vec3(0, 0, 8)
+        }
+
+        mesh: Cylinder(radius: 0.1, height: 0.55)
+
+        material {
+            baseColor: Color("#3a4050")
+            roughness: 0.6
         }
     }
 
@@ -69,7 +125,7 @@ scene JumpJump {
             position: Vec3(0, 0, 0)
         }
 
-        mesh: Box(size: Vec3(3.0, 0.5, 3.0))
+        mesh: Box(size: Vec3(3.6, 0.5, 3.2))
 
         material {
             baseColor: Color("#3f8f7b")
@@ -78,7 +134,47 @@ scene JumpJump {
 
         collider {
             shape: box
-            size: Vec3(3.0, 0.5, 3.0)
+            size: Vec3(3.6, 0.5, 3.2)
+        }
+    }
+
+    entity "Start Platform Rim" {
+        transform {
+            position: Vec3(0, 0.32, 0)
+        }
+
+        mesh: Cylinder(radius: 2.25, height: 0.18)
+
+        material {
+            baseColor: Color("#5ed0b1")
+            roughness: 0.55
+        }
+    }
+
+    entity "Start Antenna" {
+        transform {
+            position: Vec3(-1.25, 1.2, -1.05)
+        }
+
+        mesh: Cylinder(radius: 0.08, height: 1.65)
+
+        material {
+            baseColor: Color("#29343c")
+            roughness: 0.5
+        }
+    }
+
+    entity "Start Antenna Light" {
+        transform {
+            position: Vec3(-1.25, 2.08, -1.05)
+        }
+
+        mesh: Sphere(radius: 0.18)
+
+        material {
+            baseColor: Color("#f8f06a")
+            roughness: 0.2
+            emissive: Vec3(0.5, 0.42, 0.0)
         }
     }
 
@@ -89,16 +185,30 @@ scene JumpJump {
             position: Vec3(3.0, 0, 2.6)
         }
 
-        mesh: Box(size: Vec3(2.0, 0.5, 2.0))
+        mesh: Box(size: Vec3(2.2, 0.5, 2.0))
 
         material {
-            baseColor: Color("#5f7be8")
-            roughness: 0.68
+            baseColor: Color("#5578df")
+            roughness: 0.66
         }
 
         collider {
             shape: box
-            size: Vec3(2.0, 0.5, 2.0)
+            size: Vec3(2.2, 0.5, 2.0)
+        }
+    }
+
+    entity "Crystal Landing Crown" {
+        transform {
+            position: Vec3(3.0, 0.56, 2.6)
+        }
+
+        mesh: Cone(radius: 1.08, height: 0.42)
+
+        material {
+            baseColor: Color("#6aa8ff")
+            roughness: 0.38
+            emissive: Vec3(0.0, 0.08, 0.24)
         }
     }
 
@@ -109,7 +219,7 @@ scene JumpJump {
             position: Vec3(6.1, 0, 5.1)
         }
 
-        mesh: Box(size: Vec3(2.0, 0.5, 2.0))
+        mesh: Box(size: Vec3(1.75, 0.5, 2.35))
 
         material {
             baseColor: Color("#f1b84b")
@@ -118,7 +228,37 @@ scene JumpJump {
 
         collider {
             shape: box
-            size: Vec3(2.0, 0.5, 2.0)
+            size: Vec3(1.75, 0.5, 2.35)
+        }
+    }
+
+    entity "Narrow Hop Rail A" {
+        transform {
+            position: Vec3(5.12, 0.58, 5.1)
+            rotation: Vec3(90, 0, 0)
+        }
+
+        mesh: Cylinder(radius: 0.055, height: 2.25)
+
+        material {
+            baseColor: Color("#ffe08a")
+            roughness: 0.36
+            emissive: Vec3(0.18, 0.11, 0.0)
+        }
+    }
+
+    entity "Narrow Hop Rail B" {
+        transform {
+            position: Vec3(7.08, 0.58, 5.1)
+            rotation: Vec3(90, 0, 0)
+        }
+
+        mesh: Cylinder(radius: 0.055, height: 2.25)
+
+        material {
+            baseColor: Color("#ffe08a")
+            roughness: 0.36
+            emissive: Vec3(0.18, 0.11, 0.0)
         }
     }
 
@@ -129,16 +269,43 @@ scene JumpJump {
             position: Vec3(9.5, 0, 8.0)
         }
 
-        mesh: Box(size: Vec3(2.6, 0.5, 2.6))
+        mesh: Box(size: Vec3(2.8, 0.5, 2.8))
 
         material {
             baseColor: Color("#8b64d8")
-            roughness: 0.7
+            roughness: 0.68
         }
 
         collider {
             shape: box
-            size: Vec3(2.6, 0.5, 2.6)
+            size: Vec3(2.8, 0.5, 2.8)
+        }
+    }
+
+    entity "High Score Tower" {
+        transform {
+            position: Vec3(9.5, 1.45, 8.0)
+        }
+
+        mesh: Cylinder(radius: 0.42, height: 2.2)
+
+        material {
+            baseColor: Color("#5142a1")
+            roughness: 0.5
+        }
+    }
+
+    entity "High Score Tower Cap" {
+        transform {
+            position: Vec3(9.5, 2.82, 8.0)
+        }
+
+        mesh: Cone(radius: 0.72, height: 0.9)
+
+        material {
+            baseColor: Color("#b78cff")
+            roughness: 0.26
+            emissive: Vec3(0.22, 0.08, 0.42)
         }
     }
 
@@ -149,16 +316,31 @@ scene JumpJump {
             position: Vec3(12.6, 0, 5.0)
         }
 
-        mesh: Box(size: Vec3(2.0, 0.5, 2.0))
+        mesh: Box(size: Vec3(2.0, 0.5, 2.1))
 
         material {
             baseColor: Color("#4ba7c9")
-            roughness: 0.66
+            roughness: 0.64
         }
 
         collider {
             shape: box
-            size: Vec3(2.0, 0.5, 2.0)
+            size: Vec3(2.0, 0.5, 2.1)
+        }
+    }
+
+    entity "Side Route Arrow" {
+        transform {
+            position: Vec3(12.6, 0.58, 5.0)
+            rotation: Vec3(0, 0, -90)
+        }
+
+        mesh: Cone(radius: 0.42, height: 1.0)
+
+        material {
+            baseColor: Color("#7df9ff")
+            roughness: 0.28
+            emissive: Vec3(0.0, 0.3, 0.42)
         }
     }
 
@@ -169,16 +351,46 @@ scene JumpJump {
             position: Vec3(15.5, 0, 7.9)
         }
 
-        mesh: Box(size: Vec3(2.2, 0.5, 2.2))
+        mesh: Box(size: Vec3(2.35, 0.5, 2.35))
 
         material {
             baseColor: Color("#d96cae")
-            roughness: 0.68
+            roughness: 0.66
         }
 
         collider {
             shape: box
-            size: Vec3(2.2, 0.5, 2.2)
+            size: Vec3(2.35, 0.5, 2.35)
+        }
+    }
+
+    entity "Final Crystal Spire A" {
+        transform {
+            position: Vec3(14.85, 0.95, 7.25)
+            rotation: Vec3(0, 0, -12)
+        }
+
+        mesh: Cone(radius: 0.32, height: 1.45)
+
+        material {
+            baseColor: Color("#ffc2e2")
+            roughness: 0.24
+            emissive: Vec3(0.35, 0.08, 0.24)
+        }
+    }
+
+    entity "Final Crystal Spire B" {
+        transform {
+            position: Vec3(16.15, 0.8, 8.55)
+            rotation: Vec3(0, 0, 14)
+        }
+
+        mesh: Cone(radius: 0.28, height: 1.2)
+
+        material {
+            baseColor: Color("#ffd6ef")
+            roughness: 0.22
+            emissive: Vec3(0.28, 0.06, 0.2)
         }
     }
 
@@ -189,17 +401,58 @@ scene JumpJump {
             position: Vec3(19.3, 0, 10.7)
         }
 
-        mesh: Box(size: Vec3(3.0, 0.5, 3.0))
+        mesh: Box(size: Vec3(3.4, 0.5, 3.4))
 
         material {
             baseColor: Color("#66c96f")
-            roughness: 0.64
+            roughness: 0.62
             emissive: Vec3(0.08, 0.18, 0.08)
         }
 
         collider {
             shape: box
-            size: Vec3(3.0, 0.5, 3.0)
+            size: Vec3(3.4, 0.5, 3.4)
+        }
+    }
+
+    entity "Goal Gate Left" {
+        transform {
+            position: Vec3(18.25, 1.45, 10.7)
+        }
+
+        mesh: Cylinder(radius: 0.16, height: 2.5)
+
+        material {
+            baseColor: Color("#235c39")
+            roughness: 0.48
+        }
+    }
+
+    entity "Goal Gate Right" {
+        transform {
+            position: Vec3(20.35, 1.45, 10.7)
+        }
+
+        mesh: Cylinder(radius: 0.16, height: 2.5)
+
+        material {
+            baseColor: Color("#235c39")
+            roughness: 0.48
+        }
+    }
+
+    entity "Goal Gate Beam" {
+        transform {
+            position: Vec3(19.3, 2.78, 10.7)
+            rotation: Vec3(0, 0, 90)
+        }
+
+        mesh: Cylinder(radius: 0.14, height: 2.2)
+
+        material {
+            baseColor: Color("#b7ff6a")
+            roughness: 0.22
+            emissive: Vec3(0.22, 0.55, 0.05)
         }
     }
 
@@ -207,14 +460,14 @@ scene JumpJump {
         tag: "Collectible"
 
         transform {
-            position: Vec3(3.0, 1.15, 2.6)
+            position: Vec3(3.0, 1.3, 2.6)
         }
 
-        mesh: Sphere(radius: 0.35)
+        mesh: Cone(radius: 0.35, height: 0.8)
 
         material {
             baseColor: Color("#7df9ff")
-            roughness: 0.25
+            roughness: 0.2
             emissive: Vec3(0.0, 0.45, 0.5)
         }
 
@@ -230,14 +483,14 @@ scene JumpJump {
         tag: "Collectible"
 
         transform {
-            position: Vec3(9.5, 1.15, 8.0)
+            position: Vec3(9.5, 3.55, 8.0)
         }
 
-        mesh: Sphere(radius: 0.35)
+        mesh: Sphere(radius: 0.36)
 
         material {
             baseColor: Color("#f8f06a")
-            roughness: 0.2
+            roughness: 0.18
             emissive: Vec3(0.45, 0.38, 0.0)
         }
 
@@ -253,14 +506,14 @@ scene JumpJump {
         tag: "Collectible"
 
         transform {
-            position: Vec3(15.5, 1.15, 7.9)
+            position: Vec3(15.5, 1.25, 7.9)
         }
 
-        mesh: Sphere(radius: 0.35)
+        mesh: Cone(radius: 0.42, height: 0.95)
 
         material {
             baseColor: Color("#b78cff")
-            roughness: 0.22
+            roughness: 0.2
             emissive: Vec3(0.28, 0.1, 0.55)
         }
 
@@ -279,12 +532,26 @@ scene JumpJump {
             position: Vec3(7.5, 0.08, 3.4)
         }
 
-        mesh: Box(size: Vec3(1.4, 0.18, 1.6))
+        mesh: Cylinder(radius: 0.82, height: 0.16)
 
         material {
             baseColor: Color("#ff3b30")
-            roughness: 0.35
+            roughness: 0.34
             emissive: Vec3(0.55, 0.08, 0.02)
+        }
+    }
+
+    entity "Hot Zone Core" {
+        transform {
+            position: Vec3(7.5, 0.34, 3.4)
+        }
+
+        mesh: Cone(radius: 0.58, height: 0.7)
+
+        material {
+            baseColor: Color("#ffb04b")
+            roughness: 0.25
+            emissive: Vec3(0.65, 0.22, 0.02)
         }
     }
 
@@ -318,11 +585,26 @@ scene JumpJump {
             position: Vec3(9.5, -1.0, 5.6)
         }
 
-        mesh: Box(size: Vec3(24, 0.2, 18))
+        mesh: Box(size: Vec3(28, 0.18, 20))
 
         material {
             baseColor: Color("#202833")
             roughness: 0.9
+        }
+    }
+
+    entity "Backplate Horizon" {
+        transform {
+            position: Vec3(12.0, -0.35, 17.0)
+            rotation: Vec3(90, 0, 0)
+        }
+
+        mesh: Plane(size: Vec3(28, 12, 1))
+
+        material {
+            baseColor: Color("#2a4460")
+            roughness: 0.82
+            emissive: Vec3(0.02, 0.04, 0.08)
         }
     }
 }

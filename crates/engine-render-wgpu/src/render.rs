@@ -8,8 +8,17 @@ impl WgpuRenderDevice {
         self.ssgi_compute_pipeline.is_some()
             && matches!(
                 world.global_illumination,
-                engine_render::RenderGlobalIllumination::ScreenSpace
+                engine_render::RenderGlobalIllumination::ScreenSpace { .. }
             )
+    }
+
+    pub(crate) fn screen_space_gi_intensity(world: &RenderWorld) -> f32 {
+        match world.global_illumination {
+            engine_render::RenderGlobalIllumination::ScreenSpace { intensity } => {
+                intensity.max(0.0)
+            }
+            engine_render::RenderGlobalIllumination::ProbeVolume(_) => SSGI_INTENSITY,
+        }
     }
 
     pub(crate) fn prepare_skybox_environment(&mut self, world: &RenderWorld) -> bool {
@@ -101,7 +110,7 @@ impl WgpuRenderDevice {
             engine_render::RenderGlobalIllumination::ProbeVolume(volume) => {
                 volume.counts.iter().product()
             }
-            engine_render::RenderGlobalIllumination::ScreenSpace => 0,
+            engine_render::RenderGlobalIllumination::ScreenSpace { .. } => 0,
         };
         let virtual_shadow_pages = match world.shadow_virtualization {
             engine_render::RenderShadowVirtualization::VirtualPages { max_pages, .. } => max_pages,
@@ -620,6 +629,7 @@ impl WgpuRenderDevice {
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
         let enable_ssao = self.ssao_compute_pipeline.is_some();
         let enable_ssgi = self.screen_space_gi_enabled(world);
+        let ssgi_intensity = Self::screen_space_gi_intensity(world);
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
 
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -632,6 +642,7 @@ impl WgpuRenderDevice {
             oh,
             enable_ssao,
             enable_ssgi,
+            ssgi_intensity,
             enable_bloom,
             encoder_label,
         );
@@ -716,6 +727,7 @@ impl WgpuRenderDevice {
         output_height: u32,
         ssao_enabled: bool,
         ssgi_enabled: bool,
+        ssgi_intensity: f32,
         bloom_enabled: bool,
         _encoder_label: &str,
     ) -> FrameResources {
@@ -740,13 +752,9 @@ impl WgpuRenderDevice {
                 exposure: 1.0,
                 bloom_intensity: if bloom_enabled { 0.04 } else { 0.0 },
                 ssao_enabled: if ssao_enabled { 1.0 } else { 0.0 },
-                upscale_sharpness: if tw != output_width || th != output_height {
-                    self.upscale_sharpness
-                } else {
-                    0.0
-                },
+                upscale_sharpness: self.upscale_sharpness,
                 ssgi_enabled: if ssgi_enabled { 1.0 } else { 0.0 },
-                ssgi_intensity: SSGI_INTENSITY,
+                ssgi_intensity,
                 ssr_enabled: 1.0,
                 ssr_intensity: 0.35,
                 taa_reset: if self.reset_temporal_history {
@@ -754,7 +762,7 @@ impl WgpuRenderDevice {
                 } else {
                     0.0
                 },
-                taa_history_weight: 0.88,
+                taa_history_weight: 0.72,
                 taa_enabled: if taa_enabled { 1.0 } else { 0.0 },
                 _pad: 0.0,
             }),
@@ -782,11 +790,11 @@ impl WgpuRenderDevice {
                 inv_width: 1.0 / tw.max(1) as f32,
                 inv_height: 1.0 / th.max(1) as f32,
                 radius: SSGI_RADIUS,
-                intensity: SSGI_INTENSITY,
-                thickness: 0.08,
-                sample_count: 8.0,
+                intensity: ssgi_intensity,
+                thickness: 0.055,
+                sample_count: 12.0,
                 frame_index: self.submitted_worlds as f32,
-                history_blend: 0.82,
+                history_blend: 0.86,
                 reset_history: if self.reset_temporal_history {
                     1.0
                 } else {

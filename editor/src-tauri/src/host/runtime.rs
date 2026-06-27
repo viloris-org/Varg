@@ -88,6 +88,8 @@ impl EditorHost {
             project.root.clone(),
             RuntimeProfile::RuntimeGame,
         );
+        let render_scaling = project_runtime_render_scaling(project)
+            .unwrap_or_else(runtime_min::runtime_scaling_settings_from_env);
         Ok(game_window::GameRuntimeSnapshot::new(
             config,
             project.root.clone(),
@@ -99,6 +101,7 @@ impl EditorHost {
                 .collect(),
             project.root.join(&project.manifest.asset_root),
             project.scene.to_scene_file(project.name())?,
+            render_scaling,
         ))
     }
 
@@ -197,4 +200,13 @@ impl EditorHost {
             self.scene_window = None;
         }
     }
+}
+
+fn project_runtime_render_scaling(
+    project: &engine_editor::ProjectContext,
+) -> Option<engine_render::RenderScalingSettings> {
+    let build_path = project.root.join(&project.manifest.build_config);
+    let build_text = std::fs::read_to_string(build_path).ok()?;
+    let build = toml::from_str::<engine_ecs::BuildConfiguration>(&build_text).ok()?;
+    Some(runtime_min::render_scaling_settings_from_build(&build))
 }

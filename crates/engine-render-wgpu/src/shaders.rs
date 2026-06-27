@@ -245,7 +245,7 @@ fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32
         }
     }
     let blocker_ratio = blocker_count / 25.0;
-    let penumbra = mix(1.0, 6.0, blocker_ratio);
+    let penumbra = mix(0.85, 3.5, blocker_ratio);
     var shadow_factor = 0.0;
     for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
@@ -933,29 +933,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(output_tex, coord, vec4<f32>(1.0, 0.0, 0.0, 1.0));
         return;
     }
-    var depth = textureLoad(depth_tex, coord, 0);
+    let depth = textureLoad(depth_tex, coord, 0);
     if (depth >= 1.0) {
         textureStore(output_tex, coord, vec4<f32>(1.0, 0.0, 0.0, 1.0));
         return;
     }
-    // Normal from depth gradient
-    var d0 = textureLoad(depth_tex, vec2<i32>(coord.x - 1, coord.y), 0);
-    var d1 = textureLoad(depth_tex, vec2<i32>(coord.x + 1, coord.y), 0);
-    var d2 = textureLoad(depth_tex, vec2<i32>(coord.x, coord.y - 1), 0);
-    var d3 = textureLoad(depth_tex, vec2<i32>(coord.x, coord.y + 1), 0);
-    var dx = (d1 - d0) * 100.0;
-    var dy = (d3 - d2) * 100.0;
-    var len = sqrt(dx * dx + dy * dy + 1.0);
-    var normal = vec3<f32>(dx / len, dy / len, 1.0 / len);
+    let d0 = textureLoad(depth_tex, vec2<i32>(coord.x - 1, coord.y), 0);
+    let d1 = textureLoad(depth_tex, vec2<i32>(coord.x + 1, coord.y), 0);
+    let d2 = textureLoad(depth_tex, vec2<i32>(coord.x, coord.y - 1), 0);
+    let d3 = textureLoad(depth_tex, vec2<i32>(coord.x, coord.y + 1), 0);
+    let dx = (d1 - d0) * 48.0;
+    let dy = (d3 - d2) * 48.0;
+    let normal = normalize(vec3<f32>(-dx, -dy, 1.0));
     // Noise from 4x4 texture
     var noise_coord = vec2<i32>(gid.xy % 4u);
     var noise = textureLoad(noise_tex, noise_coord, 0);
     var random_vec = noise.xyz * 2.0 - 1.0;
-    len = sqrt(random_vec.x * random_vec.x + random_vec.y * random_vec.y + random_vec.z * random_vec.z);
-    random_vec = vec3<f32>(random_vec.x / len, random_vec.y / len, random_vec.z / len);
+    let noise_len = sqrt(random_vec.x * random_vec.x + random_vec.y * random_vec.y + random_vec.z * random_vec.z);
+    random_vec = vec3<f32>(random_vec.x / noise_len, random_vec.y / noise_len, random_vec.z / noise_len);
     // SSAO
     var occlusion = 0.0;
-    let radius_px = params.radius * params.width;
+    let view_scale = mix(18.0, 95.0, 1.0 - depth);
+    let radius_px = clamp(params.radius * view_scale, 1.25, 18.0);
     for (var i = 0u; i < 32u; i = i + 1u) {
         var sample_dir = kernel[i].xyz;
         var d = sample_dir.x * normal.x + sample_dir.y * normal.y + sample_dir.z * normal.z;
@@ -967,23 +966,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var l2 = sample_dir.x * sample_dir.x + sample_dir.y * sample_dir.y + sample_dir.z * sample_dir.z;
         l2 = 1.0 / sqrt(l2);
         sample_dir = vec3<f32>(sample_dir.x * l2, sample_dir.y * l2, sample_dir.z * l2);
-        var off_x = coord.x + i32(sample_dir.x * radius_px);
-        var off_y = coord.y + i32(sample_dir.y * radius_px);
+        let sample_radius = radius_px * mix(0.35, 1.0, kernel[i].w);
+        var off_x = coord.x + i32(round(sample_dir.x * sample_radius));
+        var off_y = coord.y + i32(round(sample_dir.y * sample_radius));
         var sample_depth = 1.0;
         if (off_x >= 0 && off_y >= 0 && off_x < tex_w && off_y < tex_h) {
             sample_depth = textureLoad(depth_tex, vec2<i32>(off_x, off_y), 0);
         }
-        var diff = depth - sample_depth;
-        if (diff < 0.0) { diff = 0.0 - diff; }
-        diff = params.radius / (diff + 0.0001);
-        if (diff > 1.0) { diff = 1.0; }
-        if (diff < 0.0) { diff = 0.0; }
-        var rc = diff * diff * (3.0 - 2.0 * diff);
-        if (sample_depth < depth - params.bias) {
-            occlusion = occlusion + rc;
+        let delta = depth - sample_depth;
+        let range = smoothstep(0.0, params.radius * 3.0, params.radius / (abs(delta) + 0.0001));
+        let horizon = smoothstep(params.bias, params.bias + 0.018, delta);
+        if (sample_depth < 0.9999) {
+            occlusion = occlusion + horizon * range;
         }
     }
-    occlusion = 1.0 - (occlusion / 32.0) * params.intensity;
+    occlusion = 1.0 - pow(occlusion / 32.0, 0.85) * params.intensity;
     if (occlusion < 0.0) { occlusion = 0.0; }
     if (occlusion > 1.0) { occlusion = 1.0; }
     textureStore(output_tex, coord, vec4<f32>(occlusion, 0.0, 0.0, 1.0));
@@ -1112,7 +1109,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let hemi = vec3<f32>(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
         let ray = normalize(basis * hemi);
         let screen_dir = normalize(ray.xy + vec2<f32>(0.0001));
-        let radius_px = ssgi.radius * mix(18.0, 95.0, 1.0 - center_depth);
+        let radius_px = ssgi.radius * mix(16.0, 82.0, 1.0 - center_depth);
         var hit_color = vec3<f32>(0.0);
         var hit_weight = 0.0;
 
@@ -1134,8 +1131,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let sample_albedo = textureSampleLevel(albedo_tex, lin_sampler, sample_uv, 0.0).rgb;
                 let sample_radiance = textureSampleLevel(hdr_tex, lin_sampler, sample_uv, 0.0).rgb;
                 let facing = max(dot(n, ray), 0.0) * max(dot(sample_normal, -ray), 0.0);
+                let edge_fade = smoothstep(0.0, 0.08, sample_uv.x) * smoothstep(1.0, 0.92, sample_uv.x)
+                    * smoothstep(0.0, 0.08, sample_uv.y) * smoothstep(1.0, 0.92, sample_uv.y);
                 let attenuation = (1.0 - t) * (1.0 - t);
-                hit_color = sample_radiance * sample_albedo * facing * attenuation;
+                hit_color = min(sample_radiance, vec3<f32>(8.0)) * sample_albedo * facing * attenuation * edge_fade;
                 hit_weight = facing * attenuation;
                 break;
             }
@@ -1146,13 +1145,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let diffuse_gi = gi / max(weight_sum, 0.001);
-    let raw_color = diffuse_gi * albedo * ssgi.intensity * roughness * roughness;
+    let raw_color = min(diffuse_gi * albedo * ssgi.intensity * mix(0.35, 1.0, roughness), vec3<f32>(3.0));
     let motion = textureLoad(motion_tex, pixel, 0).xy;
     let history_uv = clamp(uv - motion, vec2<f32>(0.0), vec2<f32>(1.0));
     let history = textureSampleLevel(history_tex, lin_sampler, history_uv, 0.0).rgb;
     let history_weight = select(clamp(ssgi.history_blend, 0.0, 0.95), 0.0, ssgi.reset_history > 0.5);
-    let color = mix(raw_color, history, history_weight);
-    textureStore(output_tex, pixel, vec4<f32>(color, 1.0));
+    var neighborhood_min = raw_color;
+    var neighborhood_max = raw_color;
+    for (var oy = -1; oy <= 1; oy = oy + 1) {
+        for (var ox = -1; ox <= 1; ox = ox + 1) {
+            let ncoord = clamp(pixel + vec2<i32>(ox, oy), vec2<i32>(0), vec2<i32>(i32(size.x) - 1, i32(size.y) - 1));
+            let nd = textureLoad(depth_tex, ncoord, 0);
+            if (abs(nd - center_depth) < 0.015) {
+                let nuv = (vec2<f32>(ncoord) + vec2<f32>(0.5)) * vec2<f32>(ssgi.inv_width, ssgi.inv_height);
+                let sample_history = textureSampleLevel(history_tex, lin_sampler, nuv, 0.0).rgb;
+                neighborhood_min = min(neighborhood_min, sample_history);
+                neighborhood_max = max(neighborhood_max, sample_history);
+            }
+        }
+    }
+    let clamped_history = clamp(history, neighborhood_min - vec3<f32>(0.08), neighborhood_max + vec3<f32>(0.08));
+    let color = mix(raw_color, clamped_history, history_weight);
+    textureStore(output_tex, pixel, vec4<f32>(max(color, vec3<f32>(0.0)), 1.0));
 }
 "#;
 
@@ -1274,7 +1288,7 @@ fn resolve_hdr(uv: vec2<f32>) -> vec3<f32> {
         clamp(i32(clamped_uv.x * post.render_width), 0, i32(post.render_width) - 1),
         clamp(i32(clamped_uv.y * post.render_height), 0, i32(post.render_height) - 1)
     );
-    return textureLoad(hdr_tex, pixel, 0).rgb;
+    return sharpen_hdr(textureLoad(hdr_tex, pixel, 0).rgb, clamped_uv);
 }
 
 fn decode_post_normal(encoded: vec3<f32>) -> vec3<f32> {
@@ -1316,7 +1330,7 @@ fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {
         if (sample_depth < 0.9999 && abs(sample_depth - expected_depth) < 0.025 + t * 0.035) {
             let edge_fade = smoothstep(0.0, 0.12, sample_uv.x) * smoothstep(1.0, 0.88, sample_uv.x)
                 * smoothstep(0.0, 0.12, sample_uv.y) * smoothstep(1.0, 0.88, sample_uv.y);
-            let material_weight = mix(0.18, 1.0, metallic) * (1.0 - roughness);
+            let material_weight = smoothstep(0.08, 0.6, metallic) * pow(1.0 - roughness, 2.0);
             return textureSampleLevel(hdr_tex, lin_sampler, sample_uv, 0.0).rgb
                 * edge_fade * material_weight * post.ssr_intensity;
         }
@@ -1418,7 +1432,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clipped_history = clamp(history, neighborhood_min, neighborhood_max);
 
     let motion_len = length(motion * vec2<f32>(post.render_width, post.render_height));
-    let history_weight = clamp(mix(post.taa_history_weight, 0.55, saturate(motion_len * 0.08)), 0.0, 0.92);
+    let history_weight = clamp(mix(post.taa_history_weight, 0.38, saturate(motion_len * 0.1)), 0.0, 0.82);
     var resolved = mix(current, clipped_history, history_weight);
     if (color_distance(clipped_history, history) > 4.0) {
         resolved = mix(current, clipped_history, 0.45);

@@ -774,6 +774,10 @@ mod tests {
         assert_eq!(manifest.build_config, "build.runtime-min.toml");
         assert_eq!(preferences.theme, "system");
         assert!(build.diagnostics().is_empty());
+        assert_eq!(build.render.upscaler, "native");
+        assert!(!build.render.dynamic_resolution);
+        assert_eq!(build.render.min_render_scale_percent, 100);
+        assert_eq!(build.render.max_render_scale_percent, 100);
         assert_eq!(build.render.frame_generation, "disabled");
         assert_eq!(build.render.ui_composition, "after-frame-generation");
     }

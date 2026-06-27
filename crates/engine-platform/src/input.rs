@@ -12,6 +12,8 @@ pub enum KeyCode {
     Escape,
     /// Enter key.
     Enter,
+    /// Backspace key.
+    Backspace,
     /// Space key.
     Space,
     /// Up arrow key.
@@ -290,6 +292,16 @@ impl InputState {
         self.down_mouse_buttons.contains(&button)
     }
 
+    /// Returns whether a mouse button was pressed this frame.
+    pub fn mouse_button_pressed(&self, button: MouseButton) -> bool {
+        self.pressed_mouse_buttons.contains(&button)
+    }
+
+    /// Returns whether a mouse button was released this frame.
+    pub fn mouse_button_released(&self, button: MouseButton) -> bool {
+        self.released_mouse_buttons.contains(&button)
+    }
+
     /// Returns current cursor position.
     pub fn cursor_position(&self) -> Option<(f32, f32)> {
         self.cursor_position
@@ -298,6 +310,15 @@ impl InputState {
     /// Returns accumulated mouse delta for this frame.
     pub fn mouse_delta(&self) -> (f32, f32) {
         self.mouse_delta
+    }
+
+    /// Returns a copy of this input state with mouse delta axes multiplied by
+    /// the given signs.
+    pub fn with_mouse_delta_scale(&self, scale_x: f32, scale_y: f32) -> Self {
+        let mut input = self.clone();
+        input.mouse_delta.0 *= scale_x;
+        input.mouse_delta.1 *= scale_y;
+        input
     }
 
     /// Returns accumulated wheel delta for this frame.
@@ -417,6 +438,7 @@ impl ActionMap {
         match name {
             "Escape" => Some(KeyCode::Escape),
             "Enter" => Some(KeyCode::Enter),
+            "Backspace" => Some(KeyCode::Backspace),
             "Space" => Some(KeyCode::Space),
             "ArrowUp" => Some(KeyCode::ArrowUp),
             "ArrowDown" => Some(KeyCode::ArrowDown),
@@ -451,6 +473,24 @@ mod tests {
         input.apply_event(InputEvent::KeyUp(KeyCode::Character('w')));
         assert!(input.key_released(KeyCode::Character('w')));
         assert!(!input.key_down(KeyCode::Character('w')));
+    }
+
+    #[test]
+    fn mouse_button_transients_reset_at_frame_boundary() {
+        let mut input = InputState::default();
+        input.apply_event(InputEvent::MouseButtonDown(MouseButton::Left));
+
+        assert!(input.mouse_button_down(MouseButton::Left));
+        assert!(input.mouse_button_pressed(MouseButton::Left));
+
+        input.end_frame();
+
+        assert!(input.mouse_button_down(MouseButton::Left));
+        assert!(!input.mouse_button_pressed(MouseButton::Left));
+
+        input.apply_event(InputEvent::MouseButtonUp(MouseButton::Left));
+        assert!(input.mouse_button_released(MouseButton::Left));
+        assert!(!input.mouse_button_down(MouseButton::Left));
     }
 
     #[test]

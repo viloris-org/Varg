@@ -222,6 +222,10 @@ pub struct VargRuntimeContextRef<'a> {
     pub transform: Transform,
     /// Frame input state.
     pub input: &'a engine_platform::InputState,
+    /// Screen-space pointer positions that began this frame.
+    pub pointer_pressed: &'a [(f32, f32)],
+    /// Screen-space pointer positions that ended this frame.
+    pub pointer_released: &'a [(f32, f32)],
     /// Delta time for the lifecycle call.
     pub delta_time: f32,
     /// Total elapsed runtime time in seconds.
@@ -249,6 +253,8 @@ pub struct VargRuntimeOutput {
     pub ui_commands: Vec<VargUiCommand>,
     /// Audio commands emitted by script during this hook.
     pub audio_commands: Vec<VargAudioCommand>,
+    /// Render environment commands emitted by script during this hook.
+    pub render_commands: Vec<VargRenderCommand>,
     /// Scene object creation requests emitted during this hook.
     pub spawn_requests: Vec<VargSpawnRequest>,
     /// Scene object destruction requests emitted during this hook.
@@ -257,6 +263,26 @@ pub struct VargRuntimeOutput {
     pub destroy_self: bool,
     /// Optional request to capture or release the game window mouse.
     pub mouse_capture: Option<bool>,
+}
+
+/// Render environment request emitted by Varg gameplay scripts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VargRenderCommand {
+    /// Switch to screen-space global illumination.
+    UseScreenSpaceGi,
+    /// Configure probe-volume global illumination.
+    UseProbeVolumeGi {
+        /// World-space center.
+        center: Vec3,
+        /// World-space extents.
+        extent: Vec3,
+        /// Probe counts on x/y/z axes, represented as floats at the script boundary.
+        counts: Vec3,
+        /// Indirect lighting multiplier.
+        intensity: f32,
+    },
+    /// Change GI intensity without replacing the current GI mode.
+    SetGiIntensity(f32),
 }
 
 /// A lightweight procedural audio request emitted by Varg gameplay scripts.
@@ -375,6 +401,23 @@ pub struct VargSceneContext {
     pub shared_positions_by_name: Option<Arc<HashMap<String, Vec3>>>,
     /// Shared local positions grouped by tag.
     pub shared_positions_by_tag: Option<Arc<HashMap<String, Vec<Vec3>>>>,
+    /// World-space bounds keyed by user-visible object name.
+    pub bounds_by_name: HashMap<String, VargSceneBounds>,
+    /// World-space bounds grouped by tag.
+    pub bounds_by_tag: HashMap<String, Vec<VargSceneBounds>>,
+    /// Shared world-space bounds keyed by user-visible object name.
+    pub shared_bounds_by_name: Option<Arc<HashMap<String, VargSceneBounds>>>,
+    /// Shared world-space bounds grouped by tag.
+    pub shared_bounds_by_tag: Option<Arc<HashMap<String, Vec<VargSceneBounds>>>>,
+}
+
+/// Axis-aligned world-space bounds available to gameplay scripts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VargSceneBounds {
+    /// Minimum corner.
+    pub min: Vec3,
+    /// Maximum corner.
+    pub max: Vec3,
 }
 
 impl VargSceneContext {
@@ -385,6 +428,25 @@ impl VargSceneContext {
         positions_by_name: Arc<HashMap<String, Vec3>>,
         positions_by_tag: Arc<HashMap<String, Vec<Vec3>>>,
     ) -> Self {
+        Self::from_shared_scene(
+            entity_name,
+            entity_tag,
+            positions_by_name,
+            positions_by_tag,
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+        )
+    }
+
+    /// Creates a context backed by shared frame-level scene snapshots.
+    pub fn from_shared_scene(
+        entity_name: impl Into<String>,
+        entity_tag: impl Into<String>,
+        positions_by_name: Arc<HashMap<String, Vec3>>,
+        positions_by_tag: Arc<HashMap<String, Vec<Vec3>>>,
+        bounds_by_name: Arc<HashMap<String, VargSceneBounds>>,
+        bounds_by_tag: Arc<HashMap<String, Vec<VargSceneBounds>>>,
+    ) -> Self {
         Self {
             entity_name: entity_name.into(),
             entity_tag: entity_tag.into(),
@@ -392,6 +454,10 @@ impl VargSceneContext {
             positions_by_tag: HashMap::new(),
             shared_positions_by_name: Some(positions_by_name),
             shared_positions_by_tag: Some(positions_by_tag),
+            bounds_by_name: HashMap::new(),
+            bounds_by_tag: HashMap::new(),
+            shared_bounds_by_name: Some(bounds_by_name),
+            shared_bounds_by_tag: Some(bounds_by_tag),
         }
     }
 
@@ -415,6 +481,27 @@ impl VargSceneContext {
             .get(tag)?
             .iter()
             .map(|target| (*target - origin).length())
+            .reduce(f32::min)
+    }
+
+    /// Returns the nearest distance from the owning entity position to object
+    /// bounds with the given tag. The distance is zero while inside bounds.
+    pub fn distance_to_tag_bounds(&self, origin: Vec3, tag: &str) -> Option<f32> {
+        self.bounds_by_tag()
+            .get(tag)?
+            .iter()
+            .map(|bounds| bounds.distance_to_point(origin))
+            .reduce(f32::min)
+    }
+
+    /// Returns the nearest horizontal distance from the owning entity position
+    /// to object bounds with the given tag. Y is ignored, so the distance is
+    /// zero when the point is above or below the X/Z footprint.
+    pub fn horizontal_distance_to_tag_bounds(&self, origin: Vec3, tag: &str) -> Option<f32> {
+        self.bounds_by_tag()
+            .get(tag)?
+            .iter()
+            .map(|bounds| bounds.horizontal_distance_to_point(origin))
             .reduce(f32::min)
     }
 
@@ -450,6 +537,68 @@ impl VargSceneContext {
             .as_deref()
             .unwrap_or(&self.positions_by_tag)
     }
+
+    fn bounds_by_tag(&self) -> &HashMap<String, Vec<VargSceneBounds>> {
+        self.shared_bounds_by_tag
+            .as_deref()
+            .unwrap_or(&self.bounds_by_tag)
+    }
+}
+
+impl VargSceneBounds {
+    /// Creates axis-aligned bounds from a center and full size.
+    pub fn from_center_size(center: Vec3, size: Vec3) -> Self {
+        let half = Vec3::new(size.x.abs(), size.y.abs(), size.z.abs()) * 0.5;
+        Self {
+            min: center - half,
+            max: center + half,
+        }
+    }
+
+    /// Returns the shortest 3D distance from these bounds to a point.
+    pub fn distance_to_point(self, point: Vec3) -> f32 {
+        let dx = if point.x < self.min.x {
+            self.min.x - point.x
+        } else if point.x > self.max.x {
+            point.x - self.max.x
+        } else {
+            0.0
+        };
+        let dy = if point.y < self.min.y {
+            self.min.y - point.y
+        } else if point.y > self.max.y {
+            point.y - self.max.y
+        } else {
+            0.0
+        };
+        let dz = if point.z < self.min.z {
+            self.min.z - point.z
+        } else if point.z > self.max.z {
+            point.z - self.max.z
+        } else {
+            0.0
+        };
+        Vec3::new(dx, dy, dz).length()
+    }
+
+    /// Returns the shortest X/Z distance from these bounds to a point.
+    pub fn horizontal_distance_to_point(self, point: Vec3) -> f32 {
+        let dx = if point.x < self.min.x {
+            self.min.x - point.x
+        } else if point.x > self.max.x {
+            point.x - self.max.x
+        } else {
+            0.0
+        };
+        let dz = if point.z < self.min.z {
+            self.min.z - point.z
+        } else if point.z > self.max.z {
+            point.z - self.max.z
+        } else {
+            0.0
+        };
+        Vec3::new(dx, 0.0, dz).length()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -462,6 +611,15 @@ enum RuntimeStatement {
         value: Expression,
     },
     AddToPosition {
+        axis: Axis,
+        value: Expression,
+    },
+    SetRotation(Expression),
+    SetRotationAxis {
+        axis: Axis,
+        value: Expression,
+    },
+    AddToRotation {
         axis: Axis,
         value: Expression,
     },
@@ -548,6 +706,14 @@ enum RuntimeStatement {
     StopAudioLoop {
         id: Expression,
     },
+    UseScreenSpaceGi,
+    UseProbeVolumeGi {
+        center: Expression,
+        extent: Expression,
+        counts: Expression,
+        intensity: Expression,
+    },
+    SetGiIntensity(Expression),
     SetMouseCapture(Expression),
     UiLabel {
         id: Expression,
@@ -870,6 +1036,8 @@ impl VargScript {
             VargRuntimeContextRef {
                 transform: context.transform,
                 input: &context.input,
+                pointer_pressed: &[],
+                pointer_released: &[],
                 delta_time: context.delta_time,
                 total_time: context.total_time,
                 frame_index: context.frame_index,
@@ -907,6 +1075,7 @@ impl VargScript {
             logs: Vec::new(),
             ui_commands: Vec::new(),
             audio_commands: Vec::new(),
+            render_commands: Vec::new(),
             spawn_requests: Vec::new(),
             destroy_nearest_requests: Vec::new(),
             destroy_self: false,
@@ -918,6 +1087,8 @@ impl VargScript {
         let mut env = RuntimeEnvironment {
             script: self,
             input: context.input,
+            pointer_pressed: context.pointer_pressed,
+            pointer_released: context.pointer_released,
             delta_time: context.delta_time,
             total_time: context.total_time,
             frame_index: context.frame_index,
@@ -929,6 +1100,7 @@ impl VargScript {
             logs: &mut output.logs,
             ui_commands: &mut output.ui_commands,
             audio_commands: &mut output.audio_commands,
+            render_commands: &mut output.render_commands,
             spawn_requests: &mut output.spawn_requests,
             destroy_nearest_requests: &mut output.destroy_nearest_requests,
             destroy_self: &mut output.destroy_self,
@@ -1742,6 +1914,7 @@ fn compile_vscene_object(
     let mut transform = Transform::IDENTITY;
     let mut mesh_renderer_child = None;
     let mut material_child = None;
+    let mut has_explicit_collider_size = false;
 
     if block.kind == "camera" {
         tag = "MainCamera".to_string();
@@ -1770,6 +1943,7 @@ fn compile_vscene_object(
                 components.push(ComponentData::Rigidbody(compile_rigidbody_component(child)))
             }
             "collider" => {
+                has_explicit_collider_size |= child.properties.contains_key("size");
                 components.push(ComponentData::Collider(compile_collider_component(child)))
             }
             "script" => components.push(ComponentData::Script(compile_script_component(child))),
@@ -1802,6 +1976,17 @@ fn compile_vscene_object(
         );
     }
 
+    if let Some(primitive_scale) = vscene_mesh_primitive_scale(block, mesh_renderer_child) {
+        if has_explicit_collider_size {
+            preserve_explicit_collider_size(&mut components, primitive_scale);
+        }
+        transform.scale = Vec3::new(
+            transform.scale.x * primitive_scale.x,
+            transform.scale.y * primitive_scale.y,
+            transform.scale.z * primitive_scale.z,
+        );
+    }
+
     Ok(SerializedGameObject {
         object: GameObject {
             id: engine_core::EntityId::from_u128(u128::from(id)),
@@ -1829,6 +2014,15 @@ fn apply_vscene_transform_properties(block: &VsceneBlock, transform: &mut Transf
     if let Some(scale) = vec3_property(block, "scale") {
         transform.scale = scale;
     }
+}
+
+fn quat_from_script_rotation(rotation: Vec3) -> Quat {
+    Quat::from_euler_deg(rotation.z, rotation.y, rotation.x)
+}
+
+fn script_rotation_from_quat(rotation: Quat) -> Vec3 {
+    let (yaw, pitch, roll) = rotation.to_euler_deg();
+    Vec3::new(pitch, yaw, roll)
 }
 
 fn compile_camera_component(block: &VsceneBlock) -> CameraComponentData {
@@ -1890,6 +2084,7 @@ fn normalize_vscene_mesh(value: &str) -> Option<String> {
         "sphere" | "primitive.sphere" | "debug/sphere" => "debug/sphere".to_string(),
         "plane" | "primitive.plane" | "debug/plane" => "debug/plane".to_string(),
         "cylinder" | "primitive.cylinder" | "debug/cylinder" => "debug/cylinder".to_string(),
+        "cone" | "primitive.cone" | "debug/cone" => "debug/cone".to_string(),
         other if other.starts_with("debug/") => other.to_string(),
         other if other.starts_with("model:") => other.to_string(),
         other if other.ends_with(".gltf") || other.ends_with(".glb") => format!("model:{other}"),
@@ -1907,11 +2102,89 @@ fn vscene_mesh_builtin_from_call(value: &VsceneValue) -> Option<String> {
         "Sphere" | "primitive.sphere" => Some("debug/sphere".to_string()),
         "Plane" | "primitive.plane" => Some("debug/plane".to_string()),
         "Cylinder" | "primitive.cylinder" => Some("debug/cylinder".to_string()),
+        "Cone" | "primitive.cone" => Some("debug/cone".to_string()),
         "Model" => args
             .get("path")
             .and_then(vscene_value_string)
             .map(|path| format!("model:{path}")),
         _ => None,
+    }
+}
+
+fn vscene_mesh_primitive_scale(object: &VsceneBlock, mesh: Option<&VsceneBlock>) -> Option<Vec3> {
+    mesh.and_then(vscene_mesh_primitive_scale_from_block)
+        .or_else(|| call_property(object, "mesh").and_then(vscene_mesh_primitive_scale_from_call))
+        .or_else(|| {
+            call_property(object, "geometry").and_then(vscene_mesh_primitive_scale_from_call)
+        })
+}
+
+fn vscene_mesh_primitive_scale_from_block(block: &VsceneBlock) -> Option<Vec3> {
+    let kind = string_property(block, "builtin")
+        .or_else(|| string_property(block, "type"))
+        .or_else(|| string_property(block, "kind"))?;
+    primitive_scale_from_kind(
+        &kind,
+        vec3_property(block, "size"),
+        number_property(block, "radius"),
+        number_property(block, "height").or_else(|| number_property(block, "depth")),
+    )
+}
+
+fn vscene_mesh_primitive_scale_from_call(value: &VsceneValue) -> Option<Vec3> {
+    let VsceneValue::Call { function, args } = value else {
+        return None;
+    };
+    primitive_scale_from_kind(
+        function,
+        vscene_arg_vec3(args, "size"),
+        vscene_arg_number(args, "radius"),
+        vscene_arg_number(args, "height").or_else(|| vscene_arg_number(args, "depth")),
+    )
+}
+
+fn primitive_scale_from_kind(
+    kind: &str,
+    size: Option<Vec3>,
+    radius: Option<f32>,
+    height: Option<f32>,
+) -> Option<Vec3> {
+    match kind {
+        "Box" | "Cube" | "box" | "cube" | "primitive.box" | "debug/cube" => size,
+        "Sphere" | "sphere" | "primitive.sphere" | "debug/sphere" => {
+            radius.map(|radius| Vec3::new(radius * 2.0, radius * 2.0, radius * 2.0))
+        }
+        "Cylinder" | "cylinder" | "primitive.cylinder" | "debug/cylinder" => {
+            let diameter = radius.unwrap_or(0.5) * 2.0;
+            Some(Vec3::new(diameter, height.unwrap_or(1.0), diameter))
+        }
+        "Cone" | "cone" | "primitive.cone" | "debug/cone" => {
+            let diameter = radius.unwrap_or(0.5) * 2.0;
+            Some(Vec3::new(diameter, height.unwrap_or(1.0), diameter))
+        }
+        "Plane" | "plane" | "primitive.plane" | "debug/plane" => size,
+        _ => None,
+    }
+}
+
+fn preserve_explicit_collider_size(components: &mut [ComponentData], primitive_scale: Vec3) {
+    for component in components {
+        let ComponentData::Collider(collider) = component else {
+            continue;
+        };
+        collider.size = Vec3::new(
+            divide_or_zero(collider.size.x, primitive_scale.x),
+            divide_or_zero(collider.size.y, primitive_scale.y),
+            divide_or_zero(collider.size.z, primitive_scale.z),
+        );
+    }
+}
+
+fn divide_or_zero(value: f32, divisor: f32) -> f32 {
+    if divisor.abs() <= f32::EPSILON {
+        0.0
+    } else {
+        value / divisor
     }
 }
 
@@ -2121,6 +2394,20 @@ fn call_property<'a>(block: &'a VsceneBlock, key: &str) -> Option<&'a VsceneValu
 fn vscene_value_string(value: &VsceneValue) -> Option<String> {
     match value {
         VsceneValue::String(value) | VsceneValue::Identifier(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn vscene_arg_number(args: &HashMap<String, VsceneValue>, key: &str) -> Option<f32> {
+    match args.get(key)? {
+        VsceneValue::Number(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn vscene_arg_vec3(args: &HashMap<String, VsceneValue>, key: &str) -> Option<Vec3> {
+    match args.get(key)? {
+        VsceneValue::Vec3(value) | VsceneValue::Color(value) => Some(*value),
         _ => None,
     }
 }
@@ -2535,6 +2822,8 @@ fn normalize_params(params: &str) -> String {
 struct RuntimeEnvironment<'a> {
     script: &'a VargScript,
     input: &'a engine_platform::InputState,
+    pointer_pressed: &'a [(f32, f32)],
+    pointer_released: &'a [(f32, f32)],
     delta_time: f32,
     total_time: f32,
     frame_index: u64,
@@ -2546,6 +2835,7 @@ struct RuntimeEnvironment<'a> {
     logs: &'a mut Vec<String>,
     ui_commands: &'a mut Vec<VargUiCommand>,
     audio_commands: &'a mut Vec<VargAudioCommand>,
+    render_commands: &'a mut Vec<VargRenderCommand>,
     spawn_requests: &'a mut Vec<VargSpawnRequest>,
     destroy_nearest_requests: &'a mut Vec<VargDestroyNearestRequest>,
     destroy_self: &'a mut bool,
@@ -2587,6 +2877,29 @@ impl RuntimeEnvironment<'_> {
                     Axis::Y => self.transform.translation.y += value,
                     Axis::Z => self.transform.translation.z += value,
                 }
+            }
+            RuntimeStatement::SetRotation(expression) => {
+                self.transform.rotation = quat_from_script_rotation(self.eval_vec3(expression));
+            }
+            RuntimeStatement::SetRotationAxis { axis, value } => {
+                let mut rotation = script_rotation_from_quat(self.transform.rotation);
+                let value = self.eval_number(value);
+                match axis {
+                    Axis::X => rotation.x = value,
+                    Axis::Y => rotation.y = value,
+                    Axis::Z => rotation.z = value,
+                }
+                self.transform.rotation = quat_from_script_rotation(rotation);
+            }
+            RuntimeStatement::AddToRotation { axis, value } => {
+                let mut rotation = script_rotation_from_quat(self.transform.rotation);
+                let value = self.eval_number(value);
+                match axis {
+                    Axis::X => rotation.x += value,
+                    Axis::Y => rotation.y += value,
+                    Axis::Z => rotation.z += value,
+                }
+                self.transform.rotation = quat_from_script_rotation(rotation);
             }
             RuntimeStatement::AssignState { name, value } => {
                 let value = self.eval_json(value);
@@ -2752,16 +3065,21 @@ impl RuntimeEnvironment<'_> {
                 size,
                 script,
             } => {
+                let name = self
+                    .eval_string(name)
+                    .unwrap_or_else(|| "Spawned Box".to_string());
+                let tag = self.eval_string(tag).unwrap_or_default();
+                let position = self.eval_vec3(position);
+                let size = self.eval_vec3(size);
+                let script = self.empty_string_as_none(script);
                 self.spawn_requests.push(VargSpawnRequest {
-                    name: self
-                        .eval_string(name)
-                        .unwrap_or_else(|| "Spawned Box".to_string()),
-                    tag: self.eval_string(tag).unwrap_or_default(),
+                    name,
+                    tag,
                     builtin_mesh: "debug/cube".to_string(),
                     collider_shape: "box".to_string(),
-                    position: self.eval_vec3(position),
-                    size: self.eval_vec3(size),
-                    script: self.empty_string_as_none(script),
+                    position,
+                    size,
+                    script,
                 });
             }
             RuntimeStatement::SpawnSphere {
@@ -2772,23 +3090,29 @@ impl RuntimeEnvironment<'_> {
                 script,
             } => {
                 let diameter = self.eval_number(radius).max(0.0) * 2.0;
+                let name = self
+                    .eval_string(name)
+                    .unwrap_or_else(|| "Spawned Sphere".to_string());
+                let tag = self.eval_string(tag).unwrap_or_default();
+                let position = self.eval_vec3(position);
+                let script = self.empty_string_as_none(script);
                 self.spawn_requests.push(VargSpawnRequest {
-                    name: self
-                        .eval_string(name)
-                        .unwrap_or_else(|| "Spawned Sphere".to_string()),
-                    tag: self.eval_string(tag).unwrap_or_default(),
+                    name,
+                    tag,
                     builtin_mesh: "debug/sphere".to_string(),
                     collider_shape: "sphere".to_string(),
-                    position: self.eval_vec3(position),
+                    position,
                     size: Vec3::new(diameter, diameter, diameter),
-                    script: self.empty_string_as_none(script),
+                    script,
                 });
             }
             RuntimeStatement::DestroyNearestWithTag { tag, radius } => {
+                let tag = self.eval_string(tag).unwrap_or_default();
+                let radius = self.eval_number(radius).max(0.0);
                 self.destroy_nearest_requests
                     .push(VargDestroyNearestRequest {
-                        tag: self.eval_string(tag).unwrap_or_default(),
-                        radius: self.eval_number(radius).max(0.0),
+                        tag,
+                        radius,
                         origin: self.transform.translation,
                     });
             }
@@ -2799,13 +3123,17 @@ impl RuntimeEnvironment<'_> {
                 volume,
                 spatial,
             } => {
+                let waveform = self
+                    .eval_string(waveform)
+                    .unwrap_or_else(|| "sine".to_string());
+                let frequency_hz = self.eval_number(frequency);
+                let duration_seconds = self.eval_number(duration);
+                let volume = self.eval_number(volume);
                 self.audio_commands.push(VargAudioCommand::PlayTone {
-                    waveform: self
-                        .eval_string(waveform)
-                        .unwrap_or_else(|| "sine".to_string()),
-                    frequency_hz: self.eval_number(frequency),
-                    duration_seconds: self.eval_number(duration),
-                    volume: self.eval_number(volume),
+                    waveform,
+                    frequency_hz,
+                    duration_seconds,
+                    volume,
                     spatial: *spatial,
                     position: self.transform.translation,
                 });
@@ -2818,15 +3146,21 @@ impl RuntimeEnvironment<'_> {
                 beats_per_note,
                 volume,
             } => {
+                let id = self.eval_string(id).unwrap_or_else(|| "main".to_string());
+                let waveform = self
+                    .eval_string(waveform)
+                    .unwrap_or_else(|| "sine".to_string());
+                let pattern = self.eval_string(pattern).unwrap_or_default();
+                let bpm = self.eval_number(bpm);
+                let beats_per_note = self.eval_number(beats_per_note);
+                let volume = self.eval_number(volume);
                 self.audio_commands.push(VargAudioCommand::StartLoop {
-                    id: self.eval_string(id).unwrap_or_else(|| "main".to_string()),
-                    waveform: self
-                        .eval_string(waveform)
-                        .unwrap_or_else(|| "sine".to_string()),
-                    pattern: self.eval_string(pattern).unwrap_or_default(),
-                    bpm: self.eval_number(bpm),
-                    beats_per_note: self.eval_number(beats_per_note),
-                    volume: self.eval_number(volume),
+                    id,
+                    waveform,
+                    pattern,
+                    bpm,
+                    beats_per_note,
+                    volume,
                 });
             }
             RuntimeStatement::StopAudioLoop { id } => {
@@ -2834,16 +3168,43 @@ impl RuntimeEnvironment<'_> {
                     id: self.eval_string(id).unwrap_or_else(|| "main".to_string()),
                 });
             }
+            RuntimeStatement::UseScreenSpaceGi => {
+                self.render_commands
+                    .push(VargRenderCommand::UseScreenSpaceGi);
+            }
+            RuntimeStatement::UseProbeVolumeGi {
+                center,
+                extent,
+                counts,
+                intensity,
+            } => {
+                let center = self.eval_vec3(center);
+                let extent = self.eval_vec3(extent);
+                let counts = self.eval_vec3(counts);
+                let intensity = self.eval_number(intensity);
+                self.render_commands
+                    .push(VargRenderCommand::UseProbeVolumeGi {
+                        center,
+                        extent,
+                        counts,
+                        intensity,
+                    });
+            }
+            RuntimeStatement::SetGiIntensity(intensity) => {
+                let intensity = self.eval_number(intensity);
+                self.render_commands
+                    .push(VargRenderCommand::SetGiIntensity(intensity));
+            }
             RuntimeStatement::SetMouseCapture(expression) => {
                 *self.mouse_capture = Some(self.eval_bool(expression));
             }
             RuntimeStatement::UiLabel { id, text, x, y } => {
-                self.ui_commands.push(VargUiCommand::Label {
-                    id: self.eval_string(id).unwrap_or_default(),
-                    text: self.eval_display_string(text),
-                    x: self.eval_number(x),
-                    y: self.eval_number(y),
-                });
+                let id = self.eval_string(id).unwrap_or_default();
+                let text = self.eval_display_string(text);
+                let x = self.eval_number(x);
+                let y = self.eval_number(y);
+                self.ui_commands
+                    .push(VargUiCommand::Label { id, text, x, y });
             }
             RuntimeStatement::UiRect {
                 id,
@@ -2853,24 +3214,30 @@ impl RuntimeEnvironment<'_> {
                 height,
                 color,
             } => {
+                let id = self.eval_string(id).unwrap_or_default();
+                let x = self.eval_number(x);
+                let y = self.eval_number(y);
+                let width = self.eval_number(width).max(0.0);
+                let height = self.eval_number(height).max(0.0);
+                let color = [
+                    self.eval_number(&color[0]).clamp(0.0, 1.0),
+                    self.eval_number(&color[1]).clamp(0.0, 1.0),
+                    self.eval_number(&color[2]).clamp(0.0, 1.0),
+                    self.eval_number(&color[3]).clamp(0.0, 1.0),
+                ];
                 self.ui_commands.push(VargUiCommand::Rect {
-                    id: self.eval_string(id).unwrap_or_default(),
-                    x: self.eval_number(x),
-                    y: self.eval_number(y),
-                    width: self.eval_number(width).max(0.0),
-                    height: self.eval_number(height).max(0.0),
-                    color: [
-                        self.eval_number(&color[0]).clamp(0.0, 1.0),
-                        self.eval_number(&color[1]).clamp(0.0, 1.0),
-                        self.eval_number(&color[2]).clamp(0.0, 1.0),
-                        self.eval_number(&color[3]).clamp(0.0, 1.0),
-                    ],
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
                 });
             }
         }
     }
 
-    fn eval_condition(&self, condition: &ConditionExpression) -> bool {
+    fn eval_condition(&mut self, condition: &ConditionExpression) -> bool {
         match condition {
             ConditionExpression::InputDown(action) | ConditionExpression::ActionDown(action) => {
                 input_action_down(self.input, action)
@@ -2910,7 +3277,7 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn eval_vec3(&self, expression: &Expression) -> Vec3 {
+    fn eval_vec3(&mut self, expression: &Expression) -> Vec3 {
         match expression {
             Expression::Vec3(x, y, z) => Vec3::new(
                 self.eval_number(x),
@@ -2921,15 +3288,20 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn eval_json(&self, expression: &Expression) -> serde_json::Value {
+    fn eval_json(&mut self, expression: &Expression) -> serde_json::Value {
         match expression {
             Expression::String(value) => serde_json::Value::String(value.clone()),
             Expression::Bool(value) => serde_json::Value::Bool(*value),
+            Expression::Call { function, args }
+                if matches!(function.as_str(), "ui.input" | "UI.input") =>
+            {
+                serde_json::Value::String(self.eval_ui_input_string(args))
+            }
             _ => serde_json::Value::from(self.eval_number(expression) as f64),
         }
     }
 
-    fn eval_bool(&self, expression: &Expression) -> bool {
+    fn eval_bool(&mut self, expression: &Expression) -> bool {
         match expression {
             Expression::Bool(value) => *value,
             Expression::String(value) => !value.is_empty(),
@@ -2937,7 +3309,7 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn eval_number(&self, expression: &Expression) -> f32 {
+    fn eval_number(&mut self, expression: &Expression) -> f32 {
         match expression {
             Expression::Number(value) => *value,
             Expression::String(_) => 0.0,
@@ -3053,7 +3425,7 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn call_number(&self, function: &str, args: &[Expression]) -> f32 {
+    fn call_number(&mut self, function: &str, args: &[Expression]) -> f32 {
         match function {
             "entity.hasTag" => {
                 if args.len() != 1 {
@@ -3079,6 +3451,28 @@ impl RuntimeEnvironment<'_> {
                 }
                 self.eval_string(&args[0])
                     .and_then(|tag| self.scene.distance_to_tag(self.transform.translation, &tag))
+                    .unwrap_or(0.0)
+            }
+            "scene.distanceToTagBounds" | "distanceToTagBounds" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|tag| {
+                        self.scene
+                            .distance_to_tag_bounds(self.transform.translation, &tag)
+                    })
+                    .unwrap_or(0.0)
+            }
+            "scene.horizontalDistanceToTagBounds" | "horizontalDistanceToTagBounds" => {
+                if args.len() != 1 {
+                    return 0.0;
+                }
+                self.eval_string(&args[0])
+                    .and_then(|tag| {
+                        self.scene
+                            .horizontal_distance_to_tag_bounds(self.transform.translation, &tag)
+                    })
                     .unwrap_or(0.0)
             }
             "playerDistance" | "scene.playerDistance" => self
@@ -3127,6 +3521,16 @@ impl RuntimeEnvironment<'_> {
                 .cursor_position()
                 .map(|position| position.1)
                 .unwrap_or(0.0),
+            "Input.pointerDown" | "Input.touchDown" => self
+                .input
+                .mouse_button_down(engine_platform::MouseButton::Left)
+                as u8 as f32,
+            "Input.pointerPressed" | "Input.touchPressed" => {
+                (!self.pointer_pressed.is_empty()) as u8 as f32
+            }
+            "Input.pointerReleased" | "Input.touchReleased" => {
+                (!self.pointer_released.is_empty()) as u8 as f32
+            }
             "sin" | "Math.sin" => self.unary_math(args, f32::sin),
             "cos" | "Math.cos" => self.unary_math(args, f32::cos),
             "tan" | "Math.tan" => self.unary_math(args, f32::tan),
@@ -3161,8 +3565,351 @@ impl RuntimeEnvironment<'_> {
                 let t = self.eval_number(&args[2]);
                 from + (to - from) * t
             }
+            "smoothstep" | "Math.smoothstep" => {
+                if args.len() != 3 {
+                    return 0.0;
+                }
+                let edge0 = self.eval_number(&args[0]);
+                let edge1 = self.eval_number(&args[1]);
+                if (edge1 - edge0).abs() <= f32::EPSILON {
+                    return 0.0;
+                }
+                let t = ((self.eval_number(&args[2]) - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            }
+            "easeIn" | "Math.easeIn" => {
+                let t = args
+                    .first()
+                    .map(|arg| self.eval_number(arg).clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
+                t * t
+            }
+            "easeOut" | "Math.easeOut" => {
+                let t = args
+                    .first()
+                    .map(|arg| self.eval_number(arg).clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
+                1.0 - (1.0 - t) * (1.0 - t)
+            }
+            "easeInOut" | "Math.easeInOut" => {
+                let t = args
+                    .first()
+                    .map(|arg| self.eval_number(arg).clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) * 0.5
+                }
+            }
+            "pulse" | "Math.pulse" => {
+                let time = args
+                    .first()
+                    .map(|arg| self.eval_number(arg))
+                    .unwrap_or(self.total_time);
+                let frequency = args.get(1).map(|arg| self.eval_number(arg)).unwrap_or(1.0);
+                (time * frequency * std::f32::consts::TAU).sin() * 0.5 + 0.5
+            }
+            "ui.button" | "UI.button" => {
+                if args.len() != 6 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let text = self.eval_display_string(&args[1]);
+                let x = self.eval_number(&args[2]);
+                let y = self.eval_number(&args[3]);
+                let width = self.eval_number(&args[4]).max(0.0);
+                let height = self.eval_number(&args[5]).max(0.0);
+                let hot = self.pointer_over_rect(x, y, width, height);
+                let pressed = hot
+                    && self
+                        .input
+                        .mouse_button_down(engine_platform::MouseButton::Left);
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:bg"),
+                    x,
+                    y: if pressed { y + 1.0 } else { y },
+                    width,
+                    height,
+                    color: if pressed {
+                        [0.12, 0.24, 0.32, 0.98]
+                    } else if hot {
+                        [0.18, 0.32, 0.42, 0.94]
+                    } else {
+                        [0.08, 0.1, 0.14, 0.92]
+                    },
+                });
+                self.ui_commands.push(VargUiCommand::Label {
+                    id: format!("{id}:label"),
+                    text,
+                    x: x + 16.0,
+                    y: y + height * 0.5 - 6.0,
+                });
+                self.pointer_released
+                    .iter()
+                    .any(|(px, py)| point_in_rect(*px, *py, x, y, width, height))
+                    as u8 as f32
+            }
+            "ui.toggle" | "UI.toggle" => {
+                if args.len() != 6 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let current = self.eval_bool(&args[1]);
+                let x = self.eval_number(&args[2]);
+                let y = self.eval_number(&args[3]);
+                let width = self.eval_number(&args[4]).max(0.0);
+                let height = self.eval_number(&args[5]).max(0.0);
+                let clicked = self
+                    .pointer_released
+                    .iter()
+                    .any(|(px, py)| point_in_rect(*px, *py, x, y, width, height));
+                let next = if clicked { !current } else { current };
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:track"),
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: if next {
+                        [0.14, 0.48, 0.36, 0.95]
+                    } else {
+                        [0.12, 0.14, 0.18, 0.92]
+                    },
+                });
+                let knob_size = (height - 6.0).max(0.0);
+                let knob_x = if next {
+                    x + width - knob_size - 3.0
+                } else {
+                    x + 3.0
+                };
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:knob"),
+                    x: knob_x,
+                    y: y + 3.0,
+                    width: knob_size,
+                    height: knob_size,
+                    color: [0.95, 0.97, 1.0, 1.0],
+                });
+                next as u8 as f32
+            }
+            "ui.slider" | "UI.slider" => {
+                if args.len() != 8 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let current = self.eval_number(&args[1]);
+                let x = self.eval_number(&args[2]);
+                let y = self.eval_number(&args[3]);
+                let width = self.eval_number(&args[4]).max(1.0);
+                let height = self.eval_number(&args[5]).max(1.0);
+                let min = self.eval_number(&args[6]);
+                let max = self.eval_number(&args[7]);
+                let active = self.ui_drag_active(&id, x, y, width, height);
+                let next = if active {
+                    let cursor_x = self
+                        .input
+                        .cursor_position()
+                        .map(|position| position.0)
+                        .unwrap_or(x);
+                    let t = ((cursor_x - x) / width).clamp(0.0, 1.0);
+                    min + (max - min) * t
+                } else {
+                    current
+                };
+                let range = max - min;
+                let t = if range.abs() <= f32::EPSILON {
+                    0.0
+                } else {
+                    ((next - min) / range).clamp(0.0, 1.0)
+                };
+                let track_y = y + height * 0.5 - 3.0;
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:track"),
+                    x,
+                    y: track_y,
+                    width,
+                    height: 6.0,
+                    color: [0.12, 0.14, 0.18, 0.92],
+                });
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:fill"),
+                    x,
+                    y: track_y,
+                    width: width * t,
+                    height: 6.0,
+                    color: [0.18, 0.5, 0.78, 0.96],
+                });
+                self.ui_commands.push(VargUiCommand::Rect {
+                    id: format!("{id}:thumb"),
+                    x: x + width * t - 5.0,
+                    y: y + height * 0.5 - 8.0,
+                    width: 10.0,
+                    height: 16.0,
+                    color: if active {
+                        [1.0, 1.0, 1.0, 1.0]
+                    } else {
+                        [0.82, 0.88, 0.95, 1.0]
+                    },
+                });
+                next
+            }
+            "ui.dragArea" | "UI.dragArea" => {
+                if args.len() != 5 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let x = self.eval_number(&args[1]);
+                let y = self.eval_number(&args[2]);
+                let width = self.eval_number(&args[3]).max(0.0);
+                let height = self.eval_number(&args[4]).max(0.0);
+                self.ui_drag_active(&id, x, y, width, height) as u8 as f32
+            }
+            "ui.dragX" | "UI.dragX" => {
+                if args.len() != 5 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let x = self.eval_number(&args[1]);
+                let y = self.eval_number(&args[2]);
+                let width = self.eval_number(&args[3]).max(0.0);
+                let height = self.eval_number(&args[4]).max(0.0);
+                if self.ui_drag_active(&id, x, y, width, height) {
+                    self.input.mouse_delta().0
+                } else {
+                    0.0
+                }
+            }
+            "ui.dragY" | "UI.dragY" => {
+                if args.len() != 5 {
+                    return 0.0;
+                }
+                let id = self.eval_string(&args[0]).unwrap_or_default();
+                let x = self.eval_number(&args[1]);
+                let y = self.eval_number(&args[2]);
+                let width = self.eval_number(&args[3]).max(0.0);
+                let height = self.eval_number(&args[4]).max(0.0);
+                if self.ui_drag_active(&id, x, y, width, height) {
+                    self.input.mouse_delta().1
+                } else {
+                    0.0
+                }
+            }
             _ => 0.0,
         }
+    }
+
+    fn pointer_over_rect(&self, x: f32, y: f32, width: f32, height: f32) -> bool {
+        self.input
+            .cursor_position()
+            .is_some_and(|(px, py)| point_in_rect(px, py, x, y, width, height))
+    }
+
+    fn ui_drag_active(&mut self, id: &str, x: f32, y: f32, width: f32, height: f32) -> bool {
+        let active_key = "__ui_drag_active";
+        let pointer_down = self
+            .input
+            .mouse_button_down(engine_platform::MouseButton::Left);
+        if !pointer_down {
+            if self.state.get(active_key).and_then(|value| value.as_str()) == Some(id) {
+                self.state.remove(active_key);
+            }
+            return false;
+        }
+        if self.state.get(active_key).and_then(|value| value.as_str()) == Some(id) {
+            return true;
+        }
+        if self
+            .pointer_pressed
+            .iter()
+            .any(|(px, py)| point_in_rect(*px, *py, x, y, width, height))
+        {
+            self.state.insert(
+                active_key.to_string(),
+                serde_json::Value::String(id.to_string()),
+            );
+            return true;
+        }
+        false
+    }
+
+    fn eval_ui_input_string(&mut self, args: &[Expression]) -> String {
+        if args.len() != 6 {
+            return String::new();
+        }
+        let id = self.eval_string(&args[0]).unwrap_or_default();
+        let placeholder = self.eval_display_string(&args[1]);
+        let x = self.eval_number(&args[2]);
+        let y = self.eval_number(&args[3]);
+        let width = self.eval_number(&args[4]).max(0.0);
+        let height = self.eval_number(&args[5]).max(0.0);
+        let value_key = format!("__ui_input:{id}");
+        let focus_key = "__ui_focus";
+        if !self.pointer_released.is_empty() {
+            let hit = self
+                .pointer_released
+                .iter()
+                .any(|(px, py)| point_in_rect(*px, *py, x, y, width, height));
+            if hit {
+                self.state
+                    .insert(focus_key.to_string(), serde_json::Value::String(id.clone()));
+            } else if self.state.get(focus_key).and_then(|value| value.as_str())
+                == Some(id.as_str())
+            {
+                self.state.remove(focus_key);
+            }
+        }
+        let focused =
+            self.state.get(focus_key).and_then(|value| value.as_str()) == Some(id.as_str());
+        let mut text = self
+            .state
+            .get(&value_key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_default();
+        if focused {
+            for key in self.input.pressed_keys() {
+                match key {
+                    engine_platform::KeyCode::Backspace => {
+                        text.pop();
+                    }
+                    engine_platform::KeyCode::Enter => {
+                        self.state.remove(focus_key);
+                    }
+                    engine_platform::KeyCode::Space => text.push(' '),
+                    engine_platform::KeyCode::Character(ch) if !ch.is_control() => text.push(ch),
+                    _ => {}
+                }
+            }
+            self.state
+                .insert(value_key, serde_json::Value::String(text.clone()));
+        }
+        self.ui_commands.push(VargUiCommand::Rect {
+            id: format!("{id}:input_bg"),
+            x,
+            y,
+            width,
+            height,
+            color: if focused {
+                [0.1, 0.16, 0.24, 0.96]
+            } else {
+                [0.08, 0.1, 0.14, 0.92]
+            },
+        });
+        let display = if text.is_empty() {
+            placeholder
+        } else if focused && (self.frame_index / 30).is_multiple_of(2) {
+            format!("{text}|")
+        } else {
+            text.clone()
+        };
+        self.ui_commands.push(VargUiCommand::Label {
+            id: format!("{id}:input_text"),
+            text: display,
+            x: x + 10.0,
+            y: y + height * 0.5 - 6.0,
+        });
+        text
     }
 
     fn eval_string(&self, expression: &Expression) -> Option<String> {
@@ -3184,13 +3931,13 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn empty_string_as_none(&self, expression: &Expression) -> Option<String> {
+    fn empty_string_as_none(&mut self, expression: &Expression) -> Option<String> {
         self.eval_string(expression)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     }
 
-    fn eval_display_string(&self, expression: &Expression) -> String {
+    fn eval_display_string(&mut self, expression: &Expression) -> String {
         match expression {
             Expression::String(value) => value.clone(),
             Expression::Number(value) => format_display_number(*value),
@@ -3217,6 +3964,11 @@ impl RuntimeEnvironment<'_> {
                 .and_then(|value| value.get(field))
                 .map(json_display_string)
                 .unwrap_or_else(|| format_display_number(self.member_number(owner, field))),
+            Expression::Call { function, args }
+                if matches!(function.as_str(), "ui.input" | "UI.input") =>
+            {
+                self.eval_ui_input_string(args)
+            }
             Expression::Call { .. } => format_display_number(self.eval_number(expression)),
             Expression::Vec3(_, _, _) => format_display_number(self.eval_number(expression)),
             Expression::Binary { op, lhs, rhs } => match op {
@@ -3259,7 +4011,7 @@ impl RuntimeEnvironment<'_> {
         }
     }
 
-    fn unary_math(&self, args: &[Expression], op: impl FnOnce(f32) -> f32) -> f32 {
+    fn unary_math(&mut self, args: &[Expression], op: impl FnOnce(f32) -> f32) -> f32 {
         args.first()
             .map(|arg| op(self.eval_number(arg)))
             .unwrap_or(0.0)
@@ -3494,6 +4246,29 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
             });
         }
     }
+    for method in ["render.gi.useScreenSpace", "Render.gi.useScreenSpace"] {
+        if method_args(line, method).is_some() {
+            return Some(RuntimeStatement::UseScreenSpaceGi);
+        }
+    }
+    for method in ["render.gi.useProbeVolume", "Render.gi.useProbeVolume"] {
+        if let Some(content) = method_args(line, method) {
+            let args = split_top_level_commas(content);
+            if args.len() == 4 {
+                return Some(RuntimeStatement::UseProbeVolumeGi {
+                    center: parse_expression(args[0])?,
+                    extent: parse_expression(args[1])?,
+                    counts: parse_expression(args[2])?,
+                    intensity: parse_expression(args[3])?,
+                });
+            }
+        }
+    }
+    for method in ["render.gi.setIntensity", "Render.gi.setIntensity"] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetGiIntensity(parse_expression(content)?));
+        }
+    }
     if line.trim() == "Input.captureMouse()" {
         return Some(RuntimeStatement::SetMouseCapture(Expression::Bool(true)));
     }
@@ -3598,6 +4373,21 @@ fn parse_runtime_statement(line: &str) -> Option<RuntimeStatement> {
             value: parse_expression(value)?,
         });
     }
+    if let Some(value) = parse_rotation_assignment(line) {
+        return Some(RuntimeStatement::SetRotation(parse_expression(value)?));
+    }
+    if let Some((axis, value)) = parse_rotation_axis_assignment(line) {
+        return Some(RuntimeStatement::SetRotationAxis {
+            axis,
+            value: parse_expression(value)?,
+        });
+    }
+    if let Some((axis, value)) = parse_rotation_add(line) {
+        return Some(RuntimeStatement::AddToRotation {
+            axis,
+            value: parse_expression(value)?,
+        });
+    }
     if let Some((name, value)) = parse_state_assignment(line) {
         return Some(RuntimeStatement::AssignState {
             name: name.to_string(),
@@ -3683,6 +4473,10 @@ fn parse_condition_expression(condition: &str) -> Option<ConditionExpression> {
                 | "distanceTo"
                 | "scene.distanceToTag"
                 | "distanceToTag"
+                | "scene.distanceToTagBounds"
+                | "distanceToTagBounds"
+                | "scene.horizontalDistanceToTagBounds"
+                | "horizontalDistanceToTagBounds"
                 | "playerDistance"
                 | "scene.playerDistance"
         )
@@ -3875,6 +4669,41 @@ fn parse_position_axis(lhs: &str) -> Option<Axis> {
     }
 }
 
+fn parse_rotation_assignment(line: &str) -> Option<&str> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    match lhs.trim() {
+        "entity.rotation" | "rotation" => Some(rhs.trim()),
+        _ => None,
+    }
+}
+
+fn parse_rotation_axis_assignment(line: &str) -> Option<(Axis, &str)> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if lhs.contains('+') || lhs.contains('-') || lhs.contains('*') || lhs.contains('/') {
+        return None;
+    }
+    let axis = parse_rotation_axis(lhs.trim())?;
+    Some((axis, rhs.trim()))
+}
+
+fn parse_rotation_add(line: &str) -> Option<(Axis, &str)> {
+    let (lhs, rhs) = line.split_once("+=")?;
+    let axis = parse_rotation_axis(lhs.trim())?;
+    Some((axis, rhs.trim()))
+}
+
+fn parse_rotation_axis(lhs: &str) -> Option<Axis> {
+    match lhs {
+        "entity.rotation.x" | "rotation.x" => Some(Axis::X),
+        "entity.rotation.y" | "rotation.y" => Some(Axis::Y),
+        "entity.rotation.z" | "rotation.z" => Some(Axis::Z),
+        _ => None,
+    }
+}
+
 fn parse_state_add(line: &str) -> Option<(&str, &str)> {
     let (lhs, rhs) = line.split_once("+=")?;
     lhs.trim()
@@ -3940,6 +4769,14 @@ fn is_truthy_condition_source(source: &str) -> bool {
     if is_valid_runtime_binding_name(source) {
         return true;
     }
+    if parse_expression_call(source).is_some_and(|(function, _)| {
+        matches!(
+            function,
+            "ui.button" | "UI.button" | "ui.toggle" | "UI.toggle" | "ui.dragArea" | "UI.dragArea"
+        )
+    }) {
+        return true;
+    }
     source
         .strip_prefix("state.")
         .is_some_and(is_valid_runtime_binding_name)
@@ -3985,7 +4822,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
     if trimmed.starts_with("emit(") || trimmed.starts_with("emit ") {
         return (
             "unsupported runtime API `emit`".to_string(),
-            "The MVP runtime supports local script state, transform position changes, Input, mouse capture, Time, Math, `log(...)`, `wait(...)`, and basic `ui.*(...)` draw commands."
+            "The MVP runtime supports local script state, transform position changes, Input, mouse capture, Time, Math/easing helpers, `log(...)`, `wait(...)`, and basic interactive `ui.*(...)` controls."
                 .to_string(),
             "`emit(...)` is in the target language direction but is not wired into this runtime yet. Store a value in `state.*` or use `log(...)` for now."
                 .to_string(),
@@ -4033,7 +4870,7 @@ fn unsupported_runtime_statement_help(trimmed: &str) -> (String, String, String)
 
     (
         "unsupported runtime statement".to_string(),
-        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `scene.spawnBox(...)`, `scene.spawnSphere(...)`, `scene.destroyNearestWithTag(...)`, `Audio.playTone(...)`, `Audio.playTone3D(...)`, `Audio.startLoop(...)`, `Audio.stopLoop(...)`, `Input.captureMouse(...)`, `Input.releaseMouse()`, `ui.label(...)`, `ui.rect(...)`, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
+        "Supported statements are `let`/`var` locals, state assignment, position assignment, `entity.translate(...)`, `scene.spawnBox(...)`, `scene.spawnSphere(...)`, `scene.destroyNearestWithTag(...)`, `Audio.playTone(...)`, `Audio.playTone3D(...)`, `Audio.startLoop(...)`, `Audio.stopLoop(...)`, `Input.captureMouse(...)`, `Input.releaseMouse()`, `ui.label(...)`, `ui.rect(...)`, interactive `ui.button/toggle/slider/drag/input` expression calls, `if`, `for`, `while`, `return`, `break`, `continue`, `wait(...)`, and `log(...)`."
             .to_string(),
         "Rewrite this line using the supported MVP script API, or add runtime support before using this language construct."
             .to_string(),
@@ -4114,6 +4951,10 @@ fn parse_string_literal(value: &str) -> Option<String> {
     let value = value.strip_prefix('"')?;
     let end = value.rfind('"')?;
     Some(value[..end].to_string())
+}
+
+fn point_in_rect(px: f32, py: f32, x: f32, y: f32, width: f32, height: f32) -> bool {
+    px >= x && px <= x + width && py >= y && py <= y + height
 }
 
 fn parse_expression_call(source: &str) -> Option<(&str, &str)> {
@@ -4326,7 +5167,7 @@ fn default_action_keys(action: &str) -> Option<&'static [engine_platform::KeyCod
         "jump" | "Jump" | "Space" => Some(&[KeyCode::Space]),
         "fire" | "Fire" => Some(&[KeyCode::Character('f'), KeyCode::Character('e')]),
         "interact" | "Interact" => Some(&[KeyCode::Character('e')]),
-        "pause" | "Pause" | "Escape" => Some(&[KeyCode::Escape]),
+        "pause" | "Pause" | "Escape" | "Esc" => Some(&[KeyCode::Escape]),
         "moveForward" | "MoveForward" => Some(&[KeyCode::Character('w'), KeyCode::ArrowUp]),
         "moveBackward" | "MoveBackward" | "MoveBack" => {
             Some(&[KeyCode::Character('s'), KeyCode::ArrowDown])
@@ -4595,6 +5436,15 @@ mod tests {
         let box_mesh = mesh_for("BoxActor");
         assert_eq!(box_mesh.builtin_mesh.as_deref(), Some("debug/cube"));
         assert_eq!(box_mesh.material.builtin.as_deref(), Some("debug/red"));
+        assert_eq!(
+            file.objects
+                .iter()
+                .find(|record| record.object.name == "BoxActor")
+                .unwrap()
+                .local_transform
+                .scale,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
 
         let sphere_mesh = mesh_for("SphereActor");
         assert_eq!(sphere_mesh.builtin_mesh.as_deref(), Some("debug/sphere"));
@@ -4607,6 +5457,84 @@ mod tests {
         assert_eq!(
             mesh_for("ModelActor").builtin_mesh.as_deref(),
             Some("model:models/ship.gltf")
+        );
+    }
+
+    #[test]
+    fn vscene_primitive_size_scales_visual_mesh_without_doubling_explicit_colliders() {
+        let source = r##"scene PrimitiveSize {
+    entity Platform {
+        mesh: Box(size: Vec3(3, 0.5, 2))
+        collider {
+            shape: box
+            size: Vec3(3, 0.5, 2)
+        }
+    }
+
+    entity Beacon {
+        mesh: Cylinder(radius: 0.4, height: 2.5)
+    }
+
+    entity Crown {
+        mesh: Cone(radius: 0.8, height: 1.2)
+    }
+}
+"##;
+
+        let (file, diagnostics) =
+            compile_vscene_source_to_scene_file("scenes/primitive_size.vscene", source);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let file = file.unwrap();
+        let record = |name: &str| {
+            file.objects
+                .iter()
+                .find(|record| record.object.name == name)
+                .expect("object should compile")
+        };
+
+        let platform = record("Platform");
+        assert_eq!(platform.local_transform.scale, Vec3::new(3.0, 0.5, 2.0));
+        let collider = platform
+            .object
+            .components
+            .iter()
+            .find_map(|component| match component {
+                ComponentData::Collider(collider) => Some(collider),
+                _ => None,
+            })
+            .expect("platform should have collider");
+        assert_eq!(collider.size, Vec3::ONE);
+
+        assert_eq!(
+            record("Beacon").local_transform.scale,
+            Vec3::new(0.8, 2.5, 0.8)
+        );
+        assert_eq!(
+            record("Crown").local_transform.scale,
+            Vec3::new(1.6, 1.2, 1.6)
+        );
+        assert_eq!(
+            record("Beacon")
+                .object
+                .components
+                .iter()
+                .find_map(|component| match component {
+                    ComponentData::MeshRenderer(mesh) => mesh.builtin_mesh.as_deref(),
+                    _ => None,
+                }),
+            Some("debug/cylinder")
+        );
+        assert_eq!(
+            record("Crown")
+                .object
+                .components
+                .iter()
+                .find_map(|component| match component {
+                    ComponentData::MeshRenderer(mesh) => mesh.builtin_mesh.as_deref(),
+                    _ => None,
+                }),
+            Some("debug/cone")
         );
     }
 
@@ -5271,6 +6199,130 @@ mod tests {
     }
 
     #[test]
+    fn runtime_can_query_tag_bounds_distance() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/landing.varg",
+            r#"script Landing {
+    func update(_ dt: Float) {
+        state.centerDistance = scene.distanceToTag("Platform")
+        state.boundsDistance = scene.distanceToTagBounds("Platform")
+        state.footprintDistance = scene.horizontalDistanceToTagBounds("Platform")
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut scene = VargSceneContext::default();
+        scene
+            .positions_by_tag
+            .insert("Platform".to_string(), vec![Vec3::ZERO]);
+        scene.bounds_by_tag.insert(
+            "Platform".to_string(),
+            vec![VargSceneBounds::from_center_size(
+                Vec3::ZERO,
+                Vec3::new(2.0, 0.5, 2.0),
+            )],
+        );
+
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform {
+                    translation: Vec3::new(2.4, 1.1, 0.0),
+                    ..Transform::default()
+                },
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene,
+            },
+        );
+
+        let center_distance = output
+            .state
+            .get("centerDistance")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!(
+            (center_distance - 2.640076).abs() < 0.001,
+            "center distance should be spherical distance to object origin: {center_distance}"
+        );
+        let bounds_distance = output
+            .state
+            .get("boundsDistance")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        let footprint_distance = output
+            .state
+            .get("footprintDistance")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!(
+            bounds_distance > 1.5,
+            "3D bounds distance should include height separation: {bounds_distance}"
+        );
+        assert!(
+            (footprint_distance - 1.4).abs() < 0.001,
+            "horizontal bounds distance should measure platform edge miss: {footprint_distance}"
+        );
+    }
+
+    #[test]
+    fn runtime_emits_render_gi_commands() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/lighting.varg",
+            r#"script Lighting {
+    func update(_ dt: Float) {
+        render.gi.useScreenSpace()
+        render.gi.useProbeVolume(Vec3(1.0, 2.0, 3.0), Vec3(20.0, 8.0, 20.0), Vec3(4.0, 3.0, 2.0), 1.75)
+        render.gi.setIntensity(0.5)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.render_commands.len(), 3);
+        assert_eq!(
+            output.render_commands[0],
+            VargRenderCommand::UseScreenSpaceGi
+        );
+        assert_eq!(
+            output.render_commands[1],
+            VargRenderCommand::UseProbeVolumeGi {
+                center: Vec3::new(1.0, 2.0, 3.0),
+                extent: Vec3::new(20.0, 8.0, 20.0),
+                counts: Vec3::new(4.0, 3.0, 2.0),
+                intensity: 1.75,
+            }
+        );
+        assert_eq!(
+            output.render_commands[2],
+            VargRenderCommand::SetGiIntensity(0.5)
+        );
+    }
+
+    #[test]
     fn runtime_emits_destroy_nearest_requests() {
         let (script, diagnostics) = compile_script_source(
             "scripts/collector.varg",
@@ -5540,6 +6592,26 @@ mod tests {
             (
                 "examples/project/scripts/player_controller.varg",
                 include_str!("../../../examples/project/scripts/player_controller.varg"),
+            ),
+            (
+                "examples/project/scripts/jump_player.varg",
+                include_str!("../../../examples/project/scripts/jump_player.varg"),
+            ),
+            (
+                "examples/project/scripts/first_person_camera.varg",
+                include_str!("../../../examples/project/scripts/first_person_camera.varg"),
+            ),
+            (
+                "examples/project/scripts/camera_follow.varg",
+                include_str!("../../../examples/project/scripts/camera_follow.varg"),
+            ),
+            (
+                "examples/project/scripts/bobber.varg",
+                include_str!("../../../examples/project/scripts/bobber.varg"),
+            ),
+            (
+                "examples/project/scripts/despawn_far.varg",
+                include_str!("../../../examples/project/scripts/despawn_far.varg"),
             ),
         ] {
             let (script, diagnostics) = compile_script_source(path, source);
@@ -6122,6 +7194,304 @@ mod tests {
         assert_eq!(
             output.state.get("dy").and_then(|value| value.as_f64()),
             Some(-4.0)
+        );
+    }
+
+    #[test]
+    fn runtime_scripts_can_create_clickable_buttons() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/button.varg",
+            r#"script ButtonProbe {
+    func update(_ dt: Float) {
+        if ui.button("continue", "Continue", 100.0, 80.0, 220.0, 64.0) {
+            state.clicked = 1
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let input = engine_platform::InputState::default();
+        let output = script.run_hook_borrowed(
+            "update",
+            VargRuntimeContextRef {
+                transform: Transform::default(),
+                input: &input,
+                pointer_pressed: &[],
+                pointer_released: &[(140.0, 120.0)],
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: &HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.state.get("clicked").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(output.ui_commands.len(), 2);
+    }
+
+    #[test]
+    fn runtime_scripts_can_use_minimal_interactive_ui_controls() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/controls.varg",
+            r#"script Controls {
+    var enabled: Bool = false
+    var volume: Float = 0.0
+    var x: Float = 0.0
+
+    func update(_ dt: Float) {
+        state.enabled = ui.toggle("enabled", state.enabled, 10.0, 10.0, 48.0, 24.0)
+        state.volume = ui.slider("volume", state.volume, 10.0, 40.0, 100.0, 24.0, 0.0, 1.0)
+        state.x += ui.dragX("drag", 10.0, 80.0, 80.0, 32.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::MouseMove { x: 75.0, y: 52.0 });
+        input.apply_event(engine_platform::InputEvent::MouseButtonDown(
+            engine_platform::MouseButton::Left,
+        ));
+        let output = script.run_hook_borrowed(
+            "update",
+            VargRuntimeContextRef {
+                transform: Transform::default(),
+                input: &input,
+                pointer_pressed: &[(75.0, 52.0)],
+                pointer_released: &[(20.0, 20.0)],
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: &HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.state.get("enabled").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert!(
+            output
+                .state
+                .get("volume")
+                .and_then(|value| value.as_f64())
+                .is_some_and(|value| (value - 0.65).abs() < 0.0001)
+        );
+        assert_eq!(output.ui_commands.len(), 5);
+
+        let mut state = output.state;
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::MouseMove { x: 20.0, y: 90.0 });
+        input.apply_event(engine_platform::InputEvent::MouseButtonDown(
+            engine_platform::MouseButton::Left,
+        ));
+        input.apply_event(engine_platform::InputEvent::MouseMove { x: 36.0, y: 90.0 });
+        let output = script.run_hook_borrowed(
+            "update",
+            VargRuntimeContextRef {
+                transform: Transform::default(),
+                input: &input,
+                pointer_pressed: &[(20.0, 90.0)],
+                pointer_released: &[],
+                delta_time: 0.016,
+                total_time: 0.032,
+                frame_index: 2,
+                exported_values: &HashMap::new(),
+                state: std::mem::take(&mut state),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.state.get("x").and_then(|value| value.as_f64()),
+            Some(16.0)
+        );
+    }
+
+    #[test]
+    fn runtime_scripts_can_use_single_line_ui_input() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/input.varg",
+            r#"script InputProbe {
+    func update(_ dt: Float) {
+        state.name = ui.input("name", "Name", 20.0, 20.0, 160.0, 32.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::KeyDown(
+            engine_platform::KeyCode::Character('A'),
+        ));
+        let output = script.run_hook_borrowed(
+            "update",
+            VargRuntimeContextRef {
+                transform: Transform::default(),
+                input: &input,
+                pointer_pressed: &[],
+                pointer_released: &[(32.0, 28.0)],
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: &HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.state.get("name").and_then(|value| value.as_str()),
+            Some("a")
+        );
+        assert_eq!(output.ui_commands.len(), 2);
+    }
+
+    #[test]
+    fn runtime_scripts_can_use_micro_animation_helpers() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/easing.varg",
+            r#"script Easing {
+    func update(_ dt: Float) {
+        state.smooth = smoothstep(0.0, 1.0, 0.5)
+        state.out = easeOut(0.5)
+        state.inout = easeInOut(0.5)
+        state.pulse = pulse(0.25, 1.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(
+            output.state.get("smooth").and_then(|value| value.as_f64()),
+            Some(0.5)
+        );
+        assert_eq!(
+            output.state.get("out").and_then(|value| value.as_f64()),
+            Some(0.75)
+        );
+        assert_eq!(
+            output.state.get("inout").and_then(|value| value.as_f64()),
+            Some(0.5)
+        );
+        assert!(
+            output
+                .state
+                .get("pulse")
+                .and_then(|value| value.as_f64())
+                .is_some_and(|value| (value - 1.0).abs() < 0.0001)
+        );
+    }
+
+    #[test]
+    fn runtime_scripts_can_release_mouse_capture_with_escape() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/input_capture.varg",
+            r#"script InputCapture {
+    func update(_ dt: Float) {
+        if Input.pressed("Escape") {
+            Input.captureMouse(false)
+        } else {
+            Input.captureMouse(true)
+        }
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let mut input = engine_platform::InputState::default();
+        input.apply_event(engine_platform::InputEvent::KeyDown(
+            engine_platform::KeyCode::Escape,
+        ));
+
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input,
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.mouse_capture, Some(false));
+    }
+
+    #[test]
+    fn runtime_scripts_can_drive_transform_rotation() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/look.varg",
+            r#"script Look {
+    var yaw: Float = 10.0
+
+    func update(_ dt: Float) {
+        yaw += 25.0
+        rotation = Vec3(-12.0, yaw, 0.0)
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        let forward = output.transform.rotation.rotate(Vec3::new(0.0, 0.0, -1.0));
+        assert!(
+            forward.y < -0.15,
+            "negative x rotation should pitch the view down, got {forward:?}"
+        );
+        assert!(
+            forward.x.abs() > 0.25,
+            "non-zero y rotation should yaw the view sideways, got {forward:?}"
         );
     }
 }

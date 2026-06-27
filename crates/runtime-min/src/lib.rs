@@ -47,18 +47,19 @@ use engine_platform::{ActionMap, InputState};
 use engine_render::{
     AntiAliasingMode, BatteryPolicy, FrameGenerationKind, GuiDrawCmd, GuiDrawList, GuiTextureId,
     GuiVertex, HeadlessRenderDevice, ImageHandle, PresentStrategy, RenderApi, RenderDevice,
-    RenderFrame, RenderGraph, RenderGraphBuilder, RenderPerformanceConfig, RenderPlatformClass,
-    RenderQualityMode, RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState,
-    UiCompositionPolicy, UpscalerKind,
+    RenderFrame, RenderGlobalIllumination, RenderGraph, RenderGraphBuilder,
+    RenderPerformanceConfig, RenderPlatformClass, RenderProbeVolume, RenderQualityMode,
+    RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy,
+    UpscalerKind,
 };
 #[cfg(feature = "asset-import")]
 use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
 #[cfg(feature = "wgpu")]
 pub use engine_render_wgpu::WgpuRenderDevice;
 use engine_script_varg::{
-    VargAudioCommand, VargDestroyNearestRequest, VargRuntimeContextRef, VargSceneContext,
-    VargScript, VargSpawnRequest, VargUiCommand, compile_script_source,
-    compile_vscene_source_to_scene,
+    VargAudioCommand, VargDestroyNearestRequest, VargRenderCommand, VargRuntimeContextRef,
+    VargSceneBounds, VargSceneContext, VargScript, VargSpawnRequest, VargUiCommand,
+    compile_script_source, compile_vscene_source_to_scene,
 };
 #[cfg(feature = "audio")]
 use std::collections::HashSet;
@@ -82,6 +83,10 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     pub render_world: RenderWorld,
     /// Whether the game simulation is paused.
     pub paused: bool,
+    /// Whether the built-in pause menu overlay is open.
+    pub pause_menu_open: bool,
+    /// Whether the runtime requested the host game window to close.
+    pub exit_requested: bool,
     /// Aggregated time state (delta, fixed delta, total time, frame index, time scale).
     pub time: TimeState,
     /// Latest runtime counters for diagnostics UI and smoke tests.
@@ -90,12 +95,20 @@ pub struct RuntimeServices<R = HeadlessRenderDevice> {
     pub render_scaling_settings: RenderScalingSettings,
     /// Last successfully negotiated render scaling selection.
     pub render_scaling_selection: Option<engine_render::RenderScalingSelection>,
+    /// Runtime render environment overrides emitted by gameplay scripts.
+    pub render_environment: RuntimeRenderEnvironment,
+    /// User-facing runtime preferences controlled by the pause menu.
+    pub user_preferences: RuntimeUserPreferences,
     /// Diagnostics emitted by runtime subsystems.
     pub diagnostics: Vec<RuntimeDiagnostic>,
     /// UI draw commands emitted by scripts during the latest game frame.
     pub ui_commands: Vec<VargUiCommand>,
     /// Current input capture request emitted by runtime scripts.
     pub input_capture: RuntimeInputCapture,
+    /// Screen-space pointer positions that began this frame.
+    pub pointer_pressed: Vec<(f32, f32)>,
+    /// Screen-space pointer positions that ended this frame.
+    pub pointer_released: Vec<(f32, f32)>,
     #[cfg(feature = "physics")]
     /// Physics world used by runtime-game.
     pub physics: PhysicsWorld,
@@ -194,11 +207,35 @@ pub struct RuntimeStats {
     pub audio_underruns: u64,
 }
 
+/// Runtime render environment values that scripts may drive between frames.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeRenderEnvironment {
+    /// Requested global illumination strategy.
+    pub global_illumination: RenderGlobalIllumination,
+}
+
+impl Default for RuntimeRenderEnvironment {
+    fn default() -> Self {
+        Self {
+            global_illumination: RenderGlobalIllumination::default(),
+        }
+    }
+}
+
 /// Runtime-owned input capture state requested by gameplay scripts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeInputCapture {
     /// Whether the game window should capture and hide the mouse cursor.
     pub mouse: bool,
+}
+
+/// Player-facing runtime preferences.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeUserPreferences {
+    /// Whether horizontal mouse look is inverted before gameplay scripts read it.
+    pub invert_mouse_x: bool,
+    /// Whether vertical mouse look is inverted before gameplay scripts read it.
+    pub invert_mouse_y: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,8 +331,11 @@ struct RuntimeSceneSnapshot {
     entity_names: HashMap<engine_ecs::Entity, String>,
     entity_tags: HashMap<engine_ecs::Entity, String>,
     positions_by_entity: HashMap<engine_ecs::Entity, Vec3>,
+    bounds_by_entity: HashMap<engine_ecs::Entity, VargSceneBounds>,
     shared_positions_by_name: Arc<HashMap<String, Vec3>>,
     shared_positions_by_tag: Arc<HashMap<String, Vec<Vec3>>>,
+    shared_bounds_by_name: Arc<HashMap<String, VargSceneBounds>>,
+    shared_bounds_by_tag: Arc<HashMap<String, Vec<VargSceneBounds>>>,
 }
 
 impl RuntimeSceneSnapshot {
@@ -303,8 +343,11 @@ impl RuntimeSceneSnapshot {
         self.entity_names.clear();
         self.entity_tags.clear();
         self.positions_by_entity.clear();
+        self.bounds_by_entity.clear();
         let mut positions_by_name: HashMap<String, Vec3> = HashMap::new();
         let mut positions_by_tag: HashMap<String, Vec<Vec3>> = HashMap::new();
+        let mut bounds_by_name: HashMap<String, VargSceneBounds> = HashMap::new();
+        let mut bounds_by_tag: HashMap<String, Vec<VargSceneBounds>> = HashMap::new();
 
         for (entity, object) in scene.iter_objects() {
             self.entity_names.insert(entity, object.name.clone());
@@ -317,10 +360,19 @@ impl RuntimeSceneSnapshot {
                     .entry(object.tag.clone())
                     .or_default()
                     .push(transform.translation);
+                let bounds = script_bounds_for_object(object, transform);
+                self.bounds_by_entity.insert(entity, bounds);
+                bounds_by_name.insert(object.name.clone(), bounds);
+                bounds_by_tag
+                    .entry(object.tag.clone())
+                    .or_default()
+                    .push(bounds);
             }
         }
         self.shared_positions_by_name = Arc::new(positions_by_name);
         self.shared_positions_by_tag = Arc::new(positions_by_tag);
+        self.shared_bounds_by_name = Arc::new(bounds_by_name);
+        self.shared_bounds_by_tag = Arc::new(bounds_by_tag);
     }
 
     fn sync_entity_transform(&mut self, scene: &Scene, entity: engine_ecs::Entity) {
@@ -350,16 +402,51 @@ impl RuntimeSceneSnapshot {
             .entry(object.tag.clone())
             .or_default()
             .push(position);
+        let bounds = script_bounds_for_object(object, transform);
+        if let Some(previous) = self.bounds_by_entity.insert(entity, bounds) {
+            if let Some(tag_bounds) =
+                Arc::make_mut(&mut self.shared_bounds_by_tag).get_mut(&object.tag)
+            {
+                if let Some(index) = tag_bounds
+                    .iter()
+                    .position(|candidate| *candidate == previous)
+                {
+                    tag_bounds.remove(index);
+                }
+            }
+        }
+        Arc::make_mut(&mut self.shared_bounds_by_name).insert(object.name.clone(), bounds);
+        Arc::make_mut(&mut self.shared_bounds_by_tag)
+            .entry(object.tag.clone())
+            .or_default()
+            .push(bounds);
     }
 
     fn context_for(&self, entity: engine_ecs::Entity) -> VargSceneContext {
-        VargSceneContext::from_shared_positions(
+        VargSceneContext::from_shared_scene(
             self.entity_names.get(&entity).cloned().unwrap_or_default(),
             self.entity_tags.get(&entity).cloned().unwrap_or_default(),
             Arc::clone(&self.shared_positions_by_name),
             Arc::clone(&self.shared_positions_by_tag),
+            Arc::clone(&self.shared_bounds_by_name),
+            Arc::clone(&self.shared_bounds_by_tag),
         )
     }
+}
+
+fn script_bounds_for_object(
+    object: &engine_ecs::GameObject,
+    transform: Transform,
+) -> VargSceneBounds {
+    let size = object
+        .components
+        .iter()
+        .find_map(|component| match component {
+            ComponentData::Collider(collider) => Some(collider.size * transform.scale),
+            _ => None,
+        })
+        .unwrap_or(Vec3::ZERO);
+    VargSceneBounds::from_center_size(transform.translation, size)
 }
 
 /// Structured runtime diagnostic entry.
@@ -452,13 +539,19 @@ impl<R: RenderDevice> RuntimeServices<R> {
             action_map: ActionMap::new(),
             render_world: RenderWorld::default(),
             paused: false,
+            pause_menu_open: false,
+            exit_requested: false,
             time: TimeState::new(),
             stats: RuntimeStats::default(),
             render_scaling_settings: RenderScalingSettings::default(),
             render_scaling_selection: None,
+            render_environment: RuntimeRenderEnvironment::default(),
+            user_preferences: RuntimeUserPreferences::default(),
             diagnostics: Vec::new(),
             ui_commands: Vec::new(),
             input_capture: RuntimeInputCapture::default(),
+            pointer_pressed: Vec::new(),
+            pointer_released: Vec::new(),
             #[cfg(feature = "physics")]
             physics: PhysicsWorld::new(RapierPhysicsBackend::new()),
             #[cfg(feature = "runtime-game")]
@@ -555,6 +648,13 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.run_frame(delta, single_step)
     }
 
+    /// Returns and clears the current runtime exit request.
+    pub fn take_exit_requested(&mut self) -> bool {
+        let requested = self.exit_requested;
+        self.exit_requested = false;
+        requested
+    }
+
     /// Executes one game frame in well-ordered phases:
     ///
     /// 1. **begin_frame** — reset transient input state
@@ -578,7 +678,8 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.stats.frame_time_seconds = self.time.delta_seconds;
         self.stats.physics_steps = 0;
         self.ui_commands.clear();
-        let should_simulate = !self.paused || single_step;
+        self.handle_pause_menu_input();
+        let should_simulate = (!self.paused && !self.pause_menu_open) || single_step;
 
         // ── script startup ───────────────────────────────────────────
         if should_simulate {
@@ -621,11 +722,17 @@ impl<R: RenderDevice> RuntimeServices<R> {
 
         // ── render_submit ──────────────────────────────────────────────
         self.render_world = extract_render_world(&self.scene);
+        self.render_world.global_illumination = self.render_environment.global_illumination.clone();
         Self::resolve_render_materials(&mut self.render_world, &self.mesh_resources);
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
         };
         let ui_draw_list = build_script_ui_draw_list(&self.ui_commands);
+        let ui_draw_list = if self.pause_menu_open {
+            build_pause_menu_draw_list(ui_draw_list, self.user_preferences)
+        } else {
+            ui_draw_list
+        };
         if !ui_draw_list.commands.is_empty() {
             self.renderer.queue_surface_gui(ui_draw_list.clone());
         }
@@ -681,8 +788,61 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.stats.estimated_latency_ms = render_metrics.estimated_latency_ms;
         self.stats.dropped_frames = render_metrics.dropped_frames;
         self.input.end_frame();
+        self.pointer_pressed.clear();
+        self.pointer_released.clear();
         self.frame_counter.advance();
         Ok(())
+    }
+
+    fn handle_pause_menu_input(&mut self) {
+        use engine_platform::KeyCode;
+
+        if self.input.key_pressed(KeyCode::Escape) {
+            self.pause_menu_open = !self.pause_menu_open;
+            if !self.pause_menu_open {
+                self.paused = false;
+                return;
+            }
+        }
+        if !self.pause_menu_open {
+            return;
+        }
+
+        self.input_capture.mouse = false;
+        self.paused = true;
+
+        if self.input.key_pressed(KeyCode::Enter)
+            || self.input.key_pressed(KeyCode::Space)
+            || self.input.key_pressed(KeyCode::Character('e'))
+            || self
+                .pointer_released
+                .iter()
+                .any(|(x, y)| point_in_rect(*x, *y, 720.0, 410.0, 480.0, 52.0))
+        {
+            self.pause_menu_open = false;
+            self.paused = false;
+        } else if self.input.key_pressed(KeyCode::Character('q'))
+            || self
+                .pointer_released
+                .iter()
+                .any(|(x, y)| point_in_rect(*x, *y, 720.0, 482.0, 480.0, 52.0))
+        {
+            self.exit_requested = true;
+        } else if self.input.key_pressed(KeyCode::Character('x'))
+            || self
+                .pointer_released
+                .iter()
+                .any(|(x, y)| point_in_rect(*x, *y, 720.0, 554.0, 480.0, 44.0))
+        {
+            self.user_preferences.invert_mouse_x = !self.user_preferences.invert_mouse_x;
+        } else if self.input.key_pressed(KeyCode::Character('y'))
+            || self
+                .pointer_released
+                .iter()
+                .any(|(x, y)| point_in_rect(*x, *y, 720.0, 610.0, 480.0, 44.0))
+        {
+            self.user_preferences.invert_mouse_y = !self.user_preferences.invert_mouse_y;
+        }
     }
 
     /// Resolves material names on render objects using imported model
@@ -760,11 +920,14 @@ impl<R: RenderDevice> RuntimeServices<R> {
             };
             let transform = self.scene.transforms().local(entity).unwrap_or_default();
             let scene_context = self.scene_snapshot.context_for(entity);
+            let script_input = self.input_for_scripts();
             let mut output = compiled.run_hook_borrowed(
                 hook.name(),
                 VargRuntimeContextRef {
                     transform,
-                    input: &self.input,
+                    input: &script_input,
+                    pointer_pressed: &self.pointer_pressed,
+                    pointer_released: &self.pointer_released,
                     delta_time: dt,
                     total_time: self.time.total_time,
                     frame_index: self.time.frame_index,
@@ -833,6 +996,9 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     });
                 }
             }
+            for command in output.render_commands {
+                self.apply_varg_render_command(command);
+            }
             for message in output.logs {
                 self.diagnostics.push(RuntimeDiagnostic {
                     source: "script".to_string(),
@@ -843,6 +1009,50 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 });
             }
             self.ui_commands.extend(output.ui_commands);
+        }
+    }
+
+    fn apply_varg_render_command(&mut self, command: VargRenderCommand) {
+        match command {
+            VargRenderCommand::UseScreenSpaceGi => {
+                self.render_environment.global_illumination =
+                    RenderGlobalIllumination::ScreenSpace { intensity: 1.0 };
+            }
+            VargRenderCommand::UseProbeVolumeGi {
+                center,
+                extent,
+                counts,
+                intensity,
+            } => {
+                self.render_environment.global_illumination =
+                    RenderGlobalIllumination::ProbeVolume(RenderProbeVolume {
+                        center,
+                        extent: Vec3::new(
+                            extent.x.abs().max(0.001),
+                            extent.y.abs().max(0.001),
+                            extent.z.abs().max(0.001),
+                        ),
+                        counts: [
+                            script_probe_count(counts.x),
+                            script_probe_count(counts.y),
+                            script_probe_count(counts.z),
+                        ],
+                        intensity: intensity.max(0.0),
+                    });
+            }
+            VargRenderCommand::SetGiIntensity(intensity) => {
+                let intensity = intensity.max(0.0);
+                match &mut self.render_environment.global_illumination {
+                    RenderGlobalIllumination::ProbeVolume(volume) => {
+                        volume.intensity = intensity;
+                    }
+                    RenderGlobalIllumination::ScreenSpace {
+                        intensity: screen_space_intensity,
+                    } => {
+                        *screen_space_intensity = intensity;
+                    }
+                }
+            }
         }
     }
 
@@ -1198,9 +1408,19 @@ impl<R: RenderDevice> RuntimeServices<R> {
                 if let Some(btn) = convert_winit_mouse_button_static(*button) {
                     match state {
                         ElementState::Pressed => {
+                            if btn == engine_platform::MouseButton::Left
+                                && let Some(position) = self.input.cursor_position()
+                            {
+                                self.pointer_pressed.push(position);
+                            }
                             self.input.apply_event(InputEvent::MouseButtonDown(btn));
                         }
                         ElementState::Released => {
+                            if btn == engine_platform::MouseButton::Left
+                                && let Some(position) = self.input.cursor_position()
+                            {
+                                self.pointer_released.push(position);
+                            }
                             self.input.apply_event(InputEvent::MouseButtonUp(btn));
                         }
                     }
@@ -1220,6 +1440,29 @@ impl<R: RenderDevice> RuntimeServices<R> {
                     }
                 };
                 self.input.apply_event(InputEvent::MouseWheel { x, y });
+            }
+            WindowEvent::Touch(touch) => {
+                use engine_platform::MouseButton;
+                use winit::event::TouchPhase;
+
+                let position = (touch.location.x as f32, touch.location.y as f32);
+                self.input.apply_event(InputEvent::MouseMove {
+                    x: position.0,
+                    y: position.1,
+                });
+                match touch.phase {
+                    TouchPhase::Started => {
+                        self.pointer_pressed.push(position);
+                        self.input
+                            .apply_event(InputEvent::MouseButtonDown(MouseButton::Left));
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        self.pointer_released.push(position);
+                        self.input
+                            .apply_event(InputEvent::MouseButtonUp(MouseButton::Left));
+                    }
+                    TouchPhase::Moved => {}
+                }
             }
             _ => {}
         }
@@ -1245,6 +1488,20 @@ impl<R: RenderDevice> RuntimeServices<R> {
     /// Returns the latest script-requested input capture state.
     pub fn input_capture(&self) -> RuntimeInputCapture {
         self.input_capture
+    }
+
+    fn input_for_scripts(&self) -> InputState {
+        let scale_x = if self.user_preferences.invert_mouse_x {
+            -1.0
+        } else {
+            1.0
+        };
+        let scale_y = if self.user_preferences.invert_mouse_y {
+            -1.0
+        } else {
+            1.0
+        };
+        self.input.with_mouse_delta_scale(scale_x, scale_y)
     }
 
     /// Sets the project root used by runtime backends to resolve relative files.
@@ -2086,6 +2343,13 @@ impl<R: RenderDevice> RuntimeServices<R> {
     }
 }
 
+fn script_probe_count(value: f32) -> u32 {
+    if !value.is_finite() {
+        return 1;
+    }
+    value.round().clamp(1.0, 16.0) as u32
+}
+
 #[cfg(feature = "audio")]
 fn parse_spatial_mode(value: &str) -> SpatialMode {
     match value {
@@ -2695,6 +2959,135 @@ fn build_script_ui_draw_list(commands: &[VargUiCommand]) -> GuiDrawList {
     draw_list
 }
 
+fn build_pause_menu_draw_list(
+    mut draw_list: GuiDrawList,
+    preferences: RuntimeUserPreferences,
+) -> GuiDrawList {
+    push_gui_quad(
+        &mut draw_list,
+        0.0,
+        0.0,
+        1920.0,
+        1080.0,
+        [0.0, 0.0, 0.0, 0.58],
+    );
+    push_gui_quad(
+        &mut draw_list,
+        660.0,
+        300.0,
+        600.0,
+        410.0,
+        [0.035, 0.045, 0.06, 0.94],
+    );
+    push_gui_quad(
+        &mut draw_list,
+        660.0,
+        300.0,
+        6.0,
+        410.0,
+        [0.34, 0.75, 0.92, 1.0],
+    );
+    push_gui_text(&mut draw_list, 720.0, 360.0, "PAUSED", [1.0, 1.0, 1.0, 1.0]);
+    push_gui_quad(
+        &mut draw_list,
+        720.0,
+        410.0,
+        480.0,
+        52.0,
+        [0.12, 0.24, 0.32, 0.96],
+    );
+    push_gui_text(
+        &mut draw_list,
+        748.0,
+        430.0,
+        "CONTINUE",
+        [0.88, 0.94, 1.0, 1.0],
+    );
+    push_gui_quad(
+        &mut draw_list,
+        720.0,
+        482.0,
+        480.0,
+        52.0,
+        [0.25, 0.1, 0.1, 0.96],
+    );
+    push_gui_text(
+        &mut draw_list,
+        748.0,
+        502.0,
+        "EXIT GAME",
+        [0.88, 0.94, 1.0, 1.0],
+    );
+    push_gui_quad(
+        &mut draw_list,
+        720.0,
+        554.0,
+        480.0,
+        44.0,
+        [0.1, 0.13, 0.18, 0.96],
+    );
+    push_gui_text(
+        &mut draw_list,
+        748.0,
+        570.0,
+        &format!(
+            "INVERT MOUSE X: {}",
+            if preferences.invert_mouse_x {
+                "ON"
+            } else {
+                "OFF"
+            }
+        ),
+        [0.88, 0.94, 1.0, 1.0],
+    );
+    push_gui_quad(
+        &mut draw_list,
+        720.0,
+        610.0,
+        480.0,
+        44.0,
+        [0.1, 0.13, 0.18, 0.96],
+    );
+    push_gui_text(
+        &mut draw_list,
+        748.0,
+        626.0,
+        &format!(
+            "INVERT MOUSE Y: {}",
+            if preferences.invert_mouse_y {
+                "ON"
+            } else {
+                "OFF"
+            }
+        ),
+        [0.88, 0.94, 1.0, 1.0],
+    );
+    push_gui_text(
+        &mut draw_list,
+        720.0,
+        674.0,
+        "Esc / Enter / Space / E continue    Q exits    X/Y toggles",
+        [0.72, 0.78, 0.86, 1.0],
+    );
+    draw_list
+}
+
+fn point_in_rect(px: f32, py: f32, x: f32, y: f32, width: f32, height: f32) -> bool {
+    px >= x && px <= x + width && py >= y && py <= y + height
+}
+
+fn push_gui_text(draw_list: &mut GuiDrawList, x: f32, y: f32, text: &str, color: [f32; 4]) {
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            cursor_x += 6.0;
+            continue;
+        }
+        push_gui_text_glyph(draw_list, cursor_x, y, ch, color);
+        cursor_x += glyph_advance(ch);
+    }
+}
+
 fn push_gui_text_glyph(draw_list: &mut GuiDrawList, x: f32, y: f32, ch: char, color: [f32; 4]) {
     let pixel = 1.5;
     let rows = glyph_rows(ch);
@@ -3182,6 +3575,7 @@ fn convert_winit_key_static(key: winit::keyboard::PhysicalKey) -> Option<engine_
     match key {
         PhysicalKey::Code(WinitKeyCode::Escape) => Some(KeyCode::Escape),
         PhysicalKey::Code(WinitKeyCode::Enter) => Some(KeyCode::Enter),
+        PhysicalKey::Code(WinitKeyCode::Backspace) => Some(KeyCode::Backspace),
         PhysicalKey::Code(WinitKeyCode::Space) => Some(KeyCode::Space),
         PhysicalKey::Code(WinitKeyCode::ArrowUp) => Some(KeyCode::ArrowUp),
         PhysicalKey::Code(WinitKeyCode::ArrowDown) => Some(KeyCode::ArrowDown),
@@ -3223,6 +3617,8 @@ fn convert_winit_key_static(key: winit::keyboard::PhysicalKey) -> Option<engine_
         PhysicalKey::Code(WinitKeyCode::Digit7) => Some(KeyCode::Character('7')),
         PhysicalKey::Code(WinitKeyCode::Digit8) => Some(KeyCode::Character('8')),
         PhysicalKey::Code(WinitKeyCode::Digit9) => Some(KeyCode::Character('9')),
+        PhysicalKey::Code(WinitKeyCode::Minus) => Some(KeyCode::Character('-')),
+        PhysicalKey::Code(WinitKeyCode::Period) => Some(KeyCode::Character('.')),
         _ => None,
     }
 }
@@ -3322,10 +3718,7 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                 WindowEvent::KeyboardInput { event, .. } => {
                     if let Some(key) = convert_winit_key_static(event.physical_key) {
                         if event.state == ElementState::Pressed {
-                            if key == KeyCode::Escape {
-                                event_loop.exit();
-                                return;
-                            } else if key == KeyCode::Space {
+                            if key == KeyCode::Space {
                                 if let Some(services) = self.services.as_mut() {
                                     services.paused = !services.paused;
                                 }
@@ -3359,6 +3752,10 @@ pub fn run_project(project: impl AsRef<Path>) -> EngineResult<()> {
                     self.last_frame = now;
                     if let Err(error) = services.tick_game_frame(delta, self.single_step) {
                         eprintln!("runtime error: {error}");
+                        event_loop.exit();
+                        return;
+                    }
+                    if services.take_exit_requested() {
                         event_loop.exit();
                         return;
                     }
@@ -3979,6 +4376,139 @@ mod tests {
             .tick_game_frame(Duration::from_millis(16), false)
             .unwrap();
         assert!(services.ui_commands.is_empty());
+    }
+
+    #[test]
+    fn varg_script_ui_buttons_receive_runtime_pointer_releases() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("menu.varg"),
+            r#"script Menu {
+    var clicked: Int = 0
+
+    func update(_ dt: Float) {
+        if ui.button("continue", "Continue", 100.0, 80.0, 200.0, 48.0) {
+            state.clicked = 1
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Menu").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/menu.varg")),
+            )
+            .unwrap();
+        services.pointer_released.push((140.0, 100.0));
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let object = services.scene.object(entity).unwrap();
+        let script = object
+            .components
+            .iter()
+            .find_map(|component| match component {
+                ComponentData::Script(script) => Some(script),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            script.state.get("clicked").and_then(|value| value.as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(services.ui_commands.len(), 2);
+        assert!(services.pointer_released.is_empty());
+    }
+
+    #[test]
+    fn varg_script_can_drive_runtime_global_illumination() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("gi.varg"),
+            r#"script GiController {
+    func update(_ dt: Float) {
+        render.gi.useProbeVolume(Vec3(1.0, 2.0, 3.0), Vec3(12.0, 6.0, 10.0), Vec3(4.0, 3.0, 2.0), 1.4)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Lighting").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/gi.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(
+            services.render_world.global_illumination,
+            RenderGlobalIllumination::ProbeVolume(RenderProbeVolume {
+                center: Vec3::new(1.0, 2.0, 3.0),
+                extent: Vec3::new(12.0, 6.0, 10.0),
+                counts: [4, 3, 2],
+                intensity: 1.4,
+            })
+        );
+    }
+
+    #[test]
+    fn varg_script_can_drive_screen_space_gi_intensity() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("ssgi.varg"),
+            r#"script SsgiController {
+    func update(_ dt: Float) {
+        render.gi.useScreenSpace()
+        render.gi.setIntensity(0.35)
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Lighting").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/ssgi.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert_eq!(
+            services.render_world.global_illumination,
+            RenderGlobalIllumination::ScreenSpace { intensity: 0.35 }
+        );
     }
 
     #[test]
@@ -4776,6 +5306,151 @@ mod tests {
             services.input_capture(),
             RuntimeInputCapture { mouse: true }
         );
+    }
+
+    #[test]
+    fn varg_script_mouse_capture_request_can_release_runtime_state() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("capture.varg"),
+            r#"script Capture {
+    func update(_ dt: Float) {
+        if Input.pressed("Escape") {
+            Input.captureMouse(false)
+        } else {
+            Input.captureMouse(true)
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Player").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/capture.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+        assert_eq!(
+            services.input_capture(),
+            RuntimeInputCapture { mouse: true }
+        );
+
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Escape,
+            ));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+        assert_eq!(
+            services.input_capture(),
+            RuntimeInputCapture { mouse: false }
+        );
+    }
+
+    #[test]
+    fn escape_opens_pause_menu_and_menu_actions_control_runtime() {
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.input_capture.mouse = true;
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Escape,
+            ));
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services.pause_menu_open);
+        assert!(services.paused);
+        assert_eq!(
+            services.input_capture(),
+            RuntimeInputCapture { mouse: false }
+        );
+        assert!(
+            !build_pause_menu_draw_list(GuiDrawList::default(), services.user_preferences)
+                .commands
+                .is_empty()
+        );
+
+        services.pointer_released.push((760.0, 574.0));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services.pause_menu_open);
+        assert!(services.user_preferences.invert_mouse_x);
+
+        services.pointer_released.push((760.0, 630.0));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services.user_preferences.invert_mouse_y);
+
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyUp(
+                engine_platform::KeyCode::Escape,
+            ));
+        services.pointer_released.push((760.0, 430.0));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(!services.pause_menu_open);
+        assert!(!services.paused);
+
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyDown(
+                engine_platform::KeyCode::Escape,
+            ));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::KeyUp(
+                engine_platform::KeyCode::Escape,
+            ));
+        services.pointer_released.push((760.0, 500.0));
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        assert!(services.take_exit_requested());
+        assert!(!services.take_exit_requested());
+    }
+
+    #[test]
+    fn runtime_user_preferences_scale_script_mouse_delta() {
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services
+            .input
+            .apply_event(engine_platform::InputEvent::MouseDelta { x: 6.0, y: -4.0 });
+
+        assert_eq!(services.input_for_scripts().mouse_delta(), (6.0, -4.0));
+
+        services.user_preferences.invert_mouse_x = true;
+        assert_eq!(services.input_for_scripts().mouse_delta(), (-6.0, -4.0));
+
+        services.user_preferences.invert_mouse_y = true;
+        assert_eq!(services.input_for_scripts().mouse_delta(), (-6.0, 4.0));
     }
 
     #[test]

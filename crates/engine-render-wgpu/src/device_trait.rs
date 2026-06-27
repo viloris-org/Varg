@@ -114,6 +114,7 @@ impl RenderDevice for WgpuRenderDevice {
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let enable_ssao = self.ssao_compute_pipeline.is_some();
             let enable_ssgi = self.screen_space_gi_enabled(world);
+            let ssgi_intensity = Self::screen_space_gi_intensity(world);
             let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
             let frame_res = self.encode_frame_passes(
                 &batches,
@@ -124,6 +125,7 @@ impl RenderDevice for WgpuRenderDevice {
                 sh,
                 enable_ssao,
                 enable_ssgi,
+                ssgi_intensity,
                 enable_bloom,
                 "aster surface",
             );
@@ -246,6 +248,7 @@ impl RenderDevice for WgpuRenderDevice {
             oh,
             enable_ssao,
             enable_ssgi,
+            Self::screen_space_gi_intensity(world),
             enable_bloom,
             "aster offscreen",
         );

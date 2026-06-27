@@ -2120,6 +2120,7 @@ pub fn infer_importer(path: &Path) -> Option<(ResourceKind, &'static str)> {
     match extension.as_str() {
         "png" | "jpg" | "jpeg" => Some((ResourceKind::Texture, "image")),
         "gltf" | "glb" => Some((ResourceKind::Model, "gltf")),
+        "vmodel" => Some((ResourceKind::Model, "vmodel")),
         "wgsl" | "glsl" => Some((ResourceKind::Shader, "shader-source")),
         "wav" | "ogg" => Some((ResourceKind::Audio, "audio")),
         "varg" => Some((ResourceKind::Script, "script-varg")),
@@ -2794,12 +2795,48 @@ fn import_cubemap_payload(path: &Path, importer: &str, bytes: &[u8]) -> Imported
 #[cfg(feature = "importers")]
 fn import_model_payload(path: &Path, importer: &str, bytes: &[u8]) -> ImportedCpuPayload {
     let mut diagnostics = Vec::new();
-    let (payload, summary) = if path
+    let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
-        }) {
+        .unwrap_or_default();
+    let (payload, summary) = if extension.eq_ignore_ascii_case("vmodel") || importer == "vmodel" {
+        match compile_vmodel(bytes) {
+            Ok(model) => {
+                let primitive_count = model.meshes.len();
+                let vertex_count = model
+                    .meshes
+                    .iter()
+                    .map(|mesh| mesh.positions.len())
+                    .sum::<usize>();
+                match model.to_bytes() {
+                    Ok(bytes) => (
+                        bytes,
+                        format!(
+                            ".vmodel compiled by {importer}: {primitive_count} mesh primitive{}, {vertex_count} vertices",
+                            if primitive_count == 1 { "" } else { "s" }
+                        ),
+                    ),
+                    Err(error) => {
+                        diagnostics.push(
+                            AssetDiagnostic::new(format!("model encode failed: {error}"))
+                                .with_path(path),
+                        );
+                        (
+                            Arc::from(bytes),
+                            format!("{} bytes model source imported by {importer}", bytes.len()),
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                diagnostics.push(AssetDiagnostic::new(error.to_string()).with_path(path));
+                (
+                    Arc::from(bytes),
+                    format!("{} bytes model source imported by {importer}", bytes.len()),
+                )
+            }
+        }
+    } else if extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb") {
         match import_gltf_model(path) {
             Ok(model) => {
                 let primitive_count = model.meshes.len();
@@ -2976,6 +3013,536 @@ fn parse_material_format(input: &str, importer: &str) -> Result<MaterialFormat, 
         "material-toml" => MaterialFormat::from_toml(input),
         "vasset" => MaterialFormat::from_vasset(input),
         _ => MaterialFormat::from_json(input),
+    }
+}
+
+#[cfg(feature = "importers")]
+#[derive(Debug, Deserialize)]
+struct VModelDocument {
+    #[allow(dead_code)]
+    schema_version: Option<u32>,
+    operations: Vec<VModelOperation>,
+}
+
+#[cfg(feature = "importers")]
+#[derive(Debug, Deserialize)]
+struct VModelOperation {
+    #[serde(rename = "type")]
+    operation_type: String,
+    #[serde(default = "empty_toml_table")]
+    params: toml::Value,
+}
+
+#[cfg(feature = "importers")]
+fn empty_toml_table() -> toml::Value {
+    toml::Value::Table(Default::default())
+}
+
+#[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+struct ModelBuildState {
+    size: [f32; 3],
+    translation: [f32; 3],
+    scale: [f32; 3],
+    bevel: f32,
+    array: Option<ArraySpec>,
+}
+
+#[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+struct ArraySpec {
+    count: usize,
+    offset: [f32; 3],
+}
+
+#[cfg(feature = "importers")]
+impl Default for ModelBuildState {
+    fn default() -> Self {
+        Self {
+            size: [1.0, 1.0, 1.0],
+            translation: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+            bevel: 0.0,
+            array: None,
+        }
+    }
+}
+
+#[cfg(feature = "importers")]
+fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
+    let text = std::str::from_utf8(bytes).map_err(|source| AssetError::Parse {
+        format: "vmodel",
+        diagnostic: AssetDiagnostic::new(source.to_string()),
+    })?;
+    let document: VModelDocument = toml::from_str(text).map_err(|source| AssetError::Parse {
+        format: "vmodel",
+        diagnostic: AssetDiagnostic::new(source.to_string()),
+    })?;
+    if document.operations.is_empty() {
+        return Err(AssetError::Parse {
+            format: "vmodel",
+            diagnostic: AssetDiagnostic::new(".vmodel contains no operations"),
+        });
+    }
+
+    let mut model = ModelResource::default();
+    let mut state = ModelBuildState::default();
+    let mut has_base_mesh = false;
+
+    for operation in &document.operations {
+        match operation.operation_type.as_str() {
+            "cube" | "box" => {
+                state = ModelBuildState {
+                    size: vmodel_vec3_param(&operation.params, "size").unwrap_or([1.0, 1.0, 1.0]),
+                    translation: vmodel_vec3_param(&operation.params, "position")
+                        .or_else(|| vmodel_vec3_param(&operation.params, "translation"))
+                        .unwrap_or([0.0, 0.0, 0.0]),
+                    scale: vmodel_vec3_param(&operation.params, "scale").unwrap_or([1.0, 1.0, 1.0]),
+                    bevel: vmodel_f32_param(&operation.params, "bevel")
+                        .unwrap_or(0.0)
+                        .max(0.0),
+                    array: None,
+                };
+                has_base_mesh = true;
+            }
+            "bevel" => {
+                state.bevel = vmodel_f32_param(&operation.params, "amount")
+                    .or_else(|| vmodel_f32_param(&operation.params, "radius"))
+                    .unwrap_or(state.bevel)
+                    .max(0.0);
+            }
+            "translate" => {
+                let offset = vmodel_vec3_param(&operation.params, "offset")
+                    .or_else(|| vmodel_vec3_param(&operation.params, "position"))
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                state.translation = add_vec3(state.translation, offset);
+            }
+            "scale" => {
+                let scale = vmodel_vec3_param(&operation.params, "value")
+                    .or_else(|| vmodel_vec3_param(&operation.params, "scale"))
+                    .unwrap_or([1.0, 1.0, 1.0]);
+                state.scale = mul_vec3(state.scale, scale);
+            }
+            "array" => {
+                let count = vmodel_usize_param(&operation.params, "count")
+                    .unwrap_or(1)
+                    .clamp(1, 256);
+                let offset = vmodel_vec3_param(&operation.params, "offset").unwrap_or_else(|| {
+                    let axis = vmodel_string_param(&operation.params, "axis")
+                        .unwrap_or_else(|| "x".to_string());
+                    let spacing = vmodel_f32_param(&operation.params, "spacing").unwrap_or(1.0);
+                    axis_offset(&axis, spacing)
+                });
+                state.array = Some(ArraySpec { count, offset });
+            }
+            "inset_panel" => {
+                if !has_base_mesh {
+                    return Err(AssetError::Parse {
+                        format: "vmodel",
+                        diagnostic: AssetDiagnostic::new(
+                            "inset_panel requires a cube or box first",
+                        ),
+                    });
+                }
+                let face = vmodel_string_param(&operation.params, "face")
+                    .unwrap_or_else(|| "+z".to_string());
+                let margin = vmodel_f32_param(&operation.params, "margin")
+                    .or_else(|| vmodel_f32_param(&operation.params, "amount"))
+                    .unwrap_or(0.1)
+                    .max(0.0);
+                let depth = vmodel_f32_param(&operation.params, "depth")
+                    .unwrap_or(0.02)
+                    .abs();
+                add_inset_panel(&mut model, &state, &face, margin, depth);
+            }
+            other => {
+                return Err(AssetError::Parse {
+                    format: "vmodel",
+                    diagnostic: AssetDiagnostic::new(format!(
+                        "unsupported .vmodel operation `{other}`"
+                    )),
+                });
+            }
+        }
+    }
+
+    if has_base_mesh {
+        add_box_meshes(&mut model, &state);
+    }
+
+    if model.meshes.is_empty() {
+        return Err(AssetError::Parse {
+            format: "vmodel",
+            diagnostic: AssetDiagnostic::new(".vmodel produced no mesh primitives"),
+        });
+    }
+    Ok(model)
+}
+
+#[cfg(feature = "importers")]
+fn add_box_meshes(model: &mut ModelResource, state: &ModelBuildState) {
+    let array = state.array.unwrap_or(ArraySpec {
+        count: 1,
+        offset: [0.0, 0.0, 0.0],
+    });
+    for index in 0..array.count {
+        let translation = add_vec3(state.translation, scale_vec3(array.offset, index as f32));
+        let size = mul_vec3(state.size, state.scale);
+        model
+            .meshes
+            .push(build_box_mesh(size, translation, state.bevel));
+    }
+}
+
+#[cfg(feature = "importers")]
+fn add_inset_panel(
+    model: &mut ModelResource,
+    state: &ModelBuildState,
+    face: &str,
+    margin: f32,
+    depth: f32,
+) {
+    let size = mul_vec3(state.size, state.scale);
+    let panel_scale = [
+        (size[0] - margin * 2.0).max(size[0] * 0.1),
+        (size[1] - margin * 2.0).max(size[1] * 0.1),
+        (size[2] - margin * 2.0).max(size[2] * 0.1),
+    ];
+    let (panel_size, panel_offset) = match face.trim().to_ascii_lowercase().as_str() {
+        "+x" => (
+            [depth, panel_scale[1], panel_scale[2]],
+            [size[0] * 0.5 + depth * 0.5, 0.0, 0.0],
+        ),
+        "-x" => (
+            [depth, panel_scale[1], panel_scale[2]],
+            [-size[0] * 0.5 - depth * 0.5, 0.0, 0.0],
+        ),
+        "+y" => (
+            [panel_scale[0], depth, panel_scale[2]],
+            [0.0, size[1] * 0.5 + depth * 0.5, 0.0],
+        ),
+        "-y" => (
+            [panel_scale[0], depth, panel_scale[2]],
+            [0.0, -size[1] * 0.5 - depth * 0.5, 0.0],
+        ),
+        "-z" => (
+            [panel_scale[0], panel_scale[1], depth],
+            [0.0, 0.0, -size[2] * 0.5 - depth * 0.5],
+        ),
+        _ => (
+            [panel_scale[0], panel_scale[1], depth],
+            [0.0, 0.0, size[2] * 0.5 + depth * 0.5],
+        ),
+    };
+    model.meshes.push(build_box_mesh(
+        panel_size,
+        add_vec3(state.translation, panel_offset),
+        state.bevel.min(depth * 0.45),
+    ));
+}
+
+#[cfg(feature = "importers")]
+fn build_box_mesh(size: [f32; 3], translation: [f32; 3], bevel: f32) -> BasicMeshResource {
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let bevel = bevel
+        .min(half[0] * 0.45)
+        .min(half[1] * 0.45)
+        .min(half[2] * 0.45)
+        .max(0.0);
+
+    if bevel <= f32::EPSILON {
+        return build_axis_box_mesh(size, translation);
+    }
+
+    let x0 = -half[0] + bevel;
+    let x1 = half[0] - bevel;
+    let y0 = -half[1] + bevel;
+    let y1 = half[1] - bevel;
+    let z0 = -half[2] + bevel;
+    let z1 = half[2] - bevel;
+    let hx = half[0];
+    let hy = half[1];
+    let hz = half[2];
+
+    let mut mesh = MeshBuilder::default();
+    mesh.quad_x(1.0, hx, y0, y1, z0, z1, translation);
+    mesh.quad_x(-1.0, -hx, y0, y1, z0, z1, translation);
+    mesh.quad_y(1.0, hy, x0, x1, z0, z1, translation);
+    mesh.quad_y(-1.0, -hy, x0, x1, z0, z1, translation);
+    mesh.quad_z(1.0, hz, x0, x1, y0, y1, translation);
+    mesh.quad_z(-1.0, -hz, x0, x1, y0, y1, translation);
+
+    for &y in &[y0, y1] {
+        for &z in &[z0, z1] {
+            mesh.quad_x_edge([x0, y, z], [x1, y, z], half, translation);
+        }
+    }
+    for &x in &[x0, x1] {
+        for &z in &[z0, z1] {
+            mesh.quad_y_edge([x, y0, z], [x, y1, z], half, translation);
+        }
+    }
+    for &x in &[x0, x1] {
+        for &y in &[y0, y1] {
+            mesh.quad_z_edge([x, y, z0], [x, y, z1], half, translation);
+        }
+    }
+    mesh.finish()
+}
+
+#[cfg(feature = "importers")]
+fn build_axis_box_mesh(size: [f32; 3], translation: [f32; 3]) -> BasicMeshResource {
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let mut mesh = MeshBuilder::default();
+    mesh.quad_x(
+        1.0,
+        half[0],
+        -half[1],
+        half[1],
+        -half[2],
+        half[2],
+        translation,
+    );
+    mesh.quad_x(
+        -1.0,
+        -half[0],
+        -half[1],
+        half[1],
+        -half[2],
+        half[2],
+        translation,
+    );
+    mesh.quad_y(
+        1.0,
+        half[1],
+        -half[0],
+        half[0],
+        -half[2],
+        half[2],
+        translation,
+    );
+    mesh.quad_y(
+        -1.0,
+        -half[1],
+        -half[0],
+        half[0],
+        -half[2],
+        half[2],
+        translation,
+    );
+    mesh.quad_z(
+        1.0,
+        half[2],
+        -half[0],
+        half[0],
+        -half[1],
+        half[1],
+        translation,
+    );
+    mesh.quad_z(
+        -1.0,
+        -half[2],
+        -half[0],
+        half[0],
+        -half[1],
+        half[1],
+        translation,
+    );
+    mesh.finish()
+}
+
+#[cfg(feature = "importers")]
+#[derive(Default)]
+struct MeshBuilder {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    texcoords: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+#[cfg(feature = "importers")]
+impl MeshBuilder {
+    fn quad(&mut self, points: [[f32; 3]; 4], normal: [f32; 3]) {
+        let base = self.positions.len() as u32;
+        self.positions.extend(points);
+        self.normals.extend([normal; 4]);
+        self.texcoords
+            .extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+    }
+
+    fn quad_x(&mut self, sign: f32, x: f32, y0: f32, y1: f32, z0: f32, z1: f32, t: [f32; 3]) {
+        self.quad(
+            translate_points([[x, y0, z0], [x, y1, z0], [x, y1, z1], [x, y0, z1]], t),
+            [sign, 0.0, 0.0],
+        );
+    }
+
+    fn quad_y(&mut self, sign: f32, y: f32, x0: f32, x1: f32, z0: f32, z1: f32, t: [f32; 3]) {
+        self.quad(
+            translate_points([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], t),
+            [0.0, sign, 0.0],
+        );
+    }
+
+    fn quad_z(&mut self, sign: f32, z: f32, x0: f32, x1: f32, y0: f32, y1: f32, t: [f32; 3]) {
+        self.quad(
+            translate_points([[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], t),
+            [0.0, 0.0, sign],
+        );
+    }
+
+    fn quad_x_edge(&mut self, a: [f32; 3], b: [f32; 3], half: [f32; 3], t: [f32; 3]) {
+        let pa = [
+            clamp_to_half(a[0], half[0]),
+            sign_half(a[1], half[1]),
+            sign_half(a[2], half[2]),
+        ];
+        let pb = [
+            clamp_to_half(b[0], half[0]),
+            sign_half(b[1], half[1]),
+            sign_half(b[2], half[2]),
+        ];
+        self.quad(
+            translate_points([a, b, pb, pa], t),
+            normalize([0.0, a[1], a[2]]),
+        );
+    }
+
+    fn quad_y_edge(&mut self, a: [f32; 3], b: [f32; 3], half: [f32; 3], t: [f32; 3]) {
+        let pa = [
+            sign_half(a[0], half[0]),
+            clamp_to_half(a[1], half[1]),
+            sign_half(a[2], half[2]),
+        ];
+        let pb = [
+            sign_half(b[0], half[0]),
+            clamp_to_half(b[1], half[1]),
+            sign_half(b[2], half[2]),
+        ];
+        self.quad(
+            translate_points([a, b, pb, pa], t),
+            normalize([a[0], 0.0, a[2]]),
+        );
+    }
+
+    fn quad_z_edge(&mut self, a: [f32; 3], b: [f32; 3], half: [f32; 3], t: [f32; 3]) {
+        let pa = [
+            sign_half(a[0], half[0]),
+            sign_half(a[1], half[1]),
+            clamp_to_half(a[2], half[2]),
+        ];
+        let pb = [
+            sign_half(b[0], half[0]),
+            sign_half(b[1], half[1]),
+            clamp_to_half(b[2], half[2]),
+        ];
+        self.quad(
+            translate_points([a, b, pb, pa], t),
+            normalize([a[0], a[1], 0.0]),
+        );
+    }
+
+    fn finish(self) -> BasicMeshResource {
+        BasicMeshResource {
+            positions: self.positions,
+            normals: self.normals,
+            texcoords: self.texcoords,
+            indices: self.indices,
+            material_index: None,
+        }
+    }
+}
+
+#[cfg(feature = "importers")]
+fn vmodel_vec3_param(params: &toml::Value, key: &str) -> Option<[f32; 3]> {
+    let array = params.get(key)?.as_array()?;
+    if array.len() != 3 {
+        return None;
+    }
+    Some([
+        toml_number_as_f32(&array[0])?,
+        toml_number_as_f32(&array[1])?,
+        toml_number_as_f32(&array[2])?,
+    ])
+}
+
+#[cfg(feature = "importers")]
+fn vmodel_f32_param(params: &toml::Value, key: &str) -> Option<f32> {
+    toml_number_as_f32(params.get(key)?)
+}
+
+#[cfg(feature = "importers")]
+fn toml_number_as_f32(value: &toml::Value) -> Option<f32> {
+    value
+        .as_float()
+        .or_else(|| value.as_integer().map(|value| value as f64))
+        .map(|value| value as f32)
+}
+
+#[cfg(feature = "importers")]
+fn vmodel_usize_param(params: &toml::Value, key: &str) -> Option<usize> {
+    params
+        .get(key)?
+        .as_integer()
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+#[cfg(feature = "importers")]
+fn vmodel_string_param(params: &toml::Value, key: &str) -> Option<String> {
+    params.get(key)?.as_str().map(ToOwned::to_owned)
+}
+
+#[cfg(feature = "importers")]
+fn axis_offset(axis: &str, spacing: f32) -> [f32; 3] {
+    match axis.trim().to_ascii_lowercase().as_str() {
+        "y" | "+y" => [0.0, spacing, 0.0],
+        "-y" => [0.0, -spacing, 0.0],
+        "z" | "+z" => [0.0, 0.0, spacing],
+        "-z" => [0.0, 0.0, -spacing],
+        "-x" => [-spacing, 0.0, 0.0],
+        _ => [spacing, 0.0, 0.0],
+    }
+}
+
+#[cfg(feature = "importers")]
+fn add_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+#[cfg(feature = "importers")]
+fn mul_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] * right[0], left[1] * right[1], left[2] * right[2]]
+}
+
+#[cfg(feature = "importers")]
+fn scale_vec3(value: [f32; 3], scalar: f32) -> [f32; 3] {
+    [value[0] * scalar, value[1] * scalar, value[2] * scalar]
+}
+
+#[cfg(feature = "importers")]
+fn translate_points(points: [[f32; 3]; 4], translation: [f32; 3]) -> [[f32; 3]; 4] {
+    points.map(|point| add_vec3(point, translation))
+}
+
+#[cfg(feature = "importers")]
+fn sign_half(value: f32, half: f32) -> f32 {
+    if value < 0.0 { -half } else { half }
+}
+
+#[cfg(feature = "importers")]
+fn clamp_to_half(value: f32, half: f32) -> f32 {
+    value.clamp(-half, half)
+}
+
+#[cfg(feature = "importers")]
+fn normalize(value: [f32; 3]) -> [f32; 3] {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length <= f32::EPSILON {
+        [0.0, 1.0, 0.0]
+    } else {
+        [value[0] / length, value[1] / length, value[2] / length]
     }
 }
 
@@ -4237,6 +4804,99 @@ mod tests {
         });
 
         std::fs::write(path, serde_json::to_string_pretty(&gltf_json).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn infer_importer_recognizes_vmodel_as_model() {
+        assert_eq!(
+            infer_importer(Path::new("models/crate.vmodel")),
+            Some((ResourceKind::Model, "vmodel"))
+        );
+    }
+
+    #[test]
+    fn vmodel_compiler_builds_beveled_array_model() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "cube"
+
+[operations.params]
+size = [2, 1, 1]
+
+[[operations]]
+type = "bevel"
+
+[operations.params]
+amount = 0.1
+
+[[operations]]
+type = "array"
+
+[operations.params]
+count = 3
+axis = "x"
+spacing = 2.5
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 3);
+        assert!(
+            model.meshes[0].positions.len() > 24,
+            "beveled box should have more geometry than a plain cube"
+        );
+        assert_eq!(model.meshes[0].indices.len() % 3, 0);
+        let first_min_x = model.meshes[0]
+            .positions
+            .iter()
+            .map(|position| position[0])
+            .fold(f32::INFINITY, f32::min);
+        let second_min_x = model.meshes[1]
+            .positions
+            .iter()
+            .map(|position| position[0])
+            .fold(f32::INFINITY, f32::min);
+        assert!((second_min_x - first_min_x - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn vmodel_compiler_adds_inset_panel_primitive() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "cube"
+
+[operations.params]
+size = [2.0, 2.0, 0.4]
+
+[[operations]]
+type = "inset_panel"
+
+[operations.params]
+face = "+z"
+margin = 0.2
+depth = 0.04
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 2);
+        let first_max_z = model.meshes[0]
+            .positions
+            .iter()
+            .map(|position| position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let second_max_z = model.meshes[1]
+            .positions
+            .iter()
+            .map(|position| position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((first_max_z - second_max_z).abs() > 0.001);
     }
 
     #[test]

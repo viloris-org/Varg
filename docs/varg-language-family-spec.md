@@ -71,13 +71,15 @@ Varg keeps the public file set small. The goal is not one extension per engine c
 | --- | --- | --- | --- |
 | `.varg` | Logic file | Scripts, reusable modules, dynamic gameplay logic, and declarative behaviors | Yes for `script` and `module`; no for `behavior` blocks |
 | `.vscene` | World file | Scenes, prefabs, entity composition, layout intent, and network replication declarations | No |
-| `.vasset` | Asset file | Models, materials, audio events, shader/material parameters, primitive resource recipes | No |
+| `.vmodel` | Model authoring file | Procedural/parametric mesh construction, primitive composition, and modeling operations | No |
+| `.vasset` | Asset file | Asset registration, import settings, materials, audio events, shader/material parameters, and dependencies | No |
 
 This gives authors and AI agents three mental buckets:
 
 - **Logic:** what changes at runtime.
 - **World:** what exists in a scene or reusable prefab.
-- **Assets:** what resources are made of.
+- **Models:** how authored geometry is constructed.
+- **Assets:** how resources are registered, imported, and referenced.
 
 ### AI Writes Intent First
 
@@ -87,7 +89,7 @@ Tools may compile intent into concrete scene graph data, but the source file sho
 
 ### Runtime Scripting Is the Escape Hatch
 
-Use `.varg` only when the behavior needs computation, time, state, event handling, reusable helper code, or a behavior graph declaration. Static object composition belongs in `.vscene`. Static resource composition belongs in `.vasset`.
+Use `.varg` only when the behavior needs computation, time, state, event handling, reusable helper code, or a behavior graph declaration. Static object composition belongs in `.vscene`. Procedural or parametric geometry authoring belongs in `.vmodel`. Asset registration and import metadata belongs in `.vasset`.
 
 ## Logic File: `.varg`
 
@@ -549,41 +551,85 @@ network GameNet {
 
 Network implementation remains an engine module. `.vscene` only defines the replication contract.
 
+## Model File: `.vmodel`
+
+Audience: AI-first, human-readable.
+
+`.vmodel` describes how a model is constructed. It is the source of truth for procedural or parametric geometry and should compile into mesh/material assets that runtime systems consume.
+
+`.vmodel` uses TOML for generated modeling descriptors and may grow a richer Varg-native syntax later. Generated TOML descriptors use this shape:
+
+```toml
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "cube"
+
+[operations.params]
+size = [2.0, 1.2, 1.2]
+
+[[operations]]
+type = "bevel"
+
+[operations.params]
+amount = 0.08
+segments = 2
+```
+
+`.vmodel` allows these top-level concepts:
+
+| Declaration | Purpose |
+| --- | --- |
+| `model` | Mesh, primitive, collider, LOD, and attachment composition |
+| `param` | Tunable dimensions and generation settings |
+| `operation` | Mesh operations such as bevel, inset, extrude, mirror, boolean, and array |
+
+### Model Example
+
+```toml
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "cube"
+
+[operations.params]
+size = [1.0, 1.0, 1.0]
+
+[[operations]]
+type = "bevel"
+
+[operations.params]
+amount = 0.04
+segments = 2
+```
+
 ## Asset File: `.vasset`
 
 Audience: AI-first, human-readable.
 
-`.vasset` groups declarative resource recipes. It can contain model, material, and audio declarations in one file when that improves locality.
+`.vasset` groups asset registration, import settings, dependencies, and non-model resource declarations. It can reference a `.vmodel` source and the mesh asset compiled from it, but it must not contain modeling operations itself.
 
 `.vasset` allows these top-level declarations:
 
 | Declaration | Purpose |
 | --- | --- |
-| `model` | Mesh, primitive, collider, LOD, animation set, and attachment composition |
+| `asset` | Source path, compiled output, importer, dependencies, and packaging metadata |
 | `material` | Shader and material parameters |
 | `audio` | Audio clips, events, layers, randomization, buses, spatial settings |
 
-### Model Example
+### Model Asset Example
 
-```varg
-model Crate {
-    mesh {
-        kind: primitive.box
-        size: Vec3(1, 1, 1)
-    }
+```toml
+schema_version = 1
+type = "model"
+source = "models/crate.vmodel"
+compiled = "models/crate.mesh"
 
-    material: Material("assets/props/crate.vasset#WoodCrate")
-
-    collider {
-        shape: box
-        size: Vec3(1, 1, 1)
-    }
-
-    rigidbodyDefaults {
-        mode: dynamic
-        mass: 12
-    }
-}
+[import]
+generate_normals = true
+generate_tangents = true
 ```
 
 ### Material Example
@@ -629,7 +675,7 @@ audio FootstepDirt {
 }
 ```
 
-`.vasset` must not define entity placement, lifecycle hooks, or runtime event handlers.
+`.vasset` must not define modeling operations, entity placement, lifecycle hooks, or runtime event handlers.
 
 ## Naming and Style
 
@@ -693,7 +739,8 @@ Source files should compile into explicit internal representations:
 | --- | --- |
 | `.varg` | Script AST or bytecode |
 | `.vscene` | Scene graph IR plus placement plan |
-| `.vasset` | Asset IR for models, materials, and audio |
+| `.vmodel` | Model construction IR and compiled mesh assets |
+| `.vasset` | Asset metadata IR for imports, dependencies, materials, and audio |
 
 The runtime should consume IR, not re-interpret high-level authoring files everywhere.
 
@@ -754,6 +801,7 @@ The old dual model of object-level script lists plus script components should be
 
 - New script files default to `.varg`.
 - New scenes default to `.vscene`.
+- New model authoring files default to `.vmodel`.
 - New asset declaration files default to `.vasset`.
 - The editor displays exported script variables from the parsed script AST.
 - AI tools operate on role-specific files, not raw scene JSON.

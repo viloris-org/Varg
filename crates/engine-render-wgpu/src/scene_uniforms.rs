@@ -1,6 +1,15 @@
 use crate::{device::*, math::*, uniforms::*};
 use engine_render::{RenderLight, RenderLightKind, RenderWorld};
 
+const PROBE_SKY_DIRECTIONS: [engine_core::math::Vec3; 6] = [
+    engine_core::math::Vec3::new(0.0, 1.0, 0.0),
+    engine_core::math::Vec3::new(0.55, 0.78, 0.32),
+    engine_core::math::Vec3::new(-0.55, 0.78, 0.32),
+    engine_core::math::Vec3::new(0.32, 0.78, -0.55),
+    engine_core::math::Vec3::new(-0.32, 0.78, -0.55),
+    engine_core::math::Vec3::new(0.0, 0.5, -0.86),
+];
+
 pub(crate) fn csm_uniform_from_world(world: &RenderWorld, aspect: f32) -> CsmUniform {
     let light_dir = primary_directional_light(world)
         .map(|l| {
@@ -384,6 +393,7 @@ pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform,
         return (GiProbeUniform::default(), Vec::new());
     };
 
+    let (center, extent) = resolved_probe_volume_bounds(world, volume);
     let counts = [
         volume.counts[0].clamp(1, 16),
         volume.counts[1].clamp(1, 16),
@@ -394,20 +404,20 @@ pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform,
         .product::<u32>()
         .min(crate::device::MAX_GI_PROBES as u32);
     let mut probes = Vec::with_capacity(total as usize);
-    let min = volume.center - volume.extent * 0.5;
+    let min = center - extent * 0.5;
     let step = engine_core::math::Vec3::new(
         if counts[0] > 1 {
-            volume.extent.x / (counts[0] - 1) as f32
+            extent.x / (counts[0] - 1) as f32
         } else {
             0.0
         },
         if counts[1] > 1 {
-            volume.extent.y / (counts[1] - 1) as f32
+            extent.y / (counts[1] - 1) as f32
         } else {
             0.0
         },
         if counts[2] > 1 {
-            volume.extent.z / (counts[2] - 1) as f32
+            extent.z / (counts[2] - 1) as f32
         } else {
             0.0
         },
@@ -438,8 +448,8 @@ pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform,
 
     (
         GiProbeUniform {
-            center: [volume.center.x, volume.center.y, volume.center.z, 0.0],
-            extent: [volume.extent.x, volume.extent.y, volume.extent.z, 0.0],
+            center: [center.x, center.y, center.z, 0.0],
+            extent: [extent.x, extent.y, extent.z, 0.0],
             counts_intensity: [
                 counts[0] as f32,
                 counts[1] as f32,
@@ -452,35 +462,213 @@ pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform,
     )
 }
 
-fn probe_irradiance_at(
+fn resolved_probe_volume_bounds(
+    world: &RenderWorld,
+    volume: &engine_render::RenderProbeVolume,
+) -> (engine_core::math::Vec3, engine_core::math::Vec3) {
+    let mut min = volume.center - volume.extent * 0.5;
+    let mut max = volume.center + volume.extent * 0.5;
+    let mut has_bounds = false;
+
+    if let Some(camera) = &world.camera {
+        let camera_extent = engine_core::math::Vec3::new(18.0, 7.0, 18.0);
+        min = min.min(camera.transform.translation - camera_extent);
+        max = max.max(camera.transform.translation + camera_extent);
+        has_bounds = true;
+    }
+
+    for object in &world.objects {
+        let radius = object.bounds.radius.max(1.0)
+            * object
+                .transform
+                .scale
+                .x
+                .abs()
+                .max(object.transform.scale.y.abs())
+                .max(object.transform.scale.z.abs())
+                .max(0.001);
+        let local_center = object.bounds.center * object.transform.scale;
+        let center = object.transform.translation + object.transform.rotation.rotate(local_center);
+        let pad = engine_core::math::Vec3::new(radius, radius, radius);
+        min = min.min(center - pad);
+        max = max.max(center + pad);
+        has_bounds = true;
+    }
+
+    if !has_bounds {
+        return (volume.center, volume.extent);
+    }
+
+    min -= engine_core::math::Vec3::new(3.0, 2.0, 3.0);
+    max += engine_core::math::Vec3::new(3.0, 3.0, 3.0);
+    let center = (min + max) * 0.5;
+    let extent = (max - min).max(engine_core::math::Vec3::new(6.0, 4.0, 6.0));
+    (center, extent)
+}
+
+pub(crate) fn probe_irradiance_at(
     world: &RenderWorld,
     position: engine_core::math::Vec3,
 ) -> engine_core::math::Vec3 {
-    let mut irradiance = engine_core::math::Vec3::new(0.03, 0.035, 0.04);
+    let sky_visibility = sky_visibility_at(world, position);
+    let mut irradiance = engine_core::math::Vec3::new(0.025, 0.028, 0.032) * sky_visibility;
     if let Some(skybox) = &world.skybox {
         let sky = engine_core::math::Vec3::new(
             (skybox.zenith_color[0] + skybox.horizon_color[0]) * 0.5,
             (skybox.zenith_color[1] + skybox.horizon_color[1]) * 0.5,
             (skybox.zenith_color[2] + skybox.horizon_color[2]) * 0.5,
-        ) * (0.18 * skybox.intensity);
+        ) * (0.28 * skybox.intensity * sky_visibility);
         irradiance += sky;
     }
     for light in &world.lights {
         let color = light.color * light.intensity;
         match light.kind {
             engine_render::RenderLightKind::Directional => {
-                irradiance += color * 0.08;
+                let dir = -light
+                    .transform
+                    .rotation
+                    .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                    .normalized();
+                let visibility = ray_visibility(world, position, dir, 80.0);
+                irradiance += color * (0.1 * visibility);
             }
             engine_render::RenderLightKind::Point | engine_render::RenderLightKind::Spot => {
                 let to_probe = position - light.transform.translation;
                 let distance = to_probe.length();
                 let range = light.range.max(0.001);
                 let attenuation = (1.0 - distance / range).max(0.0).powi(2);
-                irradiance += color * attenuation * 0.22;
+                let visibility = ray_visibility(
+                    world,
+                    position,
+                    (light.transform.translation - position).normalized(),
+                    distance,
+                );
+                irradiance += color * attenuation * visibility * 0.26;
             }
         }
     }
-    irradiance
+    irradiance += local_bounce_irradiance(world, position);
+    clamp_vec3(irradiance, 0.0, 6.0)
+}
+
+fn sky_visibility_at(world: &RenderWorld, position: engine_core::math::Vec3) -> f32 {
+    let mut visibility = 0.0;
+    for dir in PROBE_SKY_DIRECTIONS {
+        visibility += ray_visibility(world, position, dir.normalized(), 36.0);
+    }
+    (visibility / PROBE_SKY_DIRECTIONS.len() as f32).clamp(0.12, 1.0)
+}
+
+fn local_bounce_irradiance(
+    world: &RenderWorld,
+    position: engine_core::math::Vec3,
+) -> engine_core::math::Vec3 {
+    let mut bounce = engine_core::math::Vec3::ZERO;
+    for object in &world.objects {
+        let radius = object.bounds.radius.max(0.5)
+            * object
+                .transform
+                .scale
+                .x
+                .abs()
+                .max(object.transform.scale.y.abs())
+                .max(object.transform.scale.z.abs())
+                .max(0.001);
+        let local_center = object.bounds.center * object.transform.scale;
+        let center = object.transform.translation + object.transform.rotation.rotate(local_center);
+        let to_object = center - position;
+        let distance_sq = to_object.length_squared().max(0.25);
+        let distance = distance_sq.sqrt();
+        if distance > 18.0 + radius {
+            continue;
+        }
+        let material = world
+            .material_params
+            .get(&object.material)
+            .copied()
+            .unwrap_or(engine_render::RenderMaterialParams {
+                base_color: [0.72, 0.72, 0.72, 1.0],
+                metallic: 0.0,
+                roughness: 0.65,
+                emissive: [0.0, 0.0, 0.0],
+            });
+        let albedo = engine_core::math::Vec3::new(
+            material.base_color[0],
+            material.base_color[1],
+            material.base_color[2],
+        );
+        let emissive = engine_core::math::Vec3::new(
+            material.emissive[0],
+            material.emissive[1],
+            material.emissive[2],
+        );
+        let visibility = ray_visibility(world, position, to_object.normalized(), distance);
+        let area = (radius * radius / distance_sq).clamp(0.0, 1.0);
+        let non_metal = 1.0 - material.metallic.clamp(0.0, 1.0);
+        bounce += (albedo * non_metal * 0.18 + emissive * 0.35) * area * visibility;
+    }
+    bounce
+}
+
+fn ray_visibility(
+    world: &RenderWorld,
+    origin: engine_core::math::Vec3,
+    direction: engine_core::math::Vec3,
+    max_distance: f32,
+) -> f32 {
+    if direction.length_squared() <= 1e-8 {
+        return 1.0;
+    }
+    let mut transmittance: f32 = 1.0;
+    for object in &world.objects {
+        if !object.casts_shadows && !object.receive_shadows {
+            continue;
+        }
+        let radius = object.bounds.radius.max(0.5)
+            * object
+                .transform
+                .scale
+                .x
+                .abs()
+                .max(object.transform.scale.y.abs())
+                .max(object.transform.scale.z.abs())
+                .max(0.001);
+        let local_center = object.bounds.center * object.transform.scale;
+        let center = object.transform.translation + object.transform.rotation.rotate(local_center);
+        if ray_sphere_hit(origin, direction, center, radius * 0.85, max_distance) {
+            transmittance *= 0.42;
+            if transmittance < 0.18 {
+                return transmittance;
+            }
+        }
+    }
+    transmittance
+}
+
+fn ray_sphere_hit(
+    origin: engine_core::math::Vec3,
+    direction: engine_core::math::Vec3,
+    center: engine_core::math::Vec3,
+    radius: f32,
+    max_distance: f32,
+) -> bool {
+    let oc = origin - center;
+    let b = oc.dot(direction);
+    let c = oc.length_squared() - radius * radius;
+    let h = b * b - c;
+    if h < 0.0 {
+        return false;
+    }
+    let t = -b - h.sqrt();
+    t > 0.05 && t < max_distance
+}
+
+fn clamp_vec3(value: engine_core::math::Vec3, min: f32, max: f32) -> engine_core::math::Vec3 {
+    engine_core::math::Vec3::new(
+        value.x.clamp(min, max),
+        value.y.clamp(min, max),
+        value.z.clamp(min, max),
+    )
 }
 
 pub(crate) fn primary_directional_light(world: &RenderWorld) -> Option<&RenderLight> {

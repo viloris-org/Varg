@@ -224,14 +224,17 @@ pub enum RenderLightingMode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderGlobalIllumination {
     /// Screen-space GI only.
-    ScreenSpace,
+    ScreenSpace {
+        /// Indirect lighting multiplier.
+        intensity: f32,
+    },
     /// Probe volume assisted GI.
     ProbeVolume(RenderProbeVolume),
 }
 
 impl Default for RenderGlobalIllumination {
     fn default() -> Self {
-        Self::ScreenSpace
+        Self::ScreenSpace { intensity: 1.0 }
     }
 }
 
@@ -357,7 +360,7 @@ impl Default for RenderFog {
 }
 
 /// Minimal render queue shared by runtime, editor Scene View, and Game View.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderWorld {
     /// Active camera.
     pub camera: Option<RenderCamera>,
@@ -383,6 +386,25 @@ pub struct RenderWorld {
     pub global_illumination: RenderGlobalIllumination,
     /// Requested shadow allocation strategy.
     pub shadow_virtualization: RenderShadowVirtualization,
+}
+
+impl Default for RenderWorld {
+    fn default() -> Self {
+        Self {
+            camera: None,
+            objects: Vec::new(),
+            material_params: HashMap::new(),
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            particles: Vec::new(),
+            particle_emitters: Vec::new(),
+            skybox: None,
+            fog: None,
+            lighting_mode: RenderLightingMode::default(),
+            global_illumination: RenderGlobalIllumination::ProbeVolume(RenderProbeVolume::default()),
+            shadow_virtualization: RenderShadowVirtualization::default(),
+        }
+    }
 }
 
 impl RenderWorld {

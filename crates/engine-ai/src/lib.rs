@@ -486,9 +486,9 @@ pub enum AgentOperation {
         /// Material parameters or built-in material name.
         material: MaterialSpec,
     },
-    /// Write a structured mesh asset descriptor under the asset root.
+    /// Write a structured model authoring file under the asset root.
     CreateMeshAsset {
-        /// Asset-root-relative target path, usually under models/ and ending in .vmesh.json.
+        /// Asset-root-relative target path, usually under models/ and ending in .vmodel.
         path: String,
         /// Mesh authoring operations or primitives to record.
         operations: Vec<MeshOperationSpec>,
@@ -496,11 +496,11 @@ pub enum AgentOperation {
         #[serde(default)]
         assign_to: Option<String>,
     },
-    /// Apply structured mesh operations by recording a derived mesh asset descriptor.
+    /// Apply structured mesh operations by recording a derived model authoring file.
     ModifyMesh {
         /// Source asset path/GUID or entity whose MeshRenderer mesh should be used.
         source: String,
-        /// Asset-root-relative target path for the derived mesh descriptor.
+        /// Asset-root-relative target path for the derived model authoring file.
         target_path: String,
         /// Operations such as bevel, inset, extrude, mirror, boolean, or array.
         operations: Vec<MeshOperationSpec>,
@@ -1886,15 +1886,12 @@ impl AgentSession {
                         source,
                     })?;
                 }
-                let descriptor = material_descriptor_json(material);
-                std::fs::write(
-                    &full_path,
-                    serde_json::to_string_pretty(&descriptor)
-                        .map_err(|error| EngineError::other(error.to_string()))?,
-                )
-                .map_err(|source| EngineError::Filesystem {
-                    path: full_path.clone(),
-                    source,
+                let descriptor = material_descriptor_source(material);
+                std::fs::write(&full_path, descriptor).map_err(|source| {
+                    EngineError::Filesystem {
+                        path: full_path.clone(),
+                        source,
+                    }
                 })?;
                 self.context.rescan_assets()?;
             }
@@ -1921,7 +1918,7 @@ impl AgentSession {
     ) -> EngineResult<()> {
         let relative = sanitize_project_relative_path(path)?;
         let full_path = self.asset_root.join(&relative);
-        write_mesh_descriptor(&full_path, "generated_mesh", None, operations)?;
+        write_model_authoring_file(&full_path, "generated_model", None, operations)?;
         self.context.rescan_assets()?;
 
         if let Some(entity) = assign_to {
@@ -1963,7 +1960,7 @@ impl AgentSession {
                 line: None,
             },
             message: format!(
-                "Created mesh asset descriptor: {}",
+                "Created model authoring file: {}",
                 relative.to_string_lossy()
             ),
         });
@@ -1978,7 +1975,7 @@ impl AgentSession {
     ) -> EngineResult<()> {
         let relative = sanitize_project_relative_path(target_path)?;
         let full_path = self.asset_root.join(&relative);
-        write_mesh_descriptor(&full_path, "modified_mesh", Some(source), operations)?;
+        write_model_authoring_file(&full_path, "modified_model", Some(source), operations)?;
         self.context.rescan_assets()?;
         self.console.push(ConsoleEntry {
             timestamp: "now".into(),
@@ -1989,7 +1986,7 @@ impl AgentSession {
                 line: None,
             },
             message: format!(
-                "Recorded mesh modification descriptor: {}",
+                "Recorded model modification file: {}",
                 relative.to_string_lossy()
             ),
         });
@@ -2849,18 +2846,33 @@ fn builtin_mesh_for_primitive(primitive: &str) -> EngineResult<&'static str> {
     }
 }
 
-fn material_descriptor_json(material: &MaterialSpec) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": 1,
-        "kind": "material",
-        "name": material.name.as_deref().unwrap_or("AI Material"),
-        "base_color": material.base_color.unwrap_or([0.8, 0.8, 0.8]),
-        "roughness": material.roughness.unwrap_or(0.7),
-        "metallic": material.metallic.unwrap_or(0.0),
-    })
+fn material_descriptor_source(material: &MaterialSpec) -> String {
+    let name = material.name.as_deref().unwrap_or("AI Material");
+    let base_color = material.base_color.unwrap_or([0.8, 0.8, 0.8]);
+    let roughness = material.roughness.unwrap_or(0.7);
+    let metallic = material.metallic.unwrap_or(0.0);
+    format!(
+        "schema_version = 1\n\
+         type = \"material\"\n\
+         name = {name:?}\n\
+         shader = \"pbr\"\n\
+         base_color = [{:.4}, {:.4}, {:.4}]\n\
+         roughness = {:.4}\n\
+         metallic = {:.4}\n",
+        base_color[0], base_color[1], base_color[2], roughness, metallic
+    )
 }
 
-fn write_mesh_descriptor(
+#[derive(serde::Serialize)]
+struct ModelAuthoringFile<'a> {
+    schema_version: u32,
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
+    operations: &'a [MeshOperationSpec],
+}
+
+fn write_model_authoring_file(
     full_path: &Path,
     kind: &str,
     source: Option<&str>,
@@ -2872,15 +2884,15 @@ fn write_mesh_descriptor(
             source,
         })?;
     }
-    let descriptor = serde_json::json!({
-        "schema_version": 1,
-        "kind": kind,
-        "source": source,
-        "operations": operations,
-    });
+    let descriptor = ModelAuthoringFile {
+        schema_version: 1,
+        kind,
+        source,
+        operations,
+    };
     std::fs::write(
         full_path,
-        serde_json::to_string_pretty(&descriptor)
+        toml::to_string_pretty(&descriptor)
             .map_err(|error| EngineError::other(error.to_string()))?,
     )
     .map_err(|source| EngineError::Filesystem {
@@ -4314,16 +4326,16 @@ pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "create_mesh_asset".into(),
-            description: "Write a structured mesh asset descriptor and optionally assign it to an entity.".into(),
+            description: "Write a structured .vmodel TOML authoring file and optionally assign it to an entity.".into(),
             parameters: modeling_object_schema(serde_json::json!({
-                "path": { "type": "string", "description": "Asset-root-relative target path, e.g. models/crate.vmesh.json" },
+                "path": { "type": "string", "description": "Asset-root-relative target path, e.g. models/crate.vmodel" },
                 "operations": mesh_operations_schema(),
                 "assign_to": { "type": "string", "description": "Optional entity name or ID to receive the mesh" }
             }), &["path", "operations"]),
         },
         ToolDefinition {
             name: "modify_mesh".into(),
-            description: "Record structured mesh operations into a derived mesh asset descriptor.".into(),
+            description: "Record structured mesh operations into a derived .vmodel TOML authoring file.".into(),
             parameters: modeling_object_schema(serde_json::json!({
                 "source": { "type": "string", "description": "Source asset path/GUID or entity name/ID" },
                 "target_path": { "type": "string", "description": "Asset-root-relative target descriptor path" },
@@ -4763,7 +4775,7 @@ mod tests {
             id: "mesh-1".into(),
             name: "create_mesh_asset".into(),
             arguments: serde_json::json!({
-                "path": "models/crate.vmesh.json",
+                "path": "models/crate.vmodel",
                 "operations": [
                     { "type": "cube", "params": { "size": [2.0, 1.0, 1.0] } },
                     { "type": "bevel", "params": { "amount": 0.05 } }
@@ -4815,7 +4827,7 @@ mod tests {
 
         session
             .execute_operation(&AgentOperation::CreateMeshAsset {
-                path: "models/crate.vmesh.json".into(),
+                path: "models/crate.vmodel".into(),
                 operations: vec![MeshOperationSpec {
                     operation_type: "cube".into(),
                     params: serde_json::json!({ "size": [1.0, 1.0, 1.0] }),
@@ -4823,7 +4835,12 @@ mod tests {
                 assign_to: Some("AI_Crate".into()),
             })
             .unwrap();
-        assert!(root.join("assets/models/crate.vmesh.json").exists());
+        let model_path = root.join("assets/models/crate.vmodel");
+        assert!(model_path.exists());
+        let model_source = std::fs::read_to_string(model_path).unwrap();
+        assert!(model_source.contains("schema_version = 1"));
+        assert!(model_source.contains("kind = \"generated_model\""));
+        assert!(model_source.contains("[[operations]]"));
 
         session
             .execute_operation(&AgentOperation::ValidateScene {

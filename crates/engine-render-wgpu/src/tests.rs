@@ -1,5 +1,7 @@
 use crate::{device::*, meshes::*, post::*, render::*, scene_uniforms::*, shaders::*, uniforms::*};
-use engine_render::{RenderLight, RenderLightKind, RenderWorld};
+use engine_render::{
+    RenderGlobalIllumination, RenderLight, RenderLightKind, RenderObject, RenderWorld,
+};
 
 #[test]
 fn bloom_mips_are_recreated_when_either_dimension_changes() {
@@ -138,7 +140,7 @@ fn forward_shader_binds_and_samples_all_csm_cascades() {
     assert!(FORWARD_SHADER.contains("params: vec4<f32>"));
     assert!(FORWARD_SHADER.contains("let texel = csm.params.y"));
     assert!(FORWARD_SHADER.contains("blocker_ratio"));
-    assert!(FORWARD_SHADER.contains("let penumbra = mix(1.0, 6.0, blocker_ratio)"));
+    assert!(FORWARD_SHADER.contains("let penumbra = mix(0.85, 3.5, blocker_ratio)"));
     assert!(!FORWARD_SHADER.contains("let texel = 1.0 / 4096.0"));
     assert!(!FORWARD_SHADER.contains("- 4.0"));
 }
@@ -176,9 +178,19 @@ fn forward_and_ssgi_shaders_expose_p1_p2_temporal_lighting_inputs() {
     assert!(SSGI_SHADER.contains("var history_tex: texture_2d<f32>"));
     assert!(SSGI_SHADER.contains("history_uv = clamp(uv - motion"));
     assert!(SSGI_SHADER.contains("ssgi.reset_history > 0.5"));
+    assert!(SSGI_SHADER.contains("clamped_history = clamp(history"));
+    assert!(SSGI_SHADER.contains("min(sample_radiance, vec3<f32>(8.0))"));
     assert!(POST_SHADER.contains("var depth_tex: texture_depth_2d"));
     assert!(POST_SHADER.contains("fn screen_space_reflection"));
     assert!(POST_SHADER.contains("post.ssr_intensity"));
+}
+
+#[test]
+fn ssao_shader_uses_depth_aware_contact_occlusion() {
+    assert!(SSAO_SHADER.contains("let view_scale = mix(18.0, 95.0, 1.0 - depth)"));
+    assert!(SSAO_SHADER.contains("let radius_px = clamp(params.radius * view_scale"));
+    assert!(SSAO_SHADER.contains("let horizon = smoothstep(params.bias"));
+    assert!(!SSAO_SHADER.contains("let radius_px = params.radius * params.width"));
 }
 
 #[test]
@@ -229,6 +241,7 @@ fn post_shader_uses_cubic_reconstruction_and_bounded_sharpening() {
     assert!(POST_SHADER.contains("fn sharpen_hdr"));
     assert!(POST_SHADER.contains("textureLoad(hdr_tex"));
     assert!(POST_SHADER.contains("clamp(center + detail"));
+    assert!(POST_SHADER.contains("return sharpen_hdr(textureLoad(hdr_tex, pixel, 0).rgb"));
 }
 
 #[test]
@@ -239,6 +252,8 @@ fn taa_shader_reprojects_and_clamps_history_for_antialiasing() {
     assert!(TAA_SHADER.contains("post.taa_enabled < 0.5"));
     assert!(TAA_SHADER.contains("clamp(history, neighborhood_min, neighborhood_max)"));
     assert!(TAA_SHADER.contains("post.taa_history_weight"));
+    assert!(TAA_SHADER.contains("mix(post.taa_history_weight, 0.38"));
+    assert!(TAA_SHADER.contains("0.0, 0.82"));
     assert!(POST_SHADER.contains("let hdr = resolve_hdr(input.uv)"));
     assert!(!POST_SHADER.contains("fn fxaa_hdr"));
 }
@@ -294,6 +309,20 @@ fn sphere_min_segments_clamped() {
 }
 
 #[test]
+fn cylinder_generates_expected_counts() {
+    let (verts, indices) = generate_cylinder(12);
+    assert_eq!(verts.len(), 50);
+    assert_eq!(indices.len(), 144);
+}
+
+#[test]
+fn cone_generates_expected_counts() {
+    let (verts, indices) = generate_cone(12);
+    assert_eq!(verts.len(), 37);
+    assert_eq!(indices.len(), 72);
+}
+
+#[test]
 fn plane_has_4_vertices_and_6_indices() {
     let (verts, indices) = generate_plane();
     assert_eq!(verts.len(), 4);
@@ -309,10 +338,16 @@ fn debug_mesh_enum_variants() {
     // Verify the enum can be constructed and matched
     let cube = DebugMesh::Cube;
     let sphere = DebugMesh::Sphere(8);
+    let cylinder = DebugMesh::Cylinder(16);
+    let cone = DebugMesh::Cone(16);
     let plane = DebugMesh::Plane;
     assert_eq!(cube, DebugMesh::Cube);
     assert_eq!(sphere, DebugMesh::Sphere(8));
+    assert_eq!(cylinder, DebugMesh::Cylinder(16));
+    assert_eq!(cone, DebugMesh::Cone(16));
     assert_eq!(plane, DebugMesh::Plane);
+    assert_eq!(mesh_name(&cylinder), "debug/cylinder");
+    assert_eq!(mesh_name(&cone), "debug/cone");
 }
 
 #[test]
@@ -762,4 +797,91 @@ fn probe_volume_generates_enabled_irradiance_grid() {
     assert_eq!(uniform.counts_intensity, [2.0, 2.0, 2.0, 1.5]);
     assert_eq!(probes.len(), 8);
     assert!(probes.iter().any(|probe| probe.irradiance[0] > 0.03));
+}
+
+#[test]
+fn render_world_defaults_to_probe_volume_gi() {
+    let world = RenderWorld::default();
+    assert!(matches!(
+        world.global_illumination,
+        RenderGlobalIllumination::ProbeVolume(_)
+    ));
+}
+
+#[test]
+fn probe_volume_auto_bounds_include_scene_objects() {
+    let world = RenderWorld {
+        objects: vec![RenderObject {
+            object: engine_core::EntityId::from_u128(7),
+            transform: engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(16.0, 0.0, 0.0),
+                rotation: engine_core::math::Quat::IDENTITY,
+                scale: engine_core::math::Vec3::ONE,
+            },
+            mesh: "debug/cube".to_owned(),
+            material: String::new(),
+            casts_shadows: true,
+            receive_shadows: true,
+            bounds: engine_render::RenderBounds {
+                center: engine_core::math::Vec3::ZERO,
+                radius: 2.0,
+            },
+            lods: Vec::new(),
+        }],
+        ..RenderWorld::default()
+    };
+
+    let (uniform, probes) = gi_probe_uniform_and_data(&world);
+
+    assert_eq!(uniform.params[0], 1);
+    assert!(!probes.is_empty());
+    assert!(uniform.center[0] > 2.0);
+    assert!(uniform.extent[0] > 24.0);
+}
+
+#[test]
+fn probe_irradiance_is_reduced_by_occluding_geometry() {
+    let light = RenderLight {
+        object: engine_core::EntityId::from_u128(42),
+        transform: engine_core::math::Transform {
+            translation: engine_core::math::Vec3::new(0.0, 4.0, 0.0),
+            rotation: engine_core::math::Quat::IDENTITY,
+            scale: engine_core::math::Vec3::ONE,
+        },
+        kind: RenderLightKind::Point,
+        color: engine_core::math::Vec3::ONE,
+        intensity: 8.0,
+        range: 12.0,
+        spot_angle: 45.0,
+    };
+    let open_world = RenderWorld {
+        lights: vec![light.clone()],
+        ..RenderWorld::default()
+    };
+    let blocked_world = RenderWorld {
+        lights: vec![light],
+        objects: vec![RenderObject {
+            object: engine_core::EntityId::from_u128(9),
+            transform: engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(0.0, 2.0, 0.0),
+                rotation: engine_core::math::Quat::IDENTITY,
+                scale: engine_core::math::Vec3::ONE,
+            },
+            mesh: "debug/sphere".to_owned(),
+            material: String::new(),
+            casts_shadows: true,
+            receive_shadows: true,
+            bounds: engine_render::RenderBounds {
+                center: engine_core::math::Vec3::ZERO,
+                radius: 1.4,
+            },
+            lods: Vec::new(),
+        }],
+        ..RenderWorld::default()
+    };
+
+    let open = probe_irradiance_at(&open_world, engine_core::math::Vec3::ZERO);
+    let blocked = probe_irradiance_at(&blocked_world, engine_core::math::Vec3::ZERO);
+
+    assert!(blocked.x < open.x);
 }

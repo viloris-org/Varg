@@ -1,0 +1,51 @@
+script FirstPersonCamera {
+    @export var eyeHeight: Float = 0.65
+    @export var mouseSensitivity: Float = 0.08
+    @export var gamepadLookSpeed: Float = 74.0
+    @export var routeYaw: Float = -34.0
+    @export var minPitch: Float = -36.0
+    @export var maxPitch: Float = 18.0
+
+    var yaw: Float = -34.0
+    var pitch: Float = -9.0
+    var initialized: Bool = false
+    var mouseCaptured: Bool = true
+
+    func start() {
+        yaw = routeYaw
+        pitch = -9.0
+        initialized = true
+        mouseCaptured = true
+        Input.captureMouse(mouseCaptured)
+        log("First person camera: Esc opens menu, E or F captures mouse look.")
+    }
+
+    func update(_ dt: Float) {
+        if !initialized {
+            yaw = routeYaw
+            pitch = -9.0
+            initialized = true
+        }
+
+        if Input.pressed("Fire") {
+            mouseCaptured = true
+        }
+
+        Input.captureMouse(mouseCaptured)
+
+        if mouseCaptured {
+            yaw += Input.mouseDeltaX() * mouseSensitivity
+            pitch -= Input.mouseDeltaY() * mouseSensitivity
+        }
+
+        yaw += Input.value("LookX") * gamepadLookSpeed * dt
+        pitch += Input.value("LookY") * gamepadLookSpeed * dt * 0.35
+
+        pitch = clamp(pitch, minPitch, maxPitch)
+
+        position.x = scene.xOf("Player")
+        position.y = scene.yOf("Player") + eyeHeight
+        position.z = scene.zOf("Player")
+        rotation = Vec3(pitch, yaw, 0.0)
+    }
+}

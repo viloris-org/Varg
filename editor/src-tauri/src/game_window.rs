@@ -38,6 +38,7 @@ pub struct GameRuntimeSnapshot {
     script_roots: Vec<PathBuf>,
     asset_root: PathBuf,
     scene_file: engine_ecs::SceneFile,
+    render_scaling: engine_render::RenderScalingSettings,
 }
 
 impl GameRuntimeSnapshot {
@@ -48,6 +49,7 @@ impl GameRuntimeSnapshot {
         script_roots: Vec<PathBuf>,
         asset_root: PathBuf,
         scene_file: engine_ecs::SceneFile,
+        render_scaling: engine_render::RenderScalingSettings,
     ) -> Self {
         Self {
             config,
@@ -55,6 +57,7 @@ impl GameRuntimeSnapshot {
             script_roots,
             asset_root,
             scene_file,
+            render_scaling,
         }
     }
 
@@ -70,6 +73,7 @@ impl GameRuntimeSnapshot {
         runtime.load_project_assets(self.asset_root)?;
         runtime.scene = scene;
         runtime.render_world = runtime_min::extract_render_world(&runtime.scene);
+        runtime.set_render_scaling(self.render_scaling, runtime_min::runtime_scaling_context());
         Ok(runtime)
     }
 }
@@ -421,13 +425,9 @@ impl GameApp {
             engine_render::RenderPerformanceConfig::competitive_120hz(),
         )
         .map_err(|error| format!("wgpu device: {error}"))?;
-        let mut runtime = snapshot
+        let runtime = snapshot
             .into_runtime(renderer)
             .map_err(|error| format!("runtime: {error}"))?;
-        runtime.set_render_scaling(
-            runtime_min::runtime_scaling_settings_from_env(),
-            runtime_min::runtime_scaling_context(),
-        );
         self.runtime = Some(runtime);
         self.last_frame = Instant::now();
         self.applied_input_capture = None;
@@ -447,6 +447,11 @@ impl GameApp {
         };
         if let Err(e) = runtime.tick_game_frame(dt, false) {
             tracing::error!(target: "game", error = %e, "runtime tick/render failed");
+        }
+        if runtime.take_exit_requested() {
+            self.close_window();
+            let _ = self.event_tx.send(GameEvent::Closed);
+            return;
         }
         let capture = runtime.input_capture();
         if self.applied_input_capture != Some(capture) {
@@ -499,6 +504,7 @@ mod tests {
                 vec![PathBuf::from("scripts")],
                 PathBuf::from("assets"),
                 scene.to_scene_file("test").unwrap(),
+                engine_render::RenderScalingSettings::default(),
             ),
         );
         for _ in 0..20 {

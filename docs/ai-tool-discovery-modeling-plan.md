@@ -27,7 +27,7 @@ Blender MCP demonstrates why agents can model effectively in Blender:
 
 Varg should borrow the first three ideas while avoiding a default arbitrary-code execution path. Modeling should primarily use structured Varg tools, declarative Varg authoring files, and validated asset generation.
 
-The prompt surface also needs to stay small. Putting every tool, every `.vscene`/`.vasset` example, every permission rule, and every modeling instruction in the system prompt would make the agent slower and less reliable. Varg should expose a small base tool set and let the agent discover tools and read skills as needed.
+The prompt surface also needs to stay small. Putting every tool, every `.vscene`/`.vmodel`/`.vasset` example, every permission rule, and every modeling instruction in the system prompt would make the agent slower and less reliable. Varg should expose a small base tool set and let the agent discover tools and read skills as needed.
 
 ## Design Principles
 
@@ -383,30 +383,37 @@ lod_generate
 
 ## Modeling Scripts and Asset DSL
 
-Precise modeling should not require the model to emit large raw vertex arrays. Varg should provide higher-level authoring operations and declarative asset files.
+Precise modeling should not require the model to emit large raw vertex arrays. Varg should provide higher-level authoring operations and declarative `.vmodel` files. Asset registration and import metadata should stay in TOML `.vasset` files.
 
-Potential `.vasset` model declaration:
+Potential `.vmodel` TOML declaration:
 
-```varg
-model SciFiCrate {
-    material body {
-        base_color: rgb(0.18, 0.22, 0.25)
-        roughness: 0.75
-    }
+```toml
+schema_version = 1
+kind = "generated_model"
 
-    cube "body" {
-        size: [2.0, 1.2, 1.2]
-        bevel: 0.08
-        material: body
-    }
+[[operations]]
+type = "cube"
 
-    repeat x 4 {
-        cube "rib" {
-            size: [0.08, 1.35, 1.32]
-            position: [index * 0.45 - 0.675, 0, 0]
-        }
-    }
-}
+[operations.params]
+name = "body"
+size = [2.0, 1.2, 1.2]
+material = "body"
+
+[[operations]]
+type = "bevel"
+
+[operations.params]
+target = "body"
+amount = 0.08
+
+[[operations]]
+type = "array"
+
+[operations.params]
+name = "rib"
+count = 4
+axis = "x"
+spacing = 0.45
 ```
 
 This syntax direction should be reconciled with [`docs/varg-language-family-spec.md`](./varg-language-family-spec.md) before implementation.
@@ -493,20 +500,20 @@ Quest should handle:
 
 ### Phase 5: Declarative Modeling Authoring
 
-- Extend `.vasset` or introduce a model authoring sub-syntax aligned with the Varg language family.
+- Add `.vmodel` as the model authoring source format and keep generated descriptors in TOML.
 - Compile model declarations to mesh/material assets.
 - Add examples in skills.
 - Add validation and editor previews.
 
 ### Phase 6: Sandboxed Modeling Script Runner
 
-- Evaluate whether an escape hatch is still needed after structured tools and `.vasset` modeling exist.
+- Evaluate whether an escape hatch is still needed after structured tools and `.vmodel` authoring exist.
 - If needed, implement it as sandboxed, bounded, audited, and off by default.
 - Route high-risk use to Quest.
 
 ## Open Questions
 
-- Should model authoring stay inside `.vasset`, or should Varg add a distinct `.vmodel` role?
+- How far should `.vmodel` remain TOML descriptors versus growing a richer Varg-native modeling syntax?
 - Should `skill_read` be a tool or should it use the same resource API as project docs and MCP resources?
 - What is the minimum viewport capture format needed for model feedback in Editor AI?
 - How much mesh topology editing belongs in Varg versus in imported DCC tools?

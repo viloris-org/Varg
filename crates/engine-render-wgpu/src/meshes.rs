@@ -7,6 +7,10 @@ pub enum DebugMesh {
     Cube,
     /// UV sphere with the given longitudinal/latitudinal segment count.
     Sphere(u32),
+    /// Unit cylinder on the Y axis with the given radial segment count.
+    Cylinder(u32),
+    /// Unit cone on the Y axis with the given radial segment count.
+    Cone(u32),
     /// Quad on the XY plane from (-0.5, -0.5, 0) to (0.5, 0.5, 0).
     Plane,
 }
@@ -35,6 +39,8 @@ pub(crate) fn mesh_name(mesh: &DebugMesh) -> String {
     match mesh {
         DebugMesh::Cube => "debug/cube".to_string(),
         DebugMesh::Sphere(_) => "debug/sphere".to_string(),
+        DebugMesh::Cylinder(_) => "debug/cylinder".to_string(),
+        DebugMesh::Cone(_) => "debug/cone".to_string(),
         DebugMesh::Plane => "debug/plane".to_string(),
     }
 }
@@ -206,6 +212,8 @@ pub(crate) fn generate_mesh(mesh: &DebugMesh) -> (Vec<Vertex>, Vec<u32>) {
     match mesh {
         DebugMesh::Cube => generate_cube(),
         DebugMesh::Sphere(segments) => generate_sphere(*segments),
+        DebugMesh::Cylinder(segments) => generate_cylinder(*segments),
+        DebugMesh::Cone(segments) => generate_cone(*segments),
         DebugMesh::Plane => generate_plane(),
     }
 }
@@ -260,6 +268,149 @@ pub(crate) fn generate_sphere(segments: u32) -> (Vec<Vertex>, Vec<u32>) {
             indices.push(b);
             indices.push(d);
         }
+    }
+
+    let vertices = with_generated_tangents(vertices, &indices);
+    (vertices, indices)
+}
+
+pub(crate) fn generate_cylinder(segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+    let segs = segments.max(3);
+    let mut vertices = Vec::with_capacity((segs * 4 + 2) as usize);
+    let mut indices = Vec::with_capacity((segs * 12) as usize);
+    let top_center = segs * 4;
+    let bottom_center = top_center + 1;
+
+    for i in 0..segs {
+        let u = i as f32 / segs as f32;
+        let angle = u * 2.0 * std::f32::consts::PI;
+        let x = angle.cos() * 0.5;
+        let z = angle.sin() * 0.5;
+        vertices.push(Vertex {
+            position: [x, -0.5, z],
+            normal: [angle.cos(), 0.0, angle.sin()],
+            uv: [u, 1.0],
+            tangent: [-angle.sin(), 0.0, angle.cos(), 1.0],
+        });
+        vertices.push(Vertex {
+            position: [x, 0.5, z],
+            normal: [angle.cos(), 0.0, angle.sin()],
+            uv: [u, 0.0],
+            tangent: [-angle.sin(), 0.0, angle.cos(), 1.0],
+        });
+        vertices.push(Vertex {
+            position: [x, 0.5, z],
+            normal: [0.0, 1.0, 0.0],
+            uv: [x + 0.5, z + 0.5],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+        });
+        vertices.push(Vertex {
+            position: [x, -0.5, z],
+            normal: [0.0, -1.0, 0.0],
+            uv: [x + 0.5, z + 0.5],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+        });
+    }
+
+    vertices.push(Vertex {
+        position: [0.0, 0.5, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.5, 0.5],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    });
+    vertices.push(Vertex {
+        position: [0.0, -0.5, 0.0],
+        normal: [0.0, -1.0, 0.0],
+        uv: [0.5, 0.5],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    });
+
+    for i in 0..segs {
+        let next = (i + 1) % segs;
+        let side_bottom = i * 4;
+        let side_top = side_bottom + 1;
+        let cap_top = side_bottom + 2;
+        let cap_bottom = side_bottom + 3;
+        let next_side_bottom = next * 4;
+        let next_side_top = next_side_bottom + 1;
+        let next_cap_top = next_side_bottom + 2;
+        let next_cap_bottom = next_side_bottom + 3;
+
+        indices.extend_from_slice(&[
+            side_bottom,
+            next_side_bottom,
+            side_top,
+            side_top,
+            next_side_bottom,
+            next_side_top,
+            top_center,
+            cap_top,
+            next_cap_top,
+            bottom_center,
+            next_cap_bottom,
+            cap_bottom,
+        ]);
+    }
+
+    let vertices = with_generated_tangents(vertices, &indices);
+    (vertices, indices)
+}
+
+pub(crate) fn generate_cone(segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+    let segs = segments.max(3);
+    let mut vertices = Vec::with_capacity((segs * 3 + 1) as usize);
+    let mut indices = Vec::with_capacity((segs * 6) as usize);
+    let bottom_center = segs * 3;
+
+    for i in 0..segs {
+        let u = i as f32 / segs as f32;
+        let angle = u * 2.0 * std::f32::consts::PI;
+        let x = angle.cos() * 0.5;
+        let z = angle.sin() * 0.5;
+        let side_normal = [angle.cos() * 0.707, 0.707, angle.sin() * 0.707];
+        vertices.push(Vertex {
+            position: [x, -0.5, z],
+            normal: side_normal,
+            uv: [u, 1.0],
+            tangent: [-angle.sin(), 0.0, angle.cos(), 1.0],
+        });
+        vertices.push(Vertex {
+            position: [0.0, 0.5, 0.0],
+            normal: side_normal,
+            uv: [u, 0.0],
+            tangent: [-angle.sin(), 0.0, angle.cos(), 1.0],
+        });
+        vertices.push(Vertex {
+            position: [x, -0.5, z],
+            normal: [0.0, -1.0, 0.0],
+            uv: [x + 0.5, z + 0.5],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+        });
+    }
+
+    vertices.push(Vertex {
+        position: [0.0, -0.5, 0.0],
+        normal: [0.0, -1.0, 0.0],
+        uv: [0.5, 0.5],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+    });
+
+    for i in 0..segs {
+        let next = (i + 1) % segs;
+        let side_base = i * 3;
+        let side_tip = side_base + 1;
+        let cap_base = side_base + 2;
+        let next_side_base = next * 3;
+        let next_cap_base = next_side_base + 2;
+
+        indices.extend_from_slice(&[
+            side_base,
+            next_side_base,
+            side_tip,
+            bottom_center,
+            next_cap_base,
+            cap_base,
+        ]);
     }
 
     let vertices = with_generated_tangents(vertices, &indices);

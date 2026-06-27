@@ -635,7 +635,7 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
         ),
         meta(
             "create_mesh_asset",
-            "Generate a structured mesh asset descriptor from primitives or mesh operations.",
+            "Generate a structured .vmodel TOML authoring file from primitives or mesh operations.",
             ToolExposure::Deferred,
             ToolType::Mesh,
             &[ToolStage::Author, ToolStage::Apply],
@@ -649,7 +649,7 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
             &["varg-modeling", "varg-asset-pipeline"],
             &[
                 "mesh asset",
-                "vmesh",
+                "vmodel",
                 "bevel",
                 "inset",
                 "extrude",
@@ -658,7 +658,7 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
         ),
         meta(
             "modify_mesh",
-            "Apply structured mesh operations by recording a derived mesh asset descriptor.",
+            "Apply structured mesh operations by recording a derived .vmodel TOML authoring file.",
             ToolExposure::Deferred,
             ToolType::Mesh,
             &[ToolStage::Refine, ToolStage::Apply],

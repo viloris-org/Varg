@@ -1918,7 +1918,7 @@ impl WgpuRenderDevice {
                 ssr_enabled: 1.0,
                 ssr_intensity: 0.35,
                 taa_reset: 1.0,
-                taa_history_weight: 0.88,
+                taa_history_weight: 0.72,
                 taa_enabled: 1.0,
                 _pad: 0.0,
             }),

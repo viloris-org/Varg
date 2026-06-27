@@ -38,7 +38,13 @@ impl WgpuRenderDevice {
 
     /// Pre-loads procedural debug meshes into the cache.
     pub fn upload_debug_meshes(&mut self) {
-        for mesh in &[DebugMesh::Cube, DebugMesh::Sphere(8), DebugMesh::Plane] {
+        for mesh in &[
+            DebugMesh::Cube,
+            DebugMesh::Sphere(8),
+            DebugMesh::Cylinder(24),
+            DebugMesh::Cone(24),
+            DebugMesh::Plane,
+        ] {
             let name = mesh_name(mesh);
             let buffers = self.create_mesh_buffers(mesh);
             tracing::debug!(target: "engine", mesh = %name, "debug mesh uploaded");
