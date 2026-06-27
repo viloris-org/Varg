@@ -1301,11 +1301,7 @@ fn decode_post_normal(encoded: vec3<f32>) -> vec3<f32> {
 
 fn sample_post_depth(uv: vec2<f32>) -> f32 {
     let clamped_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
-    let pixel = vec2<i32>(
-        clamp(i32(clamped_uv.x * post.render_width), 0, i32(post.render_width) - 1),
-        clamp(i32(clamped_uv.y * post.render_height), 0, i32(post.render_height) - 1)
-    );
-    return textureLoad(depth_tex, pixel, 0);
+    return textureSample(depth_tex, lin_sampler, clamped_uv);
 }
 
 fn screen_space_reflection(uv: vec2<f32>) -> vec3<f32> {

@@ -245,9 +245,9 @@ fn post_shader_uses_cubic_reconstruction_and_bounded_sharpening() {
 }
 
 #[test]
-fn post_shader_loads_depth_without_filtering_sampler() {
-    assert!(POST_SHADER.contains("return textureLoad(depth_tex, pixel, 0);"));
-    assert!(!POST_SHADER.contains("textureSample(depth_tex"));
+fn post_shader_samples_depth_for_glsl_backend_compatibility() {
+    assert!(POST_SHADER.contains("return textureSample(depth_tex, lin_sampler, clamped_uv);"));
+    assert!(!POST_SHADER.contains("textureLoad(depth_tex"));
 }
 
 #[test]
