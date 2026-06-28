@@ -3,8 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use crate::meshes::{MeshBuffers, SkinnedMeshBuffers};
 use engine_core::{Handle, HandleAllocator};
 use engine_render::{
-    AntiAliasingMode, ImageDesc, RenderGraph, RenderPerformanceConfig, RenderPerformanceMetrics,
-    RenderStage, RenderTarget, RenderTargetDesc, TemporalCameraData, TemporalFrameState,
+    AntiAliasingMode, ImageDesc, RenderGraph, RenderPassKind, RenderPerformanceConfig,
+    RenderPerformanceMetrics, RenderStage, RenderTarget, RenderTargetDesc, TemporalCameraData,
+    TemporalFrameState,
 };
 
 /// Native output capabilities exposed by the selected graphics adapter.
@@ -121,12 +122,18 @@ pub(crate) struct GpuTarget {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FramePipelineStep {
+    LightCulling,
     Shadow,
+    DirectionalShadow,
+    LocalShadow,
     GBuffer,
     DeferredLighting,
     Forward,
     TemporalInputs,
     Upscale,
+    AmbientOcclusion,
+    ScreenSpaceGI,
+    Reflection,
     Post,
     Ui,
     Outline,
@@ -134,12 +141,18 @@ pub(crate) enum FramePipelineStep {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FramePipelinePlan {
+    pub(crate) light_culling: bool,
     pub(crate) shadow: bool,
+    pub(crate) directional_shadow: bool,
+    pub(crate) local_shadow: bool,
     pub(crate) gbuffer: bool,
     pub(crate) deferred_lighting: bool,
     pub(crate) forward: bool,
     pub(crate) temporal_inputs: bool,
     pub(crate) upscale: bool,
+    pub(crate) ambient_occlusion: bool,
+    pub(crate) screen_space_gi: bool,
+    pub(crate) reflection: bool,
     pub(crate) post: bool,
     pub(crate) ui: bool,
     pub(crate) pass_count: u32,
@@ -149,16 +162,23 @@ pub(crate) struct FramePipelinePlan {
 impl Default for FramePipelinePlan {
     fn default() -> Self {
         Self {
+            light_culling: true,
             shadow: true,
+            directional_shadow: true,
+            local_shadow: true,
             gbuffer: false,
             deferred_lighting: false,
             forward: true,
             temporal_inputs: true,
             upscale: true,
+            ambient_occlusion: true,
+            screen_space_gi: true,
+            reflection: true,
             post: true,
             ui: true,
             pass_count: 6,
             steps: vec![
+                FramePipelineStep::LightCulling,
                 FramePipelineStep::Shadow,
                 FramePipelineStep::Forward,
                 FramePipelineStep::TemporalInputs,
@@ -175,19 +195,23 @@ impl FramePipelinePlan {
         let steps = graph
             .passes
             .iter()
-            .filter_map(|pass| match pass.name.as_str() {
-                "shadow" => Some(FramePipelineStep::Shadow),
-                "gbuffer" => Some(FramePipelineStep::GBuffer),
-                "deferred-lighting" | "deferred_lighting" => {
-                    Some(FramePipelineStep::DeferredLighting)
-                }
-                "forward" => Some(FramePipelineStep::Forward),
-                "temporal-inputs" => Some(FramePipelineStep::TemporalInputs),
-                "upscale" => Some(FramePipelineStep::Upscale),
-                "post" => Some(FramePipelineStep::Post),
-                "ui" | "gui" => Some(FramePipelineStep::Ui),
-                "outline" => Some(FramePipelineStep::Outline),
-                _ => match pass.stage {
+            .filter_map(|pass| match pass.kind {
+                RenderPassKind::LightCulling => Some(FramePipelineStep::LightCulling),
+                RenderPassKind::Shadow => Some(FramePipelineStep::Shadow),
+                RenderPassKind::DirectionalShadow => Some(FramePipelineStep::DirectionalShadow),
+                RenderPassKind::LocalShadow => Some(FramePipelineStep::LocalShadow),
+                RenderPassKind::GBuffer => Some(FramePipelineStep::GBuffer),
+                RenderPassKind::DeferredLighting => Some(FramePipelineStep::DeferredLighting),
+                RenderPassKind::Forward => Some(FramePipelineStep::Forward),
+                RenderPassKind::TemporalInputs => Some(FramePipelineStep::TemporalInputs),
+                RenderPassKind::Upscale => Some(FramePipelineStep::Upscale),
+                RenderPassKind::AmbientOcclusion => Some(FramePipelineStep::AmbientOcclusion),
+                RenderPassKind::ScreenSpaceGI => Some(FramePipelineStep::ScreenSpaceGI),
+                RenderPassKind::Reflection => Some(FramePipelineStep::Reflection),
+                RenderPassKind::PostProcess => Some(FramePipelineStep::Post),
+                RenderPassKind::UiComposition => Some(FramePipelineStep::Ui),
+                RenderPassKind::Outline => Some(FramePipelineStep::Outline),
+                RenderPassKind::Custom => match pass.stage {
                     RenderStage::TemporalInputs => Some(FramePipelineStep::TemporalInputs),
                     RenderStage::Upscale => Some(FramePipelineStep::Upscale),
                     RenderStage::PostUpscale => Some(FramePipelineStep::Post),
@@ -197,16 +221,25 @@ impl FramePipelinePlan {
             })
             .collect();
         Self {
-            shadow: graph.contains_pass("shadow"),
-            gbuffer: graph.contains_pass("gbuffer"),
-            deferred_lighting: graph.contains_pass("deferred-lighting")
-                || graph.contains_pass("deferred_lighting"),
-            forward: graph.contains_pass("forward"),
-            temporal_inputs: graph.contains_stage(RenderStage::TemporalInputs),
-            upscale: graph.contains_stage(RenderStage::Upscale),
-            post: graph.contains_pass("post") || graph.contains_stage(RenderStage::PostUpscale),
-            ui: graph.contains_pass("ui")
-                || graph.contains_pass("gui")
+            light_culling: graph.contains_pass_kind(RenderPassKind::LightCulling),
+            shadow: graph.contains_pass_kind(RenderPassKind::Shadow),
+            directional_shadow: graph.contains_pass_kind(RenderPassKind::DirectionalShadow)
+                || graph.contains_pass_kind(RenderPassKind::Shadow),
+            local_shadow: graph.contains_pass_kind(RenderPassKind::LocalShadow)
+                || graph.contains_pass_kind(RenderPassKind::Shadow),
+            gbuffer: graph.contains_pass_kind(RenderPassKind::GBuffer),
+            deferred_lighting: graph.contains_pass_kind(RenderPassKind::DeferredLighting),
+            forward: graph.contains_pass_kind(RenderPassKind::Forward),
+            temporal_inputs: graph.contains_pass_kind(RenderPassKind::TemporalInputs)
+                || graph.contains_stage(RenderStage::TemporalInputs),
+            upscale: graph.contains_pass_kind(RenderPassKind::Upscale)
+                || graph.contains_stage(RenderStage::Upscale),
+            ambient_occlusion: graph.contains_pass_kind(RenderPassKind::AmbientOcclusion),
+            screen_space_gi: graph.contains_pass_kind(RenderPassKind::ScreenSpaceGI),
+            reflection: graph.contains_pass_kind(RenderPassKind::Reflection),
+            post: graph.contains_pass_kind(RenderPassKind::PostProcess)
+                || graph.contains_stage(RenderStage::PostUpscale),
+            ui: graph.contains_pass_kind(RenderPassKind::UiComposition)
                 || graph.contains_stage(RenderStage::UiComposition),
             pass_count: graph.pass_count() as u32,
             steps,

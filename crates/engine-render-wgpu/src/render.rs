@@ -26,6 +26,28 @@ pub(crate) struct PreparedEnvironment {
 }
 
 impl WgpuRenderDevice {
+    fn encode_lighting_composite_passes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &FrameResources,
+        output_view: &wgpu::TextureView,
+        output_viewport: Option<SurfaceViewportRect>,
+        ssao_enabled: bool,
+        ssgi_enabled: bool,
+        bloom_enabled: bool,
+    ) {
+        if ssao_enabled {
+            self.encode_ssao_pass(encoder, resources);
+        }
+        if ssgi_enabled {
+            self.encode_ssgi_pass(encoder, resources);
+        }
+        if bloom_enabled {
+            let _ = self.encode_bloom_pass(encoder, resources);
+        }
+        self.encode_post_pass(encoder, resources, output_view, output_viewport);
+    }
+
     pub(crate) fn screen_space_gi_enabled(&self, world: &RenderWorld) -> bool {
         self.ssgi_compute_pipeline.is_some()
             && world.resolved_environment().ssgi_enabled
@@ -336,8 +358,15 @@ impl WgpuRenderDevice {
         let mut composite_encoded = false;
         for step in &plan.steps {
             match step {
+                FramePipelineStep::LightCulling => {}
                 FramePipelineStep::Shadow => {
                     self.encode_csm_shadow_passes(encoder, csm, batches);
+                    self.encode_local_shadow_passes(encoder, world, batches);
+                }
+                FramePipelineStep::DirectionalShadow => {
+                    self.encode_csm_shadow_passes(encoder, csm, batches);
+                }
+                FramePipelineStep::LocalShadow => {
                     self.encode_local_shadow_passes(encoder, world, batches);
                 }
                 FramePipelineStep::GBuffer => {
@@ -345,16 +374,15 @@ impl WgpuRenderDevice {
                     self.encode_hdr_forward_passes(encoder, batches);
                 }
                 FramePipelineStep::DeferredLighting if !composite_encoded => {
-                    if ssao_enabled {
-                        self.encode_ssao_pass(encoder, resources);
-                    }
-                    if ssgi_enabled {
-                        self.encode_ssgi_pass(encoder, resources);
-                    }
-                    if bloom_enabled {
-                        let _ = self.encode_bloom_pass(encoder, resources);
-                    }
-                    self.encode_post_pass(encoder, resources, output_view, output_viewport);
+                    self.encode_lighting_composite_passes(
+                        encoder,
+                        resources,
+                        output_view,
+                        output_viewport,
+                        ssao_enabled,
+                        ssgi_enabled,
+                        bloom_enabled,
+                    );
                     composite_encoded = true;
                 }
                 FramePipelineStep::DeferredLighting => {}
@@ -366,6 +394,17 @@ impl WgpuRenderDevice {
                     self.encode_hdr_forward_passes(encoder, batches);
                 }
                 FramePipelineStep::TemporalInputs | FramePipelineStep::Ui => {}
+                FramePipelineStep::AmbientOcclusion => {
+                    if ssao_enabled {
+                        self.encode_ssao_pass(encoder, resources);
+                    }
+                }
+                FramePipelineStep::ScreenSpaceGI => {
+                    if ssgi_enabled {
+                        self.encode_ssgi_pass(encoder, resources);
+                    }
+                }
+                FramePipelineStep::Reflection => {}
                 FramePipelineStep::Outline => {
                     tracing::debug!(
                         target: "engine",
@@ -373,32 +412,30 @@ impl WgpuRenderDevice {
                     );
                 }
                 FramePipelineStep::Upscale | FramePipelineStep::Post if !composite_encoded => {
-                    if ssao_enabled {
-                        self.encode_ssao_pass(encoder, resources);
-                    }
-                    if ssgi_enabled {
-                        self.encode_ssgi_pass(encoder, resources);
-                    }
-                    if bloom_enabled {
-                        let _ = self.encode_bloom_pass(encoder, resources);
-                    }
-                    self.encode_post_pass(encoder, resources, output_view, output_viewport);
+                    self.encode_lighting_composite_passes(
+                        encoder,
+                        resources,
+                        output_view,
+                        output_viewport,
+                        ssao_enabled,
+                        ssgi_enabled,
+                        bloom_enabled,
+                    );
                     composite_encoded = true;
                 }
                 FramePipelineStep::Upscale | FramePipelineStep::Post => {}
             }
         }
         if plan.forward && !composite_encoded {
-            if ssao_enabled {
-                self.encode_ssao_pass(encoder, resources);
-            }
-            if ssgi_enabled {
-                self.encode_ssgi_pass(encoder, resources);
-            }
-            if bloom_enabled {
-                let _ = self.encode_bloom_pass(encoder, resources);
-            }
-            self.encode_post_pass(encoder, resources, output_view, output_viewport);
+            self.encode_lighting_composite_passes(
+                encoder,
+                resources,
+                output_view,
+                output_viewport,
+                ssao_enabled,
+                ssgi_enabled,
+                bloom_enabled,
+            );
         }
     }
 
@@ -459,16 +496,21 @@ impl WgpuRenderDevice {
             0
         };
 
+        let shadow_passes = if plan.shadow {
+            1
+        } else {
+            u32::from(plan.directional_shadow) + u32::from(plan.local_shadow)
+        };
         let geometry_passes = u32::from(plan.forward) + u32::from(plan.gbuffer);
         self.latest_draw_calls = geometry_passes * (forward_draws + 2)
-            + u32::from(plan.shadow) * shadow_draws
+            + shadow_passes * shadow_draws
             + u32::from(plan.deferred_lighting)
             + u32::from(ssao_enabled)
             + u32::from(ssgi_enabled)
             + bloom_draws
             + u32::from(plan.post || plan.upscale);
         self.latest_triangles = u64::from(geometry_passes) * (forward_triangles + 1)
-            + u64::from(plan.shadow) * shadow_triangles
+            + u64::from(shadow_passes) * shadow_triangles
             + u64::from(plan.post || plan.upscale);
         if geometry_passes > 0 && self.gpu_particles.instance_count() > 0 {
             self.latest_draw_calls = self.latest_draw_calls.saturating_add(1);
@@ -918,7 +960,13 @@ impl WgpuRenderDevice {
         } else {
             ssgi_intensity
         };
-        let ssr_enabled = !diagnostics::disable_ssr() && environment.ssr_enabled;
+        let reflection_enabled = self
+            .active_frame_plan
+            .as_ref()
+            .map(|plan| plan.reflection)
+            .unwrap_or(true);
+        let ssr_enabled =
+            reflection_enabled && !diagnostics::disable_ssr() && environment.ssr_enabled;
         let ssr_intensity = environment.ssr_intensity.max(0.0);
         let taa_enabled = self.anti_aliasing == engine_render::AntiAliasingMode::Taa
             && self

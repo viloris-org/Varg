@@ -13,7 +13,7 @@ use crate::{
 use engine_core::{EngineError, EngineResult};
 use engine_render::{
     BufferDesc, BufferHandle, GuiDrawCmd, GuiDrawList, GuiTextureId, ImageDesc, ImageHandle,
-    RenderApi, RenderDevice, RenderFrame, RenderGraph, RenderMaterialTextures,
+    RenderApi, RenderDevice, RenderFrame, RenderGraph, RenderMaterialTextures, RenderPassKind,
     RenderPerformanceMetrics, RenderTarget, RenderTargetDesc, RenderWorld,
 };
 use wgpu::util::DeviceExt;
@@ -113,13 +113,16 @@ impl RenderDevice for WgpuRenderDevice {
             };
             self.queue
                 .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-            self.upload_clustered_lighting(world, &uniform, rw, rh);
+            if plan.light_culling {
+                self.upload_clustered_lighting(world, &uniform, rw, rh);
+            }
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let enable_ssao = self.ssao_compute_pipeline.is_some()
+                && plan.ambient_occlusion
                 && !diagnostics::disable_ssao()
                 && Self::environment_ssao_enabled(world);
-            let enable_ssgi = self.screen_space_gi_enabled(world);
+            let enable_ssgi = plan.screen_space_gi && self.screen_space_gi_enabled(world);
             let ssgi_intensity = Self::screen_space_gi_intensity(world);
             let enable_bloom = self.bloom_compute_down.is_some()
                 && self.bloom_compute_up.is_some()
@@ -230,7 +233,7 @@ impl RenderDevice for WgpuRenderDevice {
         };
 
         let enable_ssao = false;
-        let enable_ssgi = self.screen_space_gi_enabled(world);
+        let enable_ssgi = plan.screen_space_gi && self.screen_space_gi_enabled(world);
         let enable_bloom = self.bloom_compute_down.is_some()
             && self.bloom_compute_up.is_some()
             && Self::environment_bloom_enabled(world);
@@ -252,7 +255,9 @@ impl RenderDevice for WgpuRenderDevice {
         };
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        self.upload_clustered_lighting(world, &uniform, tw, th);
+        if plan.light_culling {
+            self.upload_clustered_lighting(world, &uniform, tw, th);
+        }
         let frame_res = self.encode_frame_passes(
             world,
             &batches,
@@ -434,23 +439,27 @@ impl RenderDevice for WgpuRenderDevice {
     fn execute_graph(&mut self, graph: &RenderGraph, _frame: RenderFrame) -> EngineResult<()> {
         for pass in &graph.passes {
             let supported = matches!(
-                pass.name.as_str(),
-                "shadow"
-                    | "gbuffer"
-                    | "deferred-lighting"
-                    | "deferred_lighting"
-                    | "forward"
-                    | "temporal-inputs"
-                    | "upscale"
-                    | "post"
-                    | "ui"
-                    | "gui"
-                    | "outline"
+                pass.kind,
+                RenderPassKind::LightCulling
+                    | RenderPassKind::Shadow
+                    | RenderPassKind::DirectionalShadow
+                    | RenderPassKind::LocalShadow
+                    | RenderPassKind::GBuffer
+                    | RenderPassKind::DeferredLighting
+                    | RenderPassKind::Forward
+                    | RenderPassKind::TemporalInputs
+                    | RenderPassKind::Upscale
+                    | RenderPassKind::AmbientOcclusion
+                    | RenderPassKind::ScreenSpaceGI
+                    | RenderPassKind::Reflection
+                    | RenderPassKind::PostProcess
+                    | RenderPassKind::UiComposition
+                    | RenderPassKind::Outline
             );
             if !supported {
                 return Err(EngineError::other(format!(
-                    "wgpu Frame Pipeline contains unsupported pass: {}",
-                    pass.name
+                    "wgpu Frame Pipeline contains unsupported pass: {} ({:?})",
+                    pass.name, pass.kind
                 )));
             }
         }

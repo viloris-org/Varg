@@ -65,6 +65,26 @@ fn physics_world_filters_drained_contact_events() {
 }
 
 #[test]
+fn physics_world_ticks_destruction_fragment_lifetimes() {
+    let backend = SimplePhysicsBackend::new();
+    let mut world = PhysicsWorld::new(backend);
+    world
+        .destruction
+        .register_fragment_body(BodyHandle(99), 0.25);
+
+    world.fixed_update(0.1);
+    assert!(world.destruction.drain_events().is_empty());
+
+    world.fixed_update(0.15);
+    assert_eq!(
+        world.destruction.drain_events(),
+        vec![DestructionEvent::Removal {
+            body: BodyHandle(99)
+        }]
+    );
+}
+
+#[test]
 fn invalid_heightfield_is_rejected_without_panicking() {
     let mut backend = SimplePhysicsBackend::default();
     let body = backend.create_body(&RigidbodyDesc::default()).unwrap();
@@ -361,6 +381,83 @@ fn simple_backend_resolves_dynamic_body_out_of_static_contact() {
 
     let transform = backend.body_transform(dynamic).unwrap();
     assert!(transform.translation.y >= 1.0);
+}
+
+#[test]
+fn fluid_volume_surface_supports_ocean_waves() {
+    let fluid = FluidVolumeDesc {
+        surface_model: FluidSurfaceModel::Ocean,
+        size: Vec3::new(20.0, 4.0, 20.0),
+        wave_amplitude: 0.5,
+        wave_length: 8.0,
+        wave_speed: 0.0,
+        wave_direction: Vec3::new(1.0, 0.0, 0.0),
+        ..FluidVolumeDesc::default()
+    };
+
+    let crest = fluid.surface_height_at(Vec3::new(2.0, 0.0, 0.0), 0.0);
+    let trough = fluid.surface_height_at(Vec3::new(6.0, 0.0, 0.0), 0.0);
+
+    assert!(crest > trough);
+}
+
+#[test]
+fn volume_buoyancy_uses_displaced_volume_and_drag() {
+    let fluid = FluidVolumeSample::new(
+        FluidVolumeDesc {
+            size: Vec3::new(10.0, 4.0, 10.0),
+            linear_drag: 4.0,
+            flow_velocity: Vec3::new(1.0, 0.0, 0.0),
+            ..FluidVolumeDesc::default()
+        },
+        Transform::IDENTITY,
+    );
+    let force = solve_volume_buoyancy(
+        &fluid,
+        BuoyancyBodySample {
+            min: Vec3::new(-0.5, -0.5, -0.5),
+            max: Vec3::new(0.5, 0.5, 0.5),
+            velocity: Vec3::ZERO,
+            collider_volume: 1.0,
+            mass: 2.0,
+        },
+        9.81,
+        0.0,
+    );
+
+    assert!(force.force.y > 0.0);
+    assert!(force.force.x > 0.0);
+    assert_eq!(force.torque, Vec3::ZERO);
+}
+
+#[test]
+fn probe_buoyancy_generates_off_center_torque() {
+    let fluid = FluidVolumeSample::new(
+        FluidVolumeDesc {
+            size: Vec3::new(10.0, 4.0, 10.0),
+            linear_drag: 0.0,
+            ..FluidVolumeDesc::default()
+        },
+        Transform::IDENTITY,
+    );
+    let force = solve_probe_buoyancy(
+        &fluid,
+        &BuoyancyProbeSet {
+            probes: vec![Vec3::new(1.0, -0.5, 0.0)],
+            buoyancy: 1.0,
+            damping: 0.0,
+            angular_response: 1.0,
+        },
+        Transform::IDENTITY,
+        Transform::IDENTITY,
+        1.0,
+        9.81,
+        1.0 / 60.0,
+        0.0,
+    );
+
+    assert!(force.force.y > 0.0);
+    assert!(force.torque.z > 0.0);
 }
 
 #[cfg(feature = "rapier")]

@@ -10,7 +10,9 @@
 mod backend;
 mod character;
 mod collision;
+mod destruction;
 mod filters;
+mod fluid;
 pub mod fracture;
 pub mod joints;
 mod layers;
@@ -28,7 +30,18 @@ pub use crate::character::{CharacterControllerDesc, CharacterControllerOutput, C
 pub use crate::collision::{
     CollisionChannel, CollisionProfile, CollisionProfileRegistry, CollisionResponse,
 };
+pub use crate::destruction::{
+    DestructibleDesc, DestructibleHandle, DestructionDamage, DestructionEvent, DestructionFragment,
+    DestructionWorld,
+};
 pub use crate::filters::{ContactFilter, ContactFilterChain};
+pub use crate::fluid::{
+    BuoyancyBodySample, BuoyancyProbeSet, FluidForce, FluidSurfaceModel, FluidVolumeDesc,
+    FluidVolumeSample, collider_displacement_volume, solve_probe_buoyancy, solve_volume_buoyancy,
+};
+pub use crate::fracture::{
+    FractureConfig, FractureFragment, FracturePattern, FractureSystem, FragmentTracker,
+};
 pub use crate::joints::{JointDesc, JointHandle, JointLimits, JointMotor, JointState, JointType};
 pub use crate::layers::{
     LAYER_DEFAULT, LAYER_ENEMY, LAYER_PLAYER, LAYER_PROJECTILE, LAYER_TRIGGER, LayerMatrix,

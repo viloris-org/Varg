@@ -16,7 +16,8 @@ use crate::{
     uniforms::*,
 };
 use engine_render::{
-    RenderGlobalIllumination, RenderLight, RenderLightKind, RenderObject, RenderWorld,
+    RenderGlobalIllumination, RenderLight, RenderLightKind, RenderObject, RenderPassKind,
+    RenderWorld,
 };
 
 #[test]
@@ -61,6 +62,62 @@ fn frame_pipeline_plan_preserves_compiled_pass_order() {
             FramePipelineStep::Post,
         ]
     );
+}
+
+#[test]
+fn frame_pipeline_plan_uses_typed_pass_kind() {
+    let mut builder = engine_render::RenderGraphBuilder::new();
+    builder.add_typed_pass("main-scene-raster", RenderPassKind::Forward);
+    builder.add_typed_pass("tonemap-and-bloom", RenderPassKind::PostProcess);
+    let plan = FramePipelinePlan::from_graph(&builder.build());
+    assert_eq!(
+        plan.steps,
+        vec![FramePipelineStep::Forward, FramePipelineStep::Post]
+    );
+    assert!(plan.forward);
+    assert!(plan.post);
+}
+
+#[test]
+fn frame_pipeline_plan_exposes_lighting_stages() {
+    let mut builder = engine_render::RenderGraphBuilder::new();
+    let light_culling = builder.add_pass("light-culling");
+    let directional_shadow = builder.add_pass("directional-shadow");
+    let local_shadow = builder.add_pass("local-shadow");
+    let forward = builder.add_pass("forward");
+    let ssao = builder.add_pass("ssao");
+    let ssgi = builder.add_pass("ssgi");
+    let ssr = builder.add_pass("ssr");
+    let post = builder.add_pass("post");
+    builder.order_before(light_culling, directional_shadow);
+    builder.order_before(directional_shadow, local_shadow);
+    builder.order_before(local_shadow, forward);
+    builder.order_before(forward, ssao);
+    builder.order_before(ssao, ssgi);
+    builder.order_before(ssgi, ssr);
+    builder.order_before(ssr, post);
+
+    let plan = FramePipelinePlan::from_graph(&builder.build());
+    assert_eq!(
+        plan.steps,
+        vec![
+            FramePipelineStep::LightCulling,
+            FramePipelineStep::DirectionalShadow,
+            FramePipelineStep::LocalShadow,
+            FramePipelineStep::Forward,
+            FramePipelineStep::AmbientOcclusion,
+            FramePipelineStep::ScreenSpaceGI,
+            FramePipelineStep::Reflection,
+            FramePipelineStep::Post,
+        ]
+    );
+    assert!(plan.light_culling);
+    assert!(!plan.shadow);
+    assert!(plan.directional_shadow);
+    assert!(plan.local_shadow);
+    assert!(plan.ambient_occlusion);
+    assert!(plan.screen_space_gi);
+    assert!(plan.reflection);
 }
 
 #[test]

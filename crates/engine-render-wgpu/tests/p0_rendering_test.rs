@@ -76,6 +76,41 @@ fn compiled_frame_pipeline_controls_wgpu_passes_and_visibility_metrics() {
 }
 
 #[test]
+fn compiled_lighting_frame_pipeline_accepts_explicit_lighting_stages() {
+    let Some(mut device) = renderer() else {
+        eprintln!("skipping explicit lighting graph test: no compatible adapter");
+        return;
+    };
+    let world = RenderWorld {
+        camera: Some(camera()),
+        objects: vec![object(2, Vec3::new(0.0, 0.0, -4.0))],
+        ..RenderWorld::default()
+    };
+    let mut builder = RenderGraphBuilder::new();
+    let light_culling = builder.add_pass("light-culling");
+    let directional_shadow = builder.add_pass("directional-shadow");
+    let local_shadow = builder.add_pass("local-shadow");
+    let forward = builder.add_pass("forward");
+    let ssgi = builder.add_pass("ssgi");
+    let ssr = builder.add_pass("ssr");
+    let post = builder.add_pass("post");
+    builder.order_before(light_culling, directional_shadow);
+    builder.order_before(directional_shadow, local_shadow);
+    builder.order_before(local_shadow, forward);
+    builder.order_before(forward, ssgi);
+    builder.order_before(ssgi, ssr);
+    builder.order_before(ssr, post);
+
+    let graph = builder.build();
+    device
+        .submit_render_world_with_graph(&world, &graph, RenderFrame { frame_index: 0 })
+        .unwrap();
+    let metrics = device.performance_metrics();
+    assert_eq!(metrics.pipeline_passes, 7);
+    assert_eq!(metrics.visible_objects, 1);
+}
+
+#[test]
 fn hybrid_deferred_graph_reports_pipeline_metrics() {
     let Some(mut device) = renderer() else {
         eprintln!("skipping P3 hybrid deferred graph test: no compatible adapter");

@@ -15,7 +15,10 @@ pub mod scaling;
 pub mod target;
 pub mod visibility;
 
-pub use graph::{PassId, RenderGraph, RenderGraphBuilder, RenderPass, RenderStage};
+pub use graph::{
+    PassId, RenderGraph, RenderGraphBuilder, RenderPass, RenderPassDesc, RenderPassFlags,
+    RenderPassKind, RenderStage,
+};
 pub use performance::{
     DynamicResolutionConfig, DynamicResolutionController, PresentStrategy, RenderPerformanceConfig,
     RenderPerformanceMetrics,

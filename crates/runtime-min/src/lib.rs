@@ -37,9 +37,11 @@ use engine_ecs::{
 use engine_ecs::{BuoyancyProbeSetComponentData, FluidVolumeComponentData};
 #[cfg(feature = "physics")]
 use engine_physics::{
-    BodyHandle, BodyKind, CharacterControllerDesc, ColliderDesc, ColliderShape, ColliderShapeRef,
-    PhysicsBackend, PhysicsWorld, QueryFilter, RapierPhysicsBackend, RigidbodyDesc,
-    built_in_physical_material,
+    BodyHandle, BodyKind, BuoyancyBodySample, BuoyancyProbeSet, CharacterControllerDesc,
+    ColliderDesc, ColliderShape, ColliderShapeRef, FluidForce, FluidSurfaceModel, FluidVolumeDesc,
+    FluidVolumeSample, PhysicsBackend, PhysicsWorld, QueryFilter, RapierPhysicsBackend,
+    RigidbodyDesc, built_in_physical_material, collider_displacement_volume, solve_probe_buoyancy,
+    solve_volume_buoyancy,
 };
 #[cfg(feature = "runtime-game")]
 use engine_platform::GamepadProvider;
@@ -504,16 +506,6 @@ struct PhysicsBinding {
     body: BodyHandle,
     last_position: engine_core::math::Vec3,
     last_rotation: engine_core::math::Quat,
-}
-
-#[cfg(feature = "physics")]
-#[derive(Clone, Debug)]
-struct FluidSample {
-    fluid: FluidVolumeComponentData,
-    transform: Transform,
-    inverse_transform: Transform,
-    min: Vec3,
-    max: Vec3,
 }
 
 #[cfg(feature = "audio")]
@@ -1971,16 +1963,10 @@ impl<R: RenderDevice> RuntimeServices<R> {
             for component in &object.components {
                 match component {
                     ComponentData::FluidVolume(fluid) => {
-                        let half_extents = (fluid.size * transform.scale) * 0.5;
-                        let min = transform.translation - half_extents;
-                        let max = transform.translation + half_extents;
-                        fluid_volumes.push(FluidSample {
-                            fluid: fluid.clone(),
+                        fluid_volumes.push(FluidVolumeSample::new(
+                            fluid_volume_desc_from_scene(fluid),
                             transform,
-                            inverse_transform: transform.inverse(),
-                            min,
-                            max,
-                        });
+                        ));
                     }
                     ComponentData::WindZone(wind) => {
                         let half_extents = (wind.size * transform.scale) * 0.5;
@@ -2040,43 +2026,48 @@ impl<R: RenderDevice> RuntimeServices<R> {
             let body_max = transform.translation + body_half;
             let velocity = (transform.translation - binding.last_position) / dt;
             let collider_volume = collider
-                .map(|collider| fluid_collider_volume(collider, transform.scale))
+                .map(|collider| {
+                    collider_displacement_volume(&collider_shape_from_scene(
+                        collider,
+                        transform.scale,
+                    ))
+                })
                 .unwrap_or(1.0)
                 .max(0.001);
 
             for fluid in &fluid_volumes {
-                if let Some(probe_set) = probe_set {
+                let fluid_force = if let Some(probe_set) = probe_set {
                     let previous_transform = engine_core::math::Transform {
                         translation: binding.last_position,
                         rotation: binding.last_rotation,
                         scale: transform.scale,
                     };
-                    apply_probe_buoyancy(
-                        self.physics.backend_mut(),
-                        binding.body,
+                    solve_probe_buoyancy(
                         fluid,
-                        probe_set,
+                        &buoyancy_probe_set_from_scene(probe_set),
                         transform,
                         previous_transform,
                         rigidbody.mass.max(0.001),
                         gravity,
                         dt,
                         time_seconds,
-                    )?;
+                    )
                 } else {
-                    apply_volume_buoyancy(
-                        self.physics.backend_mut(),
-                        binding.body,
+                    solve_volume_buoyancy(
                         fluid,
-                        body_min,
-                        body_max,
-                        velocity,
-                        collider_volume,
-                        rigidbody.mass.max(0.001),
+                        BuoyancyBodySample {
+                            min: body_min,
+                            max: body_max,
+                            velocity,
+                            collider_volume,
+                            mass: rigidbody.mass.max(0.001),
+                        },
                         gravity,
                         time_seconds,
-                    )?;
-                }
+                    )
+                };
+
+                apply_fluid_force(self.physics.backend_mut(), binding.body, fluid_force)?;
             }
 
             for (wind, zone_min, zone_max) in &wind_zones {
@@ -2163,7 +2154,6 @@ impl<R: RenderDevice> RuntimeServices<R> {
         self.audio_clips.insert(asset, clip);
         Ok(clip)
     }
-
     #[cfg(feature = "audio")]
     fn ensure_audio_bindings(&mut self) -> EngineResult<()> {
         for (entity, object) in self.scene.iter_objects() {
@@ -2639,19 +2629,9 @@ fn collider_desc_from_scene(
     collider: &engine_ecs::ColliderComponentData,
     layer: u32,
 ) -> ColliderDesc {
-    let half = collider.size * 0.5;
     let material = built_in_physical_material(&collider.physics_material);
     ColliderDesc {
-        shape: match collider.shape.as_str() {
-            "sphere" => ColliderShape::Sphere {
-                radius: half.x.max(half.y).max(half.z),
-            },
-            "capsule" => ColliderShape::Capsule {
-                half_height: half.y,
-                radius: half.x.max(half.z),
-            },
-            _ => ColliderShape::Box { half_extents: half },
-        },
+        shape: collider_shape_from_scene(collider, Vec3::ONE),
         is_trigger: collider.is_trigger,
         layer,
         mask: collider.mask,
@@ -2664,170 +2644,76 @@ fn collider_desc_from_scene(
 }
 
 #[cfg(feature = "physics")]
-fn apply_volume_buoyancy(
-    backend: &mut dyn PhysicsBackend,
-    body: BodyHandle,
-    fluid: &FluidSample,
-    body_min: Vec3,
-    body_max: Vec3,
-    velocity: Vec3,
-    collider_volume: f32,
-    mass: f32,
-    gravity: f32,
-    time_seconds: f32,
-) -> EngineResult<()> {
-    let sample_position = Vec3::new(
-        (body_min.x + body_max.x) * 0.5,
-        (body_min.y + body_max.y) * 0.5,
-        (body_min.z + body_max.z) * 0.5,
-    );
-    let surface_y = fluid_surface_world_y(fluid, sample_position, time_seconds);
-    let overlap_min = Vec3::new(
-        body_min.x.max(fluid.min.x),
-        body_min.y.max(fluid.min.y),
-        body_min.z.max(fluid.min.z),
-    );
-    let overlap_max = Vec3::new(
-        body_max.x.min(fluid.max.x),
-        body_max.y.min(surface_y.min(fluid.max.y)),
-        body_max.z.min(fluid.max.z),
-    );
-    let overlap = overlap_max - overlap_min;
-    if overlap.x <= 0.0 || overlap.y <= 0.0 || overlap.z <= 0.0 {
-        return Ok(());
-    }
-
-    let body_aabb_volume =
-        ((body_max.x - body_min.x) * (body_max.y - body_min.y) * (body_max.z - body_min.z))
-            .max(f32::EPSILON);
-    let overlap_volume = overlap.x * overlap.y * overlap.z;
-    let submerged_fraction = (overlap_volume / body_aabb_volume).clamp(0.0, 1.0);
-    if submerged_fraction <= f32::EPSILON {
-        return Ok(());
-    }
-
-    let displaced_volume = collider_volume * submerged_fraction;
-    let buoyancy = Vec3::new(
-        0.0,
-        fluid.fluid.density.max(0.0) * displaced_volume * gravity * fluid.fluid.buoyancy_scale
-            / mass,
-        0.0,
-    );
-    let relative_velocity = velocity - fluid.fluid.flow_velocity;
-    let drag = relative_velocity * (-fluid.fluid.linear_drag.max(0.0) * mass) * submerged_fraction;
-    let force = buoyancy + drag;
-    if force.length_squared() > f32::EPSILON {
-        backend.apply_force(body, force)?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "physics")]
-fn apply_probe_buoyancy(
-    backend: &mut dyn PhysicsBackend,
-    body: BodyHandle,
-    fluid: &FluidSample,
-    probe_set: &BuoyancyProbeSetComponentData,
-    transform: Transform,
-    previous_transform: Transform,
-    mass: f32,
-    gravity: f32,
-    dt: f32,
-    time_seconds: f32,
-) -> EngineResult<()> {
-    let live_probes: Vec<_> = probe_set
-        .probes
-        .iter()
-        .copied()
-        .filter(|probe| probe.x.is_finite() && probe.y.is_finite() && probe.z.is_finite())
-        .collect();
-    if live_probes.is_empty() {
-        return Ok(());
-    }
-
-    let probe_count = live_probes.len() as f32;
-    for local_probe in live_probes {
-        let world_probe = transform.transform_point(local_probe);
-        let local_to_fluid = fluid.inverse_transform.transform_point(world_probe);
-        if local_to_fluid.x < -fluid.fluid.size.x * 0.5
-            || local_to_fluid.x > fluid.fluid.size.x * 0.5
-            || local_to_fluid.z < -fluid.fluid.size.z * 0.5
-            || local_to_fluid.z > fluid.fluid.size.z * 0.5
-            || local_to_fluid.y < -fluid.fluid.size.y * 0.5
-        {
-            continue;
-        }
-
-        let depth = fluid.fluid.depth_at(local_to_fluid, time_seconds);
-        if depth <= f32::EPSILON {
-            continue;
-        }
-
-        let depth_fraction = (depth / fluid.fluid.size.y.max(f32::EPSILON)).clamp(0.0, 1.0);
-        let previous_world_probe = previous_transform.transform_point(local_probe);
-        let probe_velocity = (world_probe - previous_world_probe) / dt;
-        let relative_velocity = probe_velocity - fluid.fluid.flow_velocity;
-        let buoyancy = Vec3::new(
-            0.0,
-            fluid.fluid.density.max(0.0)
-                * gravity
-                * fluid.fluid.buoyancy_scale
-                * probe_set.buoyancy.max(0.0)
-                * depth_fraction
-                / (mass * probe_count),
-            0.0,
-        );
-        let drag = relative_velocity
-            * (-probe_set.damping.max(0.0) * fluid.fluid.linear_drag.max(0.0) * depth_fraction);
-        let force = buoyancy + drag;
-        if force.length_squared() <= f32::EPSILON {
-            continue;
-        }
-
-        backend.apply_force(body, force)?;
-        let lever_arm = world_probe - transform.translation;
-        let torque = lever_arm.cross(force) * probe_set.angular_response.max(0.0);
-        if torque.length_squared() > f32::EPSILON {
-            backend.apply_torque(body, torque)?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "physics")]
-fn fluid_surface_world_y(fluid: &FluidSample, world_position: Vec3, time_seconds: f32) -> f32 {
-    let local = fluid.inverse_transform.transform_point(world_position);
-    let local_surface = Vec3::new(
-        local.x,
-        fluid.fluid.surface_height_at(local, time_seconds),
-        local.z,
-    );
-    fluid
-        .transform
-        .transform_point(local_surface)
-        .y
-        .clamp(fluid.min.y, fluid.max.y)
-}
-
-#[cfg(feature = "physics")]
-fn fluid_collider_volume(collider: &engine_ecs::ColliderComponentData, scale: Vec3) -> f32 {
-    let size = collider.size * scale;
+fn collider_shape_from_scene(
+    collider: &engine_ecs::ColliderComponentData,
+    scale: Vec3,
+) -> ColliderShape {
+    let half = (collider.size * scale) * 0.5;
     match collider.shape.as_str() {
-        "sphere" => {
-            let radius = (size.x.abs().max(size.y.abs()).max(size.z.abs()) * 0.5).max(0.0);
-            (4.0 / 3.0) * std::f32::consts::PI * radius.powi(3)
-        }
-        "capsule" => {
-            let radius = (size.x.abs().max(size.z.abs()) * 0.5).max(0.0);
-            let half_height = (size.y.abs() * 0.5).max(0.0);
-            let cylinder_height = (half_height * 2.0).max(0.0);
-            let cylinder = std::f32::consts::PI * radius.powi(2) * cylinder_height;
-            let caps = (4.0 / 3.0) * std::f32::consts::PI * radius.powi(3);
-            cylinder + caps
-        }
-        _ => (size.x.abs() * size.y.abs() * size.z.abs()).max(0.0),
+        "sphere" => ColliderShape::Sphere {
+            radius: half.x.abs().max(half.y.abs()).max(half.z.abs()),
+        },
+        "capsule" => ColliderShape::Capsule {
+            half_height: half.y.abs(),
+            radius: half.x.abs().max(half.z.abs()),
+        },
+        _ => ColliderShape::Box {
+            half_extents: Vec3::new(half.x.abs(), half.y.abs(), half.z.abs()),
+        },
     }
+}
+
+#[cfg(feature = "physics")]
+fn fluid_volume_desc_from_scene(fluid: &FluidVolumeComponentData) -> FluidVolumeDesc {
+    FluidVolumeDesc {
+        size: fluid.size,
+        density: fluid.density,
+        buoyancy_scale: fluid.buoyancy_scale,
+        linear_drag: fluid.linear_drag,
+        flow_velocity: fluid.flow_velocity,
+        surface_offset: fluid.surface_offset,
+        surface_model: match fluid.surface_profile.as_str() {
+            "river" => FluidSurfaceModel::River,
+            "ocean" => FluidSurfaceModel::Ocean,
+            "tidal" => FluidSurfaceModel::Tidal,
+            _ => FluidSurfaceModel::Still,
+        },
+        wave_direction: fluid.wave_direction,
+        wave_amplitude: fluid.wave_amplitude,
+        wave_length: fluid.wave_length,
+        wave_speed: fluid.wave_speed,
+        chop_amplitude: fluid.chop_amplitude,
+        chop_length: fluid.chop_length,
+        river_slope: fluid.river_slope,
+        tide_amplitude: fluid.tide_amplitude,
+        tide_period_seconds: fluid.tide_period_seconds,
+        tide_phase_seconds: fluid.tide_phase_seconds,
+    }
+}
+
+#[cfg(feature = "physics")]
+fn buoyancy_probe_set_from_scene(probe_set: &BuoyancyProbeSetComponentData) -> BuoyancyProbeSet {
+    BuoyancyProbeSet {
+        probes: probe_set.probes.clone(),
+        buoyancy: probe_set.buoyancy,
+        damping: probe_set.damping,
+        angular_response: probe_set.angular_response,
+    }
+}
+
+#[cfg(feature = "physics")]
+fn apply_fluid_force(
+    backend: &mut dyn PhysicsBackend,
+    body: BodyHandle,
+    force: FluidForce,
+) -> EngineResult<()> {
+    if force.force.length_squared() > f32::EPSILON {
+        backend.apply_force(body, force.force)?;
+    }
+    if force.torque.length_squared() > f32::EPSILON {
+        backend.apply_torque(body, force.torque)?;
+    }
+    Ok(())
 }
 
 /// Loaded project context used by runtime-game.
@@ -4208,35 +4094,35 @@ mod tests {
 
     #[cfg(feature = "physics")]
     #[test]
-    fn fluid_collider_volume_matches_basic_shapes() {
-        let box_volume = fluid_collider_volume(
-            &engine_ecs::ColliderComponentData {
+    fn fluid_collider_displacement_volume_matches_basic_shapes() {
+        let box_volume = collider_displacement_volume(&collider_shape_from_scene(
+            &ColliderComponentData {
                 shape: "box".to_string(),
                 size: Vec3::new(2.0, 3.0, 4.0),
-                ..engine_ecs::ColliderComponentData::default()
+                ..ColliderComponentData::default()
             },
             Vec3::ONE,
-        );
+        ));
         assert!((box_volume - 24.0).abs() < 1e-5);
 
-        let sphere_volume = fluid_collider_volume(
-            &engine_ecs::ColliderComponentData {
+        let sphere_volume = collider_displacement_volume(&collider_shape_from_scene(
+            &ColliderComponentData {
                 shape: "sphere".to_string(),
                 size: Vec3::new(2.0, 2.0, 2.0),
-                ..engine_ecs::ColliderComponentData::default()
+                ..ColliderComponentData::default()
             },
             Vec3::ONE,
-        );
+        ));
         assert!((sphere_volume - ((4.0 / 3.0) * std::f32::consts::PI)).abs() < 1e-5);
 
-        let capsule_volume = fluid_collider_volume(
-            &engine_ecs::ColliderComponentData {
+        let capsule_volume = collider_displacement_volume(&collider_shape_from_scene(
+            &ColliderComponentData {
                 shape: "capsule".to_string(),
                 size: Vec3::new(2.0, 2.0, 2.0),
-                ..engine_ecs::ColliderComponentData::default()
+                ..ColliderComponentData::default()
             },
             Vec3::ONE,
-        );
+        ));
         let expected_capsule = std::f32::consts::PI * 2.0 + (4.0 / 3.0) * std::f32::consts::PI;
         assert!((capsule_volume - expected_capsule).abs() < 1e-5);
     }

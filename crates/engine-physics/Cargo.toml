@@ -20,3 +20,7 @@ engine-core.workspace = true
 bitflags.workspace = true
 serde.workspace = true
 rapier3d = { workspace = true, optional = true }
+
+[[example]]
+name = "stress_benchmark"
+required-features = ["rapier"]

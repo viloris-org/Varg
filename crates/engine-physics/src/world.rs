@@ -3,9 +3,9 @@ use std::fmt;
 use engine_core::EngineResult;
 
 use crate::{
-    ContactEvent, ContactFilterChain, JointDesc, JointHandle, JointLimits, JointMotor, LayerMatrix,
-    NullPhysicsBackend, PhysicsBackend, PhysicsStats, VehicleDesc, VehicleHandle, VehicleInput,
-    VehicleState,
+    ContactEvent, ContactFilterChain, DestructionWorld, JointDesc, JointHandle, JointLimits,
+    JointMotor, LayerMatrix, NullPhysicsBackend, PhysicsBackend, PhysicsStats, VehicleDesc,
+    VehicleHandle, VehicleInput, VehicleState,
 };
 
 /// Physics world that owns a backend, layer matrix, and contact filter chain.
@@ -15,6 +15,8 @@ pub struct PhysicsWorld {
     pub layer_matrix: LayerMatrix,
     /// Runtime contact filter chain.
     pub contact_filter_chain: ContactFilterChain,
+    /// Destructible object state and event stream.
+    pub destruction: DestructionWorld,
 }
 
 impl fmt::Debug for PhysicsWorld {
@@ -33,6 +35,7 @@ impl PhysicsWorld {
             backend: Box::new(backend),
             layer_matrix: LayerMatrix::default(),
             contact_filter_chain: ContactFilterChain::default(),
+            destruction: DestructionWorld::new(),
         }
     }
 
@@ -44,6 +47,7 @@ impl PhysicsWorld {
     /// Steps the simulation.
     pub fn fixed_update(&mut self, dt: f32) {
         self.backend.fixed_update(dt);
+        self.destruction.tick(dt);
     }
 
     /// Delegates to the backend.
