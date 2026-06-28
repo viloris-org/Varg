@@ -52,6 +52,8 @@ const COMPONENT_TYPES = [
   'AcousticRoom',
   'AcousticPortal',
   'AudioZone',
+  'Environment',
+  'Skybox',
   'Script',
 ];
 
@@ -102,6 +104,7 @@ function parseInspectorValue(raw: string, current: unknown): unknown {
 
 function componentFieldOptions(componentType: string, fieldName: string): string[] | null {
   if (componentType === 'Light' && fieldName === 'kind') return ['directional', 'point', 'spot'];
+  if (componentType === 'Environment' && fieldName === 'tonemap') return ['aces'];
   if (componentType === 'Rigidbody' && fieldName === 'body_type') return ['dynamic', 'kinematic', 'static'];
   if (componentType === 'Collider' && fieldName === 'shape') return ['box', 'sphere', 'capsule'];
   if (componentType === 'AudioSource' && fieldName === 'spatial_mode') return ['direct', 'spatial'];

@@ -3057,11 +3057,27 @@ fn empty_toml_table() -> toml::Value {
 #[cfg(feature = "importers")]
 #[derive(Clone, Copy, Debug)]
 struct ModelBuildState {
+    primitive: VModelPrimitive,
     size: [f32; 3],
     translation: [f32; 3],
     scale: [f32; 3],
+    rotation: [f32; 3],
     bevel: f32,
+    segments: u32,
     array: Option<ArraySpec>,
+    radial_array: Option<RadialArraySpec>,
+    mirror: Option<MirrorSpec>,
+    material_index: Option<usize>,
+}
+
+#[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+enum VModelPrimitive {
+    Box,
+    Cylinder,
+    Cone,
+    Sphere,
+    Plane,
 }
 
 #[cfg(feature = "importers")]
@@ -3072,14 +3088,44 @@ struct ArraySpec {
 }
 
 #[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+struct RadialArraySpec {
+    count: usize,
+    radius: f32,
+    axis: Axis,
+    start_angle: f32,
+    step_angle: f32,
+}
+
+#[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+struct MirrorSpec {
+    axis: Axis,
+}
+
+#[cfg(feature = "importers")]
+#[derive(Clone, Copy, Debug)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+#[cfg(feature = "importers")]
 impl Default for ModelBuildState {
     fn default() -> Self {
         Self {
+            primitive: VModelPrimitive::Box,
             size: [1.0, 1.0, 1.0],
             translation: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0, 1.0],
+            rotation: [0.0, 0.0, 0.0],
             bevel: 0.0,
+            segments: 24,
             array: None,
+            radial_array: None,
+            mirror: None,
+            material_index: None,
         }
     }
 }
@@ -3108,16 +3154,60 @@ fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
     for operation in &document.operations {
         match operation.operation_type.as_str() {
             "cube" | "box" => {
+                if has_base_mesh {
+                    add_state_meshes(&mut model, &state);
+                }
                 state = ModelBuildState {
+                    primitive: VModelPrimitive::Box,
                     size: vmodel_vec3_param(&operation.params, "size").unwrap_or([1.0, 1.0, 1.0]),
                     translation: vmodel_vec3_param(&operation.params, "position")
                         .or_else(|| vmodel_vec3_param(&operation.params, "translation"))
                         .unwrap_or([0.0, 0.0, 0.0]),
                     scale: vmodel_vec3_param(&operation.params, "scale").unwrap_or([1.0, 1.0, 1.0]),
+                    rotation: vmodel_vec3_param(&operation.params, "rotation")
+                        .unwrap_or([0.0, 0.0, 0.0]),
                     bevel: vmodel_f32_param(&operation.params, "bevel")
                         .unwrap_or(0.0)
                         .max(0.0),
+                    segments: vmodel_u32_param(&operation.params, "segments")
+                        .unwrap_or(24)
+                        .clamp(3, 96),
                     array: None,
+                    radial_array: None,
+                    mirror: None,
+                    material_index: vmodel_usize_param(&operation.params, "material"),
+                };
+                has_base_mesh = true;
+            }
+            "cylinder" | "cone" | "sphere" | "plane" => {
+                if has_base_mesh {
+                    add_state_meshes(&mut model, &state);
+                }
+                state = ModelBuildState {
+                    primitive: match operation.operation_type.as_str() {
+                        "cylinder" => VModelPrimitive::Cylinder,
+                        "cone" => VModelPrimitive::Cone,
+                        "sphere" => VModelPrimitive::Sphere,
+                        _ => VModelPrimitive::Plane,
+                    },
+                    size: vmodel_vec3_param(&operation.params, "size").unwrap_or([1.0, 1.0, 1.0]),
+                    translation: vmodel_vec3_param(&operation.params, "position")
+                        .or_else(|| vmodel_vec3_param(&operation.params, "translation"))
+                        .unwrap_or([0.0, 0.0, 0.0]),
+                    scale: vmodel_vec3_param(&operation.params, "scale").unwrap_or([1.0, 1.0, 1.0]),
+                    rotation: vmodel_vec3_param(&operation.params, "rotation")
+                        .unwrap_or([0.0, 0.0, 0.0]),
+                    bevel: vmodel_f32_param(&operation.params, "bevel")
+                        .unwrap_or(0.0)
+                        .max(0.0),
+                    segments: vmodel_u32_param(&operation.params, "segments")
+                        .or_else(|| vmodel_u32_param(&operation.params, "rings"))
+                        .unwrap_or(24)
+                        .clamp(3, 96),
+                    array: None,
+                    radial_array: None,
+                    mirror: None,
+                    material_index: vmodel_usize_param(&operation.params, "material"),
                 };
                 has_base_mesh = true;
             }
@@ -3139,6 +3229,13 @@ fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
                     .unwrap_or([1.0, 1.0, 1.0]);
                 state.scale = mul_vec3(state.scale, scale);
             }
+            "rotate" => {
+                let rotation = vmodel_vec3_param(&operation.params, "rotation")
+                    .or_else(|| vmodel_vec3_param(&operation.params, "value"))
+                    .or_else(|| vmodel_vec3_param(&operation.params, "euler"))
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                state.rotation = add_vec3(state.rotation, rotation);
+            }
             "array" => {
                 let count = vmodel_usize_param(&operation.params, "count")
                     .unwrap_or(1)
@@ -3150,6 +3247,39 @@ fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
                     axis_offset(&axis, spacing)
                 });
                 state.array = Some(ArraySpec { count, offset });
+            }
+            "radial_array" => {
+                let count = vmodel_usize_param(&operation.params, "count")
+                    .unwrap_or(1)
+                    .clamp(1, 256);
+                let axis = vmodel_string_param(&operation.params, "axis")
+                    .as_deref()
+                    .map(axis_from_str)
+                    .unwrap_or(Axis::Y);
+                let radius = vmodel_f32_param(&operation.params, "radius")
+                    .or_else(|| vmodel_f32_param(&operation.params, "spacing"))
+                    .unwrap_or(1.0)
+                    .abs();
+                let start_angle = vmodel_f32_param(&operation.params, "start_angle").unwrap_or(0.0);
+                let step_angle = vmodel_f32_param(&operation.params, "step_angle")
+                    .unwrap_or_else(|| 360.0 / count as f32);
+                state.radial_array = Some(RadialArraySpec {
+                    count,
+                    radius,
+                    axis,
+                    start_angle,
+                    step_angle,
+                });
+            }
+            "mirror" => {
+                let axis = vmodel_string_param(&operation.params, "axis")
+                    .as_deref()
+                    .map(axis_from_str)
+                    .unwrap_or(Axis::X);
+                state.mirror = Some(MirrorSpec { axis });
+            }
+            "material_slot" => {
+                state.material_index = Some(upsert_vmodel_material(&mut model, &operation.params));
             }
             "inset_panel" => {
                 if !has_base_mesh {
@@ -3183,7 +3313,7 @@ fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
     }
 
     if has_base_mesh {
-        add_box_meshes(&mut model, &state);
+        add_state_meshes(&mut model, &state);
     }
 
     if model.meshes.is_empty() {
@@ -3196,18 +3326,92 @@ fn compile_vmodel(bytes: &[u8]) -> Result<ModelResource, AssetError> {
 }
 
 #[cfg(feature = "importers")]
-fn add_box_meshes(model: &mut ModelResource, state: &ModelBuildState) {
+fn add_state_meshes(model: &mut ModelResource, state: &ModelBuildState) {
     let array = state.array.unwrap_or(ArraySpec {
         count: 1,
         offset: [0.0, 0.0, 0.0],
     });
-    for index in 0..array.count {
-        let translation = add_vec3(state.translation, scale_vec3(array.offset, index as f32));
+    let count = state
+        .radial_array
+        .map_or(array.count, |radial| radial.count);
+
+    for index in 0..count {
+        let (translation, rotation) = if let Some(radial) = state.radial_array {
+            let angle = radial.start_angle + radial.step_angle * index as f32;
+            (
+                add_vec3(
+                    state.translation,
+                    radial_offset(radial.axis, radial.radius, angle),
+                ),
+                add_vec3(state.rotation, radial_rotation(radial.axis, angle)),
+            )
+        } else {
+            (
+                add_vec3(state.translation, scale_vec3(array.offset, index as f32)),
+                state.rotation,
+            )
+        };
         let size = mul_vec3(state.size, state.scale);
-        model
-            .meshes
-            .push(build_box_mesh(size, translation, state.bevel));
+        let mut mesh = build_primitive_mesh(state.primitive, size, state.bevel, state.segments);
+        transform_mesh(&mut mesh, translation, rotation);
+        mesh.material_index = state.material_index;
+
+        if let Some(mirror) = state.mirror {
+            let mut mirrored = mesh.clone();
+            mirror_mesh(&mut mirrored, mirror.axis);
+            model.meshes.push(mirrored);
+        }
+        model.meshes.push(mesh);
     }
+}
+
+#[cfg(feature = "importers")]
+fn build_primitive_mesh(
+    primitive: VModelPrimitive,
+    size: [f32; 3],
+    bevel: f32,
+    segments: u32,
+) -> BasicMeshResource {
+    match primitive {
+        VModelPrimitive::Box => build_box_mesh(size, [0.0, 0.0, 0.0], bevel),
+        VModelPrimitive::Cylinder => build_cylinder_mesh(size, segments, false),
+        VModelPrimitive::Cone => build_cylinder_mesh(size, segments, true),
+        VModelPrimitive::Sphere => build_sphere_mesh(size, segments),
+        VModelPrimitive::Plane => build_plane_mesh(size),
+    }
+}
+
+#[cfg(feature = "importers")]
+fn upsert_vmodel_material(model: &mut ModelResource, params: &toml::Value) -> usize {
+    if let Some(index) =
+        vmodel_usize_param(params, "index").or_else(|| vmodel_usize_param(params, "material"))
+    {
+        while model.materials.len() <= index {
+            model.materials.push(CpuMaterialResource::default());
+        }
+        update_vmodel_material(&mut model.materials[index], params, index);
+        index
+    } else {
+        let index = model.materials.len();
+        let mut material = CpuMaterialResource::default();
+        update_vmodel_material(&mut material, params, index);
+        model.materials.push(material);
+        index
+    }
+}
+
+#[cfg(feature = "importers")]
+fn update_vmodel_material(material: &mut CpuMaterialResource, params: &toml::Value, index: usize) {
+    material.name =
+        vmodel_string_param(params, "name").unwrap_or_else(|| format!("material_{index}"));
+    material.base_color = vmodel_vec4_param(params, "base_color")
+        .or_else(|| {
+            vmodel_vec3_param(params, "base_color").map(|color| [color[0], color[1], color[2], 1.0])
+        })
+        .unwrap_or(material.base_color);
+    material.metallic = vmodel_f32_param(params, "metallic").unwrap_or(material.metallic);
+    material.roughness = vmodel_f32_param(params, "roughness").unwrap_or(material.roughness);
+    material.emissive = vmodel_vec3_param(params, "emissive").unwrap_or(material.emissive);
 }
 
 #[cfg(feature = "importers")]
@@ -3250,11 +3454,10 @@ fn add_inset_panel(
             [0.0, 0.0, size[2] * 0.5 + depth * 0.5],
         ),
     };
-    model.meshes.push(build_box_mesh(
-        panel_size,
-        add_vec3(state.translation, panel_offset),
-        state.bevel.min(depth * 0.45),
-    ));
+    let mut mesh = build_box_mesh(panel_size, panel_offset, state.bevel.min(depth * 0.45));
+    transform_mesh(&mut mesh, state.translation, state.rotation);
+    mesh.material_index = state.material_index;
+    model.meshes.push(mesh);
 }
 
 #[cfg(feature = "importers")]
@@ -3368,6 +3571,116 @@ fn build_axis_box_mesh(size: [f32; 3], translation: [f32; 3]) -> BasicMeshResour
 }
 
 #[cfg(feature = "importers")]
+fn build_plane_mesh(size: [f32; 3]) -> BasicMeshResource {
+    let half = [size[0] * 0.5, size[2] * 0.5];
+    let mut mesh = MeshBuilder::default();
+    mesh.quad(
+        [
+            [-half[0], 0.0, -half[1]],
+            [half[0], 0.0, -half[1]],
+            [half[0], 0.0, half[1]],
+            [-half[0], 0.0, half[1]],
+        ],
+        [0.0, 1.0, 0.0],
+    );
+    mesh.finish()
+}
+
+#[cfg(feature = "importers")]
+fn build_cylinder_mesh(size: [f32; 3], segments: u32, cone: bool) -> BasicMeshResource {
+    let segments = segments.clamp(3, 96);
+    let radius_x = (size[0] * 0.5).abs().max(0.001);
+    let radius_z = (size[2] * 0.5).abs().max(0.001);
+    let half_y = (size[1] * 0.5).abs().max(0.001);
+    let mut mesh = MeshBuilder::default();
+    let top_radius_x = if cone { 0.0 } else { radius_x };
+    let top_radius_z = if cone { 0.0 } else { radius_z };
+
+    for index in 0..segments {
+        let a0 = index as f32 / segments as f32 * std::f32::consts::TAU;
+        let a1 = (index + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let bottom0 = [c0 * radius_x, -half_y, s0 * radius_z];
+        let bottom1 = [c1 * radius_x, -half_y, s1 * radius_z];
+        let top0 = [c0 * top_radius_x, half_y, s0 * top_radius_z];
+        let top1 = [c1 * top_radius_x, half_y, s1 * top_radius_z];
+
+        if cone {
+            mesh.triangle(
+                [bottom0, bottom1, [0.0, half_y, 0.0]],
+                normalize([c0 + c1, radius_x / size[1].max(0.001), s0 + s1]),
+            );
+        } else {
+            mesh.quad(
+                [bottom0, bottom1, top1, top0],
+                normalize([c0 + c1, 0.0, s0 + s1]),
+            );
+        }
+        mesh.triangle([[0.0, -half_y, 0.0], bottom1, bottom0], [0.0, -1.0, 0.0]);
+        if !cone {
+            mesh.triangle([[0.0, half_y, 0.0], top0, top1], [0.0, 1.0, 0.0]);
+        }
+    }
+    mesh.finish()
+}
+
+#[cfg(feature = "importers")]
+fn build_sphere_mesh(size: [f32; 3], segments: u32) -> BasicMeshResource {
+    let lon_segments = segments.clamp(8, 96);
+    let lat_segments = (lon_segments / 2).clamp(4, 48);
+    let radius = [
+        (size[0] * 0.5).abs().max(0.001),
+        (size[1] * 0.5).abs().max(0.001),
+        (size[2] * 0.5).abs().max(0.001),
+    ];
+    let mut mesh = MeshBuilder::default();
+
+    for lat in 0..lat_segments {
+        let theta0 = lat as f32 / lat_segments as f32 * std::f32::consts::PI;
+        let theta1 = (lat + 1) as f32 / lat_segments as f32 * std::f32::consts::PI;
+        for lon in 0..lon_segments {
+            let phi0 = lon as f32 / lon_segments as f32 * std::f32::consts::TAU;
+            let phi1 = (lon + 1) as f32 / lon_segments as f32 * std::f32::consts::TAU;
+            let p00 = sphere_point(theta0, phi0, radius);
+            let p01 = sphere_point(theta0, phi1, radius);
+            let p10 = sphere_point(theta1, phi0, radius);
+            let p11 = sphere_point(theta1, phi1, radius);
+            if lat == 0 {
+                mesh.triangle_smooth(
+                    [p00, p10, p11],
+                    [
+                        [0.0, 1.0, 0.0],
+                        normalize_ellipsoid(p10, radius),
+                        normalize_ellipsoid(p11, radius),
+                    ],
+                );
+            } else if lat + 1 == lat_segments {
+                mesh.triangle_smooth(
+                    [p00, p10, p01],
+                    [
+                        normalize_ellipsoid(p00, radius),
+                        [0.0, -1.0, 0.0],
+                        normalize_ellipsoid(p01, radius),
+                    ],
+                );
+            } else {
+                mesh.quad_smooth(
+                    [p00, p10, p11, p01],
+                    [
+                        normalize_ellipsoid(p00, radius),
+                        normalize_ellipsoid(p10, radius),
+                        normalize_ellipsoid(p11, radius),
+                        normalize_ellipsoid(p01, radius),
+                    ],
+                );
+            }
+        }
+    }
+    mesh.finish()
+}
+
+#[cfg(feature = "importers")]
 #[derive(Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
@@ -3379,13 +3692,29 @@ struct MeshBuilder {
 #[cfg(feature = "importers")]
 impl MeshBuilder {
     fn quad(&mut self, points: [[f32; 3]; 4], normal: [f32; 3]) {
+        self.quad_smooth(points, [normal; 4]);
+    }
+
+    fn quad_smooth(&mut self, points: [[f32; 3]; 4], normals: [[f32; 3]; 4]) {
         let base = self.positions.len() as u32;
         self.positions.extend(points);
-        self.normals.extend([normal; 4]);
+        self.normals.extend(normals);
         self.texcoords
             .extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+    }
+
+    fn triangle(&mut self, points: [[f32; 3]; 3], normal: [f32; 3]) {
+        self.triangle_smooth(points, [normal; 3]);
+    }
+
+    fn triangle_smooth(&mut self, points: [[f32; 3]; 3], normals: [[f32; 3]; 3]) {
+        let base = self.positions.len() as u32;
+        self.positions.extend(points);
+        self.normals.extend(normals);
+        self.texcoords.extend([[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
     fn quad_x(&mut self, sign: f32, x: f32, y0: f32, y1: f32, z0: f32, z1: f32, t: [f32; 3]) {
@@ -3485,6 +3814,20 @@ fn vmodel_vec3_param(params: &toml::Value, key: &str) -> Option<[f32; 3]> {
 }
 
 #[cfg(feature = "importers")]
+fn vmodel_vec4_param(params: &toml::Value, key: &str) -> Option<[f32; 4]> {
+    let array = params.get(key)?.as_array()?;
+    if array.len() != 4 {
+        return None;
+    }
+    Some([
+        toml_number_as_f32(&array[0])?,
+        toml_number_as_f32(&array[1])?,
+        toml_number_as_f32(&array[2])?,
+        toml_number_as_f32(&array[3])?,
+    ])
+}
+
+#[cfg(feature = "importers")]
 fn vmodel_f32_param(params: &toml::Value, key: &str) -> Option<f32> {
     toml_number_as_f32(params.get(key)?)
 }
@@ -3506,6 +3849,14 @@ fn vmodel_usize_param(params: &toml::Value, key: &str) -> Option<usize> {
 }
 
 #[cfg(feature = "importers")]
+fn vmodel_u32_param(params: &toml::Value, key: &str) -> Option<u32> {
+    params
+        .get(key)?
+        .as_integer()
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+#[cfg(feature = "importers")]
 fn vmodel_string_param(params: &toml::Value, key: &str) -> Option<String> {
     params.get(key)?.as_str().map(ToOwned::to_owned)
 }
@@ -3519,6 +3870,35 @@ fn axis_offset(axis: &str, spacing: f32) -> [f32; 3] {
         "-z" => [0.0, 0.0, -spacing],
         "-x" => [-spacing, 0.0, 0.0],
         _ => [spacing, 0.0, 0.0],
+    }
+}
+
+#[cfg(feature = "importers")]
+fn axis_from_str(axis: &str) -> Axis {
+    match axis.trim().to_ascii_lowercase().as_str() {
+        "y" | "+y" | "-y" => Axis::Y,
+        "z" | "+z" | "-z" => Axis::Z,
+        _ => Axis::X,
+    }
+}
+
+#[cfg(feature = "importers")]
+fn radial_offset(axis: Axis, radius: f32, angle_degrees: f32) -> [f32; 3] {
+    let angle = angle_degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    match axis {
+        Axis::X => [0.0, cos * radius, sin * radius],
+        Axis::Y => [cos * radius, 0.0, sin * radius],
+        Axis::Z => [cos * radius, sin * radius, 0.0],
+    }
+}
+
+#[cfg(feature = "importers")]
+fn radial_rotation(axis: Axis, angle_degrees: f32) -> [f32; 3] {
+    match axis {
+        Axis::X => [angle_degrees, 0.0, 0.0],
+        Axis::Y => [0.0, angle_degrees, 0.0],
+        Axis::Z => [0.0, 0.0, angle_degrees],
     }
 }
 
@@ -3540,6 +3920,81 @@ fn scale_vec3(value: [f32; 3], scalar: f32) -> [f32; 3] {
 #[cfg(feature = "importers")]
 fn translate_points(points: [[f32; 3]; 4], translation: [f32; 3]) -> [[f32; 3]; 4] {
     points.map(|point| add_vec3(point, translation))
+}
+
+#[cfg(feature = "importers")]
+fn transform_mesh(mesh: &mut BasicMeshResource, translation: [f32; 3], rotation: [f32; 3]) {
+    for position in &mut mesh.positions {
+        *position = add_vec3(rotate_vec3(*position, rotation), translation);
+    }
+    for normal in &mut mesh.normals {
+        *normal = normalize(rotate_vec3(*normal, rotation));
+    }
+}
+
+#[cfg(feature = "importers")]
+fn mirror_mesh(mesh: &mut BasicMeshResource, axis: Axis) {
+    for position in &mut mesh.positions {
+        match axis {
+            Axis::X => position[0] = -position[0],
+            Axis::Y => position[1] = -position[1],
+            Axis::Z => position[2] = -position[2],
+        }
+    }
+    for normal in &mut mesh.normals {
+        match axis {
+            Axis::X => normal[0] = -normal[0],
+            Axis::Y => normal[1] = -normal[1],
+            Axis::Z => normal[2] = -normal[2],
+        }
+    }
+    for triangle in mesh.indices.chunks_exact_mut(3) {
+        triangle.swap(1, 2);
+    }
+}
+
+#[cfg(feature = "importers")]
+fn rotate_vec3(value: [f32; 3], rotation: [f32; 3]) -> [f32; 3] {
+    let (sx, cx) = rotation[0].to_radians().sin_cos();
+    let (sy, cy) = rotation[1].to_radians().sin_cos();
+    let (sz, cz) = rotation[2].to_radians().sin_cos();
+
+    let mut output = value;
+    output = [
+        output[0],
+        output[1] * cx - output[2] * sx,
+        output[1] * sx + output[2] * cx,
+    ];
+    output = [
+        output[0] * cy + output[2] * sy,
+        output[1],
+        -output[0] * sy + output[2] * cy,
+    ];
+    [
+        output[0] * cz - output[1] * sz,
+        output[0] * sz + output[1] * cz,
+        output[2],
+    ]
+}
+
+#[cfg(feature = "importers")]
+fn sphere_point(theta: f32, phi: f32, radius: [f32; 3]) -> [f32; 3] {
+    let (sin_theta, cos_theta) = theta.sin_cos();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    [
+        radius[0] * sin_theta * cos_phi,
+        radius[1] * cos_theta,
+        radius[2] * sin_theta * sin_phi,
+    ]
+}
+
+#[cfg(feature = "importers")]
+fn normalize_ellipsoid(point: [f32; 3], radius: [f32; 3]) -> [f32; 3] {
+    normalize([
+        point[0] / (radius[0] * radius[0]),
+        point[1] / (radius[1] * radius[1]),
+        point[2] / (radius[2] * radius[2]),
+    ])
 }
 
 #[cfg(feature = "importers")]
@@ -4910,6 +5365,166 @@ depth = 0.04
             .map(|position| position[2])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!((first_max_z - second_max_z).abs() > 0.001);
+    }
+
+    #[test]
+    fn vmodel_compiler_builds_round_primitives() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "sphere"
+
+[operations.params]
+size = [2.0, 2.0, 2.0]
+segments = 16
+
+[[operations]]
+type = "radial_array"
+
+[operations.params]
+count = 4
+axis = "y"
+radius = 3.0
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 4);
+        assert!(
+            model.meshes[0].positions.len() > 100,
+            "sphere should generate a tessellated mesh"
+        );
+        let centers = model
+            .meshes
+            .iter()
+            .map(|mesh| {
+                let sum = mesh.positions.iter().fold([0.0; 3], |acc, position| {
+                    [
+                        acc[0] + position[0],
+                        acc[1] + position[1],
+                        acc[2] + position[2],
+                    ]
+                });
+                scale_vec3(sum, 1.0 / mesh.positions.len() as f32)
+            })
+            .collect::<Vec<_>>();
+        assert!(centers.iter().any(|center| center[0] > 2.0));
+        assert!(centers.iter().any(|center| center[2] > 2.0));
+    }
+
+    #[test]
+    fn vmodel_compiler_rotates_and_mirrors_primitive() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "cylinder"
+
+[operations.params]
+size = [1.0, 2.0, 1.0]
+segments = 12
+
+[[operations]]
+type = "rotate"
+
+[operations.params]
+rotation = [0.0, 0.0, 90.0]
+
+[[operations]]
+type = "mirror"
+
+[operations.params]
+axis = "x"
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 2);
+        assert_eq!(model.meshes[0].indices.len() % 3, 0);
+        let max_x = model.meshes[1]
+            .positions
+            .iter()
+            .map(|position| position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_x = model.meshes[0]
+            .positions
+            .iter()
+            .map(|position| position[0])
+            .fold(f32::INFINITY, f32::min);
+        assert!((max_x + min_x).abs() < 0.001);
+    }
+
+    #[test]
+    fn vmodel_compiler_flushes_multiple_primitives() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "box"
+
+[operations.params]
+size = [1.0, 1.0, 1.0]
+
+[[operations]]
+type = "cylinder"
+
+[operations.params]
+position = [2.0, 0.0, 0.0]
+size = [1.0, 1.0, 1.0]
+segments = 8
+
+[[operations]]
+type = "plane"
+
+[operations.params]
+position = [0.0, -1.0, 0.0]
+size = [4.0, 1.0, 4.0]
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 3);
+        assert_eq!(model.meshes[0].positions.len(), 24);
+        assert!(model.meshes[1].positions.len() > 24);
+        assert_eq!(model.meshes[2].positions.len(), 4);
+    }
+
+    #[test]
+    fn vmodel_compiler_records_material_slots() {
+        let source = br#"
+schema_version = 1
+kind = "generated_model"
+
+[[operations]]
+type = "box"
+
+[operations.params]
+size = [1.0, 1.0, 1.0]
+
+[[operations]]
+type = "material_slot"
+
+[operations.params]
+index = 2
+name = "painted_metal"
+base_color = [0.1, 0.2, 0.3, 1.0]
+metallic = 0.8
+roughness = 0.25
+"#;
+
+        let model = compile_vmodel(source).unwrap();
+
+        assert_eq!(model.meshes.len(), 1);
+        assert_eq!(model.meshes[0].material_index, Some(2));
+        assert_eq!(model.materials.len(), 3);
+        assert_eq!(model.materials[2].name, "painted_metal");
+        assert_eq!(model.materials[2].base_color, [0.1, 0.2, 0.3, 1.0]);
+        assert!((model.materials[2].metallic - 0.8).abs() < 0.001);
+        assert!((model.materials[2].roughness - 0.25).abs() < 0.001);
     }
 
     #[test]

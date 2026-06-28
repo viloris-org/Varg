@@ -184,12 +184,110 @@ fn gpu_uniform_structs_match_wgsl_alignment() {
         32 + MAX_FORWARD_LIGHTS * std::mem::size_of::<ForwardLightUniform>()
     );
     assert_eq!(std::mem::size_of::<CsmUniform>(), 368);
+    assert_eq!(
+        std::mem::size_of::<LocalShadowUniform>(),
+        64 * MAX_LOCAL_SHADOWS + 16 * MAX_LOCAL_SHADOWS + 16
+    );
+    assert_eq!(std::mem::size_of::<ClusterUniform>(), 32);
+    assert_eq!(std::mem::size_of::<ClusterRange>(), 16);
     assert_eq!(std::mem::size_of::<FogUniform>(), 32);
+}
+
+#[test]
+fn forward_shader_samples_spot_shadow_atlas() {
+    assert!(FORWARD_SHADER.contains("struct LocalShadowUniform"));
+    assert!(FORWARD_SHADER.contains("@group(0) @binding(17) var<uniform> local_shadows"));
+    assert!(FORWARD_SHADER.contains("@group(0) @binding(18) var local_shadow_atlas"));
+    assert!(FORWARD_SHADER.contains("fn sample_spot_shadow"));
+    assert!(FORWARD_SHADER.contains("textureSampleCompare(local_shadow_atlas"));
+    assert!(FORWARD_SHADER.contains("light_type > 1.5 && light.quality.z >= 0.0"));
+}
+
+#[test]
+fn spot_shadow_lights_receive_stable_atlas_slots() {
+    let mut lights = Vec::new();
+    for index in 0..6 {
+        let mut light = RenderLight {
+            object: engine_core::EntityId::from_u128(index + 1),
+            transform: engine_core::math::Transform::IDENTITY,
+            kind: RenderLightKind::Spot,
+            color: engine_core::math::Vec3::ONE,
+            intensity: 1.0,
+            range: 10.0,
+            spot_angle: 40.0,
+            settings: Default::default(),
+        };
+        light.settings.casts_shadow = index != 1;
+        lights.push(light);
+    }
+    let world = RenderWorld {
+        lights,
+        ..RenderWorld::default()
+    };
+    let selected = select_local_shadow_lights(&world);
+    let local_shadow = local_shadow_uniform_from_world(&world);
+    let packed = lighting_uniform_from_world(&world);
+
+    assert_eq!(selected.len(), MAX_LOCAL_SHADOWS);
+    assert_eq!(local_shadow.params[0], MAX_LOCAL_SHADOWS as f32);
+    assert_eq!(local_shadow.atlas_rects[0], [0.0, 0.0, 0.5, 0.5]);
+    assert_eq!(local_shadow.atlas_rects[1], [0.5, 0.0, 0.5, 0.5]);
+    assert_eq!(packed.lights[0].quality[2], 0.0);
+    assert_eq!(packed.lights[1].quality[2], -1.0);
+    assert_eq!(packed.lights[2].quality[2], 1.0);
+}
+
+#[test]
+fn clustered_lighting_builds_tile_ranges_for_selected_lights() {
+    let lights = vec![
+        RenderLight {
+            object: engine_core::EntityId::from_u128(1),
+            transform: engine_core::math::Transform::IDENTITY,
+            kind: RenderLightKind::Directional,
+            color: engine_core::math::Vec3::ONE,
+            intensity: 1.0,
+            range: 0.0,
+            spot_angle: 30.0,
+            settings: Default::default(),
+        },
+        RenderLight {
+            object: engine_core::EntityId::from_u128(2),
+            transform: engine_core::math::Transform::IDENTITY,
+            kind: RenderLightKind::Point,
+            color: engine_core::math::Vec3::ONE,
+            intensity: 2.0,
+            range: 8.0,
+            spot_angle: 30.0,
+            settings: Default::default(),
+        },
+    ];
+    let world = RenderWorld {
+        lights,
+        ..RenderWorld::default()
+    };
+    let (uniform, clustered_lights, ranges, indices) =
+        cluster_lighting_data_from_world(&world, &IDENTITY_MAT4, 1600, 900);
+
+    assert_eq!(uniform.layout, [16.0, 9.0, 100.0, 100.0]);
+    assert_eq!(clustered_lights.len(), 2);
+    assert_eq!(ranges.len(), CLUSTER_TILE_COUNT);
+    assert!(ranges.iter().any(|range| range.count > 0));
+    assert!(!indices.is_empty());
+    assert!(
+        indices
+            .iter()
+            .all(|index| (*index as usize) < clustered_lights.len())
+    );
 }
 
 #[test]
 fn forward_and_ssgi_shaders_expose_p1_p2_temporal_lighting_inputs() {
     assert!(FORWARD_SHADER.contains("lights: array<ForwardLight, 32>"));
+    assert!(FORWARD_SHADER.contains("var<storage, read> cluster_lights"));
+    assert!(FORWARD_SHADER.contains("var<storage, read> cluster_ranges"));
+    assert!(FORWARD_SHADER.contains("cluster_light_indices"));
+    assert!(FORWARD_SHADER.contains("cluster_index_for_fragment(input.position)"));
+    assert!(!FORWARD_SHADER.contains("for (var i: u32 = 0u; i < lighting.params.x"));
     assert!(SSGI_SHADER.contains("var motion_tex: texture_2d<f32>"));
     assert!(SSGI_SHADER.contains("var history_tex: texture_2d<f32>"));
     assert!(SSGI_SHADER.contains("history_uv = clamp(uv - motion"));
@@ -212,7 +310,8 @@ fn screen_space_reflections_are_enabled_with_camera_matrices() {
     assert!(render_source.contains("inv_view_projection"));
     assert!(render_source.contains("view_projection: camera.view_projection"));
     assert!(render_source.contains("diagnostics::disable_ssr()"));
-    assert!(render_source.contains("ssr_intensity: 0.35"));
+    assert!(render_source.contains("unwrap_or(0.35)"));
+    assert!(render_source.contains("ssr_intensity,"));
     assert!(constructor_source.contains("ssr_enabled: 1.0"));
     assert!(constructor_source.contains("ssr_intensity: 0.35"));
     assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_SSR"));

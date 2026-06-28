@@ -112,13 +112,19 @@ impl RenderDevice for WgpuRenderDevice {
             };
             self.queue
                 .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
+            self.upload_clustered_lighting(world, &uniform, rw, rh);
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let enable_ssao = self.ssao_compute_pipeline.is_some() && !diagnostics::disable_ssao();
+            let enable_ssao = self.ssao_compute_pipeline.is_some()
+                && !diagnostics::disable_ssao()
+                && Self::environment_ssao_enabled(world);
             let enable_ssgi = self.screen_space_gi_enabled(world);
             let ssgi_intensity = Self::screen_space_gi_intensity(world);
-            let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+            let enable_bloom = self.bloom_compute_down.is_some()
+                && self.bloom_compute_up.is_some()
+                && Self::environment_bloom_enabled(world);
             let frame_res = self.encode_frame_passes(
+                world,
                 &batches,
                 &csm,
                 &uniform,
@@ -148,6 +154,7 @@ impl RenderDevice for WgpuRenderDevice {
             let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
             self.encode_frame_pipeline(
                 &mut encoder,
+                world,
                 &plan,
                 &csm,
                 &batches,
@@ -223,7 +230,9 @@ impl RenderDevice for WgpuRenderDevice {
 
         let enable_ssao = false;
         let enable_ssgi = self.screen_space_gi_enabled(world);
-        let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+        let enable_bloom = self.bloom_compute_down.is_some()
+            && self.bloom_compute_up.is_some()
+            && Self::environment_bloom_enabled(world);
         if plan.temporal_inputs {
             let (temporal_camera, reset_history) =
                 temporal_camera_from_world(world, aspect, (tw, th), &mut self.temporal_state);
@@ -242,7 +251,9 @@ impl RenderDevice for WgpuRenderDevice {
         };
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
+        self.upload_clustered_lighting(world, &uniform, tw, th);
         let frame_res = self.encode_frame_passes(
+            world,
             &batches,
             &csm,
             &uniform,
@@ -279,6 +290,7 @@ impl RenderDevice for WgpuRenderDevice {
         let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
         self.encode_frame_pipeline(
             &mut encoder,
+            world,
             &plan,
             &csm,
             &batches,

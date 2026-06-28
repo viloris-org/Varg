@@ -5,6 +5,7 @@
 //! structs.
 
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
@@ -58,6 +59,73 @@ impl QuestRuntime {
             serde_json::json!({ "goal": goal }),
         )?;
         Ok(turn)
+    }
+
+    /// Starts a durable Quest run.
+    pub fn start_run(&self, quest_id: &str, objective: &str) -> EngineResult<QuestRun> {
+        validate_runtime_id(quest_id, "Quest id")?;
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return Err(EngineError::config("Quest run objective must not be empty"));
+        }
+        let timestamp_ms = unix_time_ms();
+        let run = QuestRun {
+            id: format!(
+                "run-{timestamp_ms}-{}",
+                NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed)
+            ),
+            quest_id: quest_id.to_owned(),
+            objective: objective.to_owned(),
+            status: QuestRunStatus::Active,
+            active_step: None,
+            workspace_id: None,
+            token_budget: None,
+            tokens_used: 0,
+            elapsed_ms: 0,
+            blocked_count: 0,
+            last_blocker: None,
+            loaded_tools: Vec::new(),
+            grants: Vec::new(),
+            evidence: Vec::new(),
+            started_at_ms: timestamp_ms,
+            updated_at_ms: timestamp_ms,
+            completed_at_ms: None,
+        };
+        self.write_run(&run)?;
+        self.record_event(
+            quest_id,
+            None,
+            "run_started",
+            "Quest run started",
+            serde_json::json!({ "run_id": run.id, "objective": objective }),
+        )?;
+        Ok(run)
+    }
+
+    /// Appends an updated durable Quest run snapshot.
+    pub fn update_run(&self, run: &mut QuestRun) -> EngineResult<()> {
+        validate_runtime_id(&run.quest_id, "Quest id")?;
+        validate_runtime_id(&run.id, "Quest run id")?;
+        run.updated_at_ms = unix_time_ms();
+        if run.status.is_terminal() && run.completed_at_ms.is_none() {
+            run.completed_at_ms = Some(run.updated_at_ms);
+        }
+        self.write_run(run)?;
+        self.record_event(
+            &run.quest_id,
+            None,
+            "run_updated",
+            "Quest run updated",
+            serde_json::json!({
+                "run_id": run.id,
+                "status": run.status,
+                "active_step": run.active_step,
+                "workspace_id": run.workspace_id,
+                "loaded_tools": run.loaded_tools,
+                "evidence_count": run.evidence.len(),
+            }),
+        )?;
+        Ok(())
     }
 
     /// Completes a persistent Quest turn.
@@ -169,10 +237,29 @@ impl QuestRuntime {
         read_jsonl(&self.quest_runtime_dir(quest_id).join("events.jsonl"))
     }
 
+    /// Reads latest known durable Quest run snapshots.
+    pub fn runs(&self, quest_id: &str) -> EngineResult<Vec<QuestRun>> {
+        validate_runtime_id(quest_id, "Quest id")?;
+        let snapshots: Vec<QuestRun> =
+            read_jsonl(&self.quest_runtime_dir(quest_id).join("runs.jsonl"))?;
+        let mut by_id = BTreeMap::new();
+        for run in snapshots {
+            by_id.insert(run.id.clone(), run);
+        }
+        Ok(by_id.into_values().collect())
+    }
+
     fn write_turn(&self, turn: &QuestTurn) -> EngineResult<()> {
         append_jsonl(
             &self.quest_runtime_dir(&turn.quest_id).join("turns.jsonl"),
             turn,
+        )
+    }
+
+    fn write_run(&self, run: &QuestRun) -> EngineResult<()> {
+        append_jsonl(
+            &self.quest_runtime_dir(&run.quest_id).join("runs.jsonl"),
+            run,
         )
     }
 
@@ -211,6 +298,110 @@ pub enum QuestTurnStatus {
     Blocked,
     /// Turn was canceled.
     Canceled,
+}
+
+/// One durable Quest execution run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestRun {
+    /// Stable run id.
+    pub id: String,
+    /// Owning Quest id.
+    pub quest_id: String,
+    /// Durable execution objective.
+    pub objective: String,
+    /// Current run status.
+    pub status: QuestRunStatus,
+    /// Current step label or id.
+    #[serde(default)]
+    pub active_step: Option<String>,
+    /// Isolated workspace id used by the run.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Optional token budget.
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    /// Accounted model tokens used by this run.
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// Accounted elapsed wall time in milliseconds.
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    /// Count of repeated blocker observations.
+    #[serde(default)]
+    pub blocked_count: u32,
+    /// Last blocker summary.
+    #[serde(default)]
+    pub last_blocker: Option<String>,
+    /// Tool names whose schemas were loaded for this run.
+    #[serde(default)]
+    pub loaded_tools: Vec<String>,
+    /// Capability grants associated with this run.
+    #[serde(default)]
+    pub grants: Vec<QuestRunGrant>,
+    /// Evidence artifacts produced by this run.
+    #[serde(default)]
+    pub evidence: Vec<QuestRunEvidenceRef>,
+    /// Start timestamp.
+    pub started_at_ms: u64,
+    /// Last update timestamp.
+    pub updated_at_ms: u64,
+    /// Completion timestamp.
+    #[serde(default)]
+    pub completed_at_ms: Option<u64>,
+}
+
+/// Durable Quest run lifecycle status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestRunStatus {
+    /// Run is actively progressing.
+    Active,
+    /// Run is waiting for user input, credentials, policy, or manual intervention.
+    WaitingForUser,
+    /// Run hit its configured budget.
+    BudgetLimited,
+    /// Run produced a reviewable bundle.
+    ReadyForReview,
+    /// Run is genuinely blocked.
+    Blocked,
+    /// Run was canceled.
+    Canceled,
+    /// Run completed.
+    Completed,
+}
+
+impl QuestRunStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Blocked | Self::Canceled | Self::Completed)
+    }
+}
+
+/// Capability grant associated with a Quest run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestRunGrant {
+    /// Stable grant id.
+    pub id: String,
+    /// Granted capability string.
+    pub capability: String,
+    /// Scope such as `run`, `quest`, or `project`.
+    pub scope: String,
+    /// Human-readable reason for the grant.
+    pub reason: String,
+    /// Grant creation timestamp.
+    pub created_at_ms: u64,
+}
+
+/// Evidence artifact produced by a Quest run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuestRunEvidenceRef {
+    /// Evidence kind, such as `plan`, `validation`, `diff`, or `review`.
+    pub kind: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Artifact path relative to the Quest runtime root.
+    pub path: String,
+    /// Evidence creation timestamp.
+    pub created_at_ms: u64,
 }
 
 /// Structured Quest runtime event.
@@ -381,6 +572,18 @@ mod tests {
         let mut turn = runtime
             .start_turn("quest-runtime-test", "Build a playable prototype")
             .unwrap();
+        let mut run = runtime
+            .start_run("quest-runtime-test", "Build a playable prototype")
+            .unwrap();
+        run.active_step = Some("plan".into());
+        run.loaded_tools.push("write_script".into());
+        run.evidence.push(QuestRunEvidenceRef {
+            kind: "plan".into(),
+            label: "Initial plan".into(),
+            path: "artifacts/plans/initial.md".into(),
+            created_at_ms: unix_time_ms(),
+        });
+        runtime.update_run(&mut run).unwrap();
         let artifact = runtime
             .write_artifact(
                 "quest-runtime-test",
@@ -400,8 +603,13 @@ mod tests {
         assert_eq!(turn.status, QuestTurnStatus::Completed);
         assert_eq!(artifact.path, "plans/initial.md");
         let events = runtime.events("quest-runtime-test").unwrap();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
+        let runs = runtime.runs("quest-runtime-test").unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].loaded_tools, vec!["write_script"]);
         assert!(events.iter().any(|event| event.kind == "turn_started"));
+        assert!(events.iter().any(|event| event.kind == "run_started"));
+        assert!(events.iter().any(|event| event.kind == "run_updated"));
         assert!(events.iter().any(|event| event.kind == "artifact_written"));
         assert!(events.iter().any(|event| event.kind == "turn_completed"));
         assert!(

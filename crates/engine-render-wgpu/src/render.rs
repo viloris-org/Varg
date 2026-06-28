@@ -7,8 +7,9 @@ use crate::{
     diagnostics,
     format::*,
     light_preparation::{
-        csm_uniform_from_world, gi_probe_uniform_and_data, lighting_uniform_from_world,
-        select_forward_lights,
+        cluster_lighting_data_from_world, csm_uniform_from_world, gi_probe_uniform_and_data,
+        lighting_uniform_from_world, local_shadow_uniform_from_world, select_forward_lights,
+        select_local_shadow_lights,
     },
     math::{IDENTITY_MAT4, inverse_mat4},
     passes::*,
@@ -22,10 +23,31 @@ use std::time::Instant;
 impl WgpuRenderDevice {
     pub(crate) fn screen_space_gi_enabled(&self, world: &RenderWorld) -> bool {
         self.ssgi_compute_pipeline.is_some()
+            && world
+                .environment
+                .as_ref()
+                .map(|environment| environment.ssgi_enabled)
+                .unwrap_or(true)
             && matches!(
                 world.global_illumination,
                 engine_render::RenderGlobalIllumination::ScreenSpace { .. }
             )
+    }
+
+    pub(crate) fn environment_ssao_enabled(world: &RenderWorld) -> bool {
+        world
+            .environment
+            .as_ref()
+            .map(|environment| environment.ssao_enabled)
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn environment_bloom_enabled(world: &RenderWorld) -> bool {
+        world
+            .environment
+            .as_ref()
+            .map(|environment| environment.bloom_enabled)
+            .unwrap_or(true)
     }
 
     pub(crate) fn screen_space_gi_intensity(world: &RenderWorld) -> f32 {
@@ -127,6 +149,12 @@ impl WgpuRenderDevice {
             .unwrap_or(0);
         self.queue
             .write_buffer(&self.lighting_uniform, 0, bytemuck::bytes_of(&lighting));
+        let local_shadows = local_shadow_uniform_from_world(world);
+        self.queue.write_buffer(
+            &self.local_shadow_uniform,
+            0,
+            bytemuck::bytes_of(&local_shadows),
+        );
     }
 
     pub(crate) fn upload_gi_probes(&mut self, world: &RenderWorld) {
@@ -136,6 +164,40 @@ impl WgpuRenderDevice {
         if !probes.is_empty() {
             self.queue
                 .write_buffer(&self.gi_probe_buffer, 0, bytemuck::cast_slice(&probes));
+        }
+    }
+
+    pub(crate) fn upload_clustered_lighting(
+        &self,
+        world: &RenderWorld,
+        camera: &CameraUniform,
+        width: u32,
+        height: u32,
+    ) {
+        let (uniform, lights, ranges, indices) =
+            cluster_lighting_data_from_world(world, &camera.view_projection, width, height);
+        self.queue
+            .write_buffer(&self.cluster_uniform, 0, bytemuck::bytes_of(&uniform));
+        if !lights.is_empty() {
+            self.queue.write_buffer(
+                &self.cluster_lights,
+                0,
+                bytemuck::cast_slice(lights.as_slice()),
+            );
+        }
+        if !ranges.is_empty() {
+            self.queue.write_buffer(
+                &self.cluster_ranges,
+                0,
+                bytemuck::cast_slice(ranges.as_slice()),
+            );
+        }
+        if !indices.is_empty() {
+            self.queue.write_buffer(
+                &self.cluster_light_indices,
+                0,
+                bytemuck::cast_slice(indices.as_slice()),
+            );
         }
     }
 
@@ -263,6 +325,7 @@ impl WgpuRenderDevice {
     pub(crate) fn encode_frame_pipeline(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        world: &RenderWorld,
         plan: &FramePipelinePlan,
         csm: &CsmUniform,
         batches: &[RenderBatchDraw],
@@ -278,6 +341,7 @@ impl WgpuRenderDevice {
             match step {
                 FramePipelineStep::Shadow => {
                     self.encode_csm_shadow_passes(encoder, csm, batches);
+                    self.encode_local_shadow_passes(encoder, world, batches);
                 }
                 FramePipelineStep::GBuffer => {
                     self.encode_gpu_particle_compute(encoder);
@@ -725,13 +789,19 @@ impl WgpuRenderDevice {
         };
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let enable_ssao = self.ssao_compute_pipeline.is_some() && !diagnostics::disable_ssao();
+        self.upload_clustered_lighting(world, &uniform, tw, th);
+        let enable_ssao = self.ssao_compute_pipeline.is_some()
+            && !diagnostics::disable_ssao()
+            && Self::environment_ssao_enabled(world);
         let enable_ssgi = self.screen_space_gi_enabled(world);
         let ssgi_intensity = Self::screen_space_gi_intensity(world);
-        let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
+        let enable_bloom = self.bloom_compute_down.is_some()
+            && self.bloom_compute_up.is_some()
+            && Self::environment_bloom_enabled(world);
 
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let frame_res = self.encode_frame_passes(
+            world,
             &batches,
             &csm,
             &uniform,
@@ -768,6 +838,7 @@ impl WgpuRenderDevice {
         let gpu_timestamps = self.encode_gpu_timestamps_begin(&mut encoder);
         self.encode_frame_pipeline(
             &mut encoder,
+            world,
             &plan,
             &csm,
             &batches,
@@ -821,6 +892,7 @@ impl WgpuRenderDevice {
     /// uploads post/SSAO uniforms, and pre-allocates CSM cascade data.
     pub(crate) fn encode_frame_passes(
         &mut self,
+        world: &engine_render::RenderWorld,
         _batches: &[RenderBatchDraw],
         csm: &CsmUniform,
         camera: &CameraUniform,
@@ -834,6 +906,44 @@ impl WgpuRenderDevice {
         bloom_enabled: bool,
         _encoder_label: &str,
     ) -> FrameResources {
+        let environment = world.environment.as_ref();
+        let ssao_enabled = ssao_enabled
+            && environment
+                .map(|environment| environment.ssao_enabled)
+                .unwrap_or(true);
+        let ssgi_enabled = ssgi_enabled
+            && environment
+                .map(|environment| environment.ssgi_enabled)
+                .unwrap_or(true);
+        let bloom_enabled = bloom_enabled
+            && environment
+                .map(|environment| environment.bloom_enabled)
+                .unwrap_or(true);
+        let exposure = environment
+            .map(|environment| environment.exposure.max(0.0))
+            .unwrap_or(1.0);
+        let bloom_intensity = environment
+            .map(|environment| environment.bloom_intensity.max(0.0))
+            .unwrap_or(0.04);
+        let ssao_radius = environment
+            .map(|environment| environment.ssao_radius.max(0.0))
+            .unwrap_or(SSAO_RADIUS);
+        let ssao_intensity = environment
+            .map(|environment| environment.ssao_intensity.max(0.0))
+            .unwrap_or(1.0);
+        let ssgi_radius = environment
+            .map(|environment| environment.ssgi_radius.max(0.0))
+            .unwrap_or(SSGI_RADIUS);
+        let ssgi_intensity = environment
+            .map(|environment| environment.ssgi_intensity.max(0.0))
+            .unwrap_or(ssgi_intensity);
+        let ssr_enabled = !diagnostics::disable_ssr()
+            && environment
+                .map(|environment| environment.ssr_enabled)
+                .unwrap_or(true);
+        let ssr_intensity = environment
+            .map(|environment| environment.ssr_intensity.max(0.0))
+            .unwrap_or(0.35);
         let taa_enabled = self.anti_aliasing == engine_render::AntiAliasingMode::Taa
             && self
                 .active_frame_plan
@@ -855,14 +965,14 @@ impl WgpuRenderDevice {
                 output_height: output_height as f32,
                 inv_output_width: 1.0 / output_width.max(1) as f32,
                 inv_output_height: 1.0 / output_height.max(1) as f32,
-                exposure: 1.0,
-                bloom_intensity: if bloom_enabled { 0.04 } else { 0.0 },
+                exposure,
+                bloom_intensity: if bloom_enabled { bloom_intensity } else { 0.0 },
                 ssao_enabled: if ssao_enabled { 1.0 } else { 0.0 },
                 upscale_sharpness: self.upscale_sharpness,
                 ssgi_enabled: if ssgi_enabled { 1.0 } else { 0.0 },
                 ssgi_intensity,
-                ssr_enabled: if diagnostics::disable_ssr() { 0.0 } else { 1.0 },
-                ssr_intensity: 0.35,
+                ssr_enabled: if ssr_enabled { 1.0 } else { 0.0 },
+                ssr_intensity,
                 taa_reset: if self.reset_temporal_history {
                     1.0
                 } else {
@@ -877,9 +987,9 @@ impl WgpuRenderDevice {
             &self.ssao_uniform,
             0,
             bytemuck::bytes_of(&SsaoUniform {
-                radius: SSAO_RADIUS,
+                radius: ssao_radius,
                 bias: SSAO_BIAS,
-                intensity: 1.0,
+                intensity: ssao_intensity,
                 _pad: 0.0,
                 width: tw as f32,
                 height: th as f32,
@@ -895,7 +1005,7 @@ impl WgpuRenderDevice {
                 height: th as f32,
                 inv_width: 1.0 / tw.max(1) as f32,
                 inv_height: 1.0 / th.max(1) as f32,
-                radius: SSGI_RADIUS,
+                radius: ssgi_radius,
                 intensity: ssgi_intensity,
                 thickness: 0.055,
                 sample_count: 12.0,
@@ -1002,6 +1112,50 @@ impl WgpuRenderDevice {
                 batches,
                 cascade_idx,
                 &self.mesh_cache,
+            );
+        }
+    }
+
+    pub(crate) fn encode_local_shadow_passes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        world: &RenderWorld,
+        batches: &[RenderBatchDraw],
+    ) {
+        if diagnostics::disable_csm_shadows() {
+            return;
+        }
+        if !batches
+            .iter()
+            .any(|batch| batch.count > 0 && batch.casts_shadows)
+        {
+            return;
+        }
+        let selected = select_local_shadow_lights(world);
+        if selected.is_empty() {
+            return;
+        }
+
+        for (slot, light) in selected.iter().enumerate() {
+            let shadow = ShadowUniform {
+                light_view_projection: crate::light_preparation::spot_light_view_projection(light),
+            };
+            self.queue.write_buffer(
+                &self.local_shadow_uniforms[slot],
+                0,
+                bytemuck::bytes_of(&shadow),
+            );
+            encode_local_shadow_pass(
+                encoder,
+                &self.local_shadow_atlas_view,
+                &self.shadow_pipeline,
+                &self.local_shadow_bind_groups[slot],
+                &self.vertex_buffer,
+                &self.index_buffer,
+                &self.instance_buffer,
+                batches,
+                &self.mesh_cache,
+                slot,
             );
         }
     }

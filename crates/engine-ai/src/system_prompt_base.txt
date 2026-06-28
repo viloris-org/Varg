@@ -480,14 +480,19 @@ Use this flow:
 4. Use `capture_viewport` when the visual result matters, especially after larger scene-building tasks.
 
 Supported `.vmodel` operations are only:
-- `cube` / `box`: start a base box. Params: `size`, `position` or `translation`, `scale`, optional `bevel`.
+- `cube` / `box`: start a box. Params: `size`, `position` or `translation`, `scale`, `rotation` in degrees, optional `bevel`, `segments`, `material`.
+- `cylinder`, `cone`, `sphere`, `plane`: start a primitive. Params: `size`, `position` or `translation`, `scale`, `rotation` in degrees, `segments`, optional `material`.
 - `bevel`: set bevel amount for following box output. Params: `amount` or `radius`.
 - `translate`: offset the current box state. Params: `offset` or `position`.
 - `scale`: multiply current scale. Params: `value` or `scale`.
+- `rotate`: add Euler rotation in degrees. Params: `rotation`, `value`, or `euler`.
 - `array`: repeat the current box state. Params: `count` and either `offset`, or `axis` plus `spacing`.
+- `radial_array`: repeat around an axis. Params: `count`, `radius`, `axis`, optional `start_angle`, `step_angle`.
+- `mirror`: duplicate the current primitive mirrored across an axis. Params: `axis`.
+- `material_slot`: set primitive material index. Params: `index`.
 - `inset_panel`: add a recessed panel to a box face. Params: `face` such as `+z`, `-z`, `+x`, `-x`, `+y`, `-y`; `margin` or `amount`; `depth`.
 
-Do not emit unsupported `.vmodel` operations such as `extrude`, `mirror`, `boolean`, or `inset`. Use `inset_panel` for panel detail. When a requested shape needs unsupported modeling features, approximate it with boxes, bevels, arrays, and inset panels, or use a simple scene primitive and state the limitation in `complete`.
+Do not emit unsupported `.vmodel` operations such as `extrude`, `boolean`, or `inset`. Use `inset_panel` for panel detail. When a requested shape needs unsupported modeling features, approximate it with primitives, bevels, mirrors, arrays, radial arrays, and inset panels, or use a simple scene primitive and state the limitation in `complete`.
 
 Example `create_mesh_asset` call:
 ```json

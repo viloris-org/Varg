@@ -244,6 +244,24 @@ pub struct ToolSearchResult {
     pub score: u32,
 }
 
+/// Request to load a full tool schema after discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolLoadRequest {
+    /// Tool name from `tool_search`.
+    pub name: String,
+}
+
+/// Result returned when a tool schema is loaded.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolLoadResult {
+    /// Loaded tool name.
+    pub name: String,
+    /// Full tool definition.
+    pub definition: ToolDefinition,
+    /// Registry metadata for planning and policy.
+    pub metadata: VargToolMetadata,
+}
+
 /// Capability preflight request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CapabilityRequest {
@@ -322,6 +340,25 @@ pub fn tool_search_definition() -> ToolDefinition {
     }
 }
 
+/// Returns the direct tool-load definition.
+pub fn tool_load_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "load_tool".into(),
+        description: "Load the full schema for one discovered Varg tool. Loading a schema does not grant permission to execute the tool.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Tool name returned by tool_search"
+                }
+            },
+            "required": ["name"]
+        }),
+    }
+}
+
 /// Returns the direct capability preflight tool definition.
 pub fn request_capability_definition() -> ToolDefinition {
     ToolDefinition {
@@ -362,6 +399,18 @@ pub fn tool_registry() -> Vec<VargToolMetadata> {
             &[],
             &[],
             &["discovery", "registry", "find tools", "search tools"],
+        ),
+        meta(
+            "load_tool",
+            "Load a full tool schema after discovery without granting execution permission.",
+            ToolExposure::Direct,
+            ToolType::Skill,
+            &[ToolStage::Inspect],
+            &["tool.load"],
+            RiskClass::Low,
+            &[],
+            &[],
+            &["discovery", "registry", "load tool", "tool schema"],
         ),
         meta(
             "skill_search",

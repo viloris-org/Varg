@@ -25,12 +25,23 @@ pub(crate) const DEFAULT_WIDTH: u32 = 960;
 pub(crate) const DEFAULT_HEIGHT: u32 = 540;
 pub(crate) const CUBE_INDEX_COUNT: u32 = 36;
 pub(crate) const MAX_FORWARD_LIGHTS: usize = 32;
+pub(crate) const MAX_CLUSTERED_LIGHTS: usize = 128;
+pub(crate) const CLUSTER_TILE_COLUMNS: u32 = 16;
+pub(crate) const CLUSTER_TILE_ROWS: u32 = 9;
+pub(crate) const CLUSTER_TILE_COUNT: usize = (CLUSTER_TILE_COLUMNS * CLUSTER_TILE_ROWS) as usize;
+pub(crate) const MAX_LIGHTS_PER_CLUSTER: usize = 64;
+pub(crate) const MAX_CLUSTER_LIGHT_INDICES: usize = CLUSTER_TILE_COUNT * MAX_LIGHTS_PER_CLUSTER;
 pub(crate) const MAX_DIRECTIONAL_LIGHTS: usize = 2;
 pub(crate) const DEFAULT_AMBIENT_LIGHT: [f32; 4] = [0.16, 0.16, 0.16, 1.0];
 pub(crate) const CSM_CASCADE_COUNT: usize = 5;
 pub(crate) const CSM_SHADOW_RESOLUTION: u32 = 4096;
 pub(crate) const CSM_CASCADE_SPLITS: [f32; CSM_CASCADE_COUNT] = [8.0, 20.0, 55.0, 120.0, 200.0];
 pub(crate) const CSM_CASCADE_FADE_RANGE: f32 = 4.0;
+pub(crate) const MAX_LOCAL_SHADOWS: usize = 4;
+pub(crate) const LOCAL_SHADOW_ATLAS_COLUMNS: u32 = 2;
+pub(crate) const LOCAL_SHADOW_TILE_RESOLUTION: u32 = 1024;
+pub(crate) const LOCAL_SHADOW_ATLAS_RESOLUTION: u32 =
+    LOCAL_SHADOW_ATLAS_COLUMNS * LOCAL_SHADOW_TILE_RESOLUTION;
 pub(crate) const MAX_BLOOM_MIPS: u32 = 5;
 pub(crate) const IBL_IRRADIANCE_RES: u32 = 32;
 pub(crate) const IBL_PREFILTER_RES: u32 = 512;
@@ -278,6 +289,15 @@ pub struct WgpuRenderDevice {
     pub(crate) csm_cascade_uniforms: [wgpu::Buffer; CSM_CASCADE_COUNT],
     /// Pre-allocated per-cascade bind group.
     pub(crate) csm_cascade_bind_groups: [wgpu::BindGroup; CSM_CASCADE_COUNT],
+    pub(crate) local_shadow_atlas_view: wgpu::TextureView,
+    pub(crate) _local_shadow_atlas_texture: wgpu::Texture,
+    pub(crate) local_shadow_uniform: wgpu::Buffer,
+    pub(crate) local_shadow_uniforms: [wgpu::Buffer; MAX_LOCAL_SHADOWS],
+    pub(crate) local_shadow_bind_groups: [wgpu::BindGroup; MAX_LOCAL_SHADOWS],
+    pub(crate) cluster_uniform: wgpu::Buffer,
+    pub(crate) cluster_lights: wgpu::Buffer,
+    pub(crate) cluster_ranges: wgpu::Buffer,
+    pub(crate) cluster_light_indices: wgpu::Buffer,
     pub(crate) shadow_pipeline: wgpu::RenderPipeline,
     pub(crate) _shadow_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) material_cache: HashMap<String, ([f32; 4], f32, f32, [f32; 3])>,

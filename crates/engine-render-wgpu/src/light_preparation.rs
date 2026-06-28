@@ -322,11 +322,20 @@ fn csm_cascade_view_depth_bounds_for_plan(
 pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUniform {
     let mut uniform = LightingUniform::default();
     let mut count = 0usize;
+    let local_shadow_lights = select_local_shadow_lights(world);
 
     for light in select_forward_lights(world) {
         let mut packed = forward_light_uniform(light);
         if count == 0 && light.kind == RenderLightKind::Directional {
             packed.spot_angles[2] = 1.0;
+        }
+        if light.kind == RenderLightKind::Spot {
+            packed.quality[2] = local_shadow_lights
+                .iter()
+                .position(|shadow_light| shadow_light.object == light.object)
+                .map(|slot| slot as f32)
+                .unwrap_or(-1.0);
+            packed.quality[3] = 1.0 / LOCAL_SHADOW_ATLAS_RESOLUTION as f32;
         }
         uniform.lights[count] = packed;
         count += 1;
@@ -345,6 +354,180 @@ pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUnifor
 
     uniform.params = [count as u32, 0, 0, 0];
     uniform
+}
+
+pub(crate) fn cluster_lighting_data_from_world(
+    world: &RenderWorld,
+    view_projection: &[[f32; 4]; 4],
+    width: u32,
+    height: u32,
+) -> (
+    ClusterUniform,
+    Vec<ForwardLightUniform>,
+    Vec<ClusterRange>,
+    Vec<u32>,
+) {
+    let selected = select_forward_lights(world);
+    let local_shadow_lights = select_local_shadow_lights(world);
+    let mut lights = Vec::with_capacity(selected.len().min(MAX_CLUSTERED_LIGHTS));
+    for light in selected.into_iter().take(MAX_CLUSTERED_LIGHTS) {
+        let mut packed = forward_light_uniform(light);
+        if light.kind == RenderLightKind::Spot {
+            packed.quality[2] = local_shadow_lights
+                .iter()
+                .position(|shadow_light| shadow_light.object == light.object)
+                .map(|slot| slot as f32)
+                .unwrap_or(-1.0);
+            packed.quality[3] = 1.0 / LOCAL_SHADOW_ATLAS_RESOLUTION as f32;
+        }
+        lights.push(packed);
+    }
+    if lights.is_empty() {
+        lights.push(ForwardLightUniform {
+            position_type: [0.0, 0.0, 0.0, 0.0],
+            direction_range: [-0.5, -1.0, -0.25, 0.0],
+            color_intensity: [1.0, 1.0, 1.0, 1.0],
+            spot_angles: [1.0, 1.0, 0.0, 0.0],
+            quality: [2.0, 1.0, -1.0, 0.0],
+        });
+    }
+
+    let tile_width = (width.max(1) as f32 / CLUSTER_TILE_COLUMNS as f32).ceil();
+    let tile_height = (height.max(1) as f32 / CLUSTER_TILE_ROWS as f32).ceil();
+    let mut ranges = Vec::with_capacity(CLUSTER_TILE_COUNT);
+    let mut indices = Vec::with_capacity(MAX_CLUSTER_LIGHT_INDICES);
+
+    for tile_y in 0..CLUSTER_TILE_ROWS {
+        for tile_x in 0..CLUSTER_TILE_COLUMNS {
+            let offset = indices.len() as u32;
+            for (light_index, light) in lights.iter().enumerate() {
+                if indices.len() >= MAX_CLUSTER_LIGHT_INDICES {
+                    break;
+                }
+                if light_intersects_tile(
+                    light,
+                    view_projection,
+                    width.max(1),
+                    height.max(1),
+                    tile_x,
+                    tile_y,
+                    tile_width,
+                    tile_height,
+                ) {
+                    let count = indices.len() as u32 - offset;
+                    if count >= MAX_LIGHTS_PER_CLUSTER as u32 {
+                        break;
+                    }
+                    indices.push(light_index as u32);
+                }
+            }
+            ranges.push(ClusterRange {
+                offset,
+                count: indices.len() as u32 - offset,
+                _pad: [0; 2],
+            });
+        }
+    }
+
+    (
+        ClusterUniform {
+            layout: [
+                CLUSTER_TILE_COLUMNS as f32,
+                CLUSTER_TILE_ROWS as f32,
+                tile_width,
+                tile_height,
+            ],
+            params: [lights.len() as u32, MAX_LIGHTS_PER_CLUSTER as u32, 0, 0],
+        },
+        lights,
+        ranges,
+        indices,
+    )
+}
+
+pub(crate) fn local_shadow_uniform_from_world(world: &RenderWorld) -> LocalShadowUniform {
+    let selected = select_local_shadow_lights(world);
+    let mut uniform = LocalShadowUniform::default();
+    uniform.params[0] = selected.len() as f32;
+    uniform.params[1] = 1.0 / LOCAL_SHADOW_ATLAS_RESOLUTION as f32;
+
+    for (slot, light) in selected.iter().enumerate() {
+        uniform.light_view_projections[slot] = spot_light_view_projection(light);
+        uniform.atlas_rects[slot] = local_shadow_atlas_rect(slot);
+    }
+
+    uniform
+}
+
+fn light_intersects_tile(
+    light: &ForwardLightUniform,
+    view_projection: &[[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    tile_x: u32,
+    tile_y: u32,
+    tile_width: f32,
+    tile_height: f32,
+) -> bool {
+    if light.position_type[3] < 0.5 {
+        return true;
+    }
+    let center = engine_core::math::Vec3::new(
+        light.position_type[0],
+        light.position_type[1],
+        light.position_type[2],
+    );
+    let range = light.direction_range[3].max(0.001);
+    let Some((sx, sy, depth)) = project_to_screen(view_projection, center, width, height) else {
+        return true;
+    };
+    if depth < -range {
+        return false;
+    }
+    let projected_radius =
+        ((range / depth.max(0.5)) * height as f32 * 0.5).clamp(8.0, height as f32);
+    let min_x = tile_x as f32 * tile_width;
+    let min_y = tile_y as f32 * tile_height;
+    let max_x = ((tile_x + 1) as f32 * tile_width).min(width as f32);
+    let max_y = ((tile_y + 1) as f32 * tile_height).min(height as f32);
+    sx + projected_radius >= min_x
+        && sx - projected_radius <= max_x
+        && sy + projected_radius >= min_y
+        && sy - projected_radius <= max_y
+}
+
+fn project_to_screen(
+    view_projection: &[[f32; 4]; 4],
+    position: engine_core::math::Vec3,
+    width: u32,
+    height: u32,
+) -> Option<(f32, f32, f32)> {
+    let x = view_projection[0][0] * position.x
+        + view_projection[1][0] * position.y
+        + view_projection[2][0] * position.z
+        + view_projection[3][0];
+    let y = view_projection[0][1] * position.x
+        + view_projection[1][1] * position.y
+        + view_projection[2][1] * position.z
+        + view_projection[3][1];
+    let z = view_projection[0][2] * position.x
+        + view_projection[1][2] * position.y
+        + view_projection[2][2] * position.z
+        + view_projection[3][2];
+    let w = view_projection[0][3] * position.x
+        + view_projection[1][3] * position.y
+        + view_projection[2][3] * position.z
+        + view_projection[3][3];
+    if w.abs() <= f32::EPSILON {
+        return None;
+    }
+    let ndc_x = x / w;
+    let ndc_y = y / w;
+    Some((
+        (ndc_x * 0.5 + 0.5) * width as f32,
+        (0.5 - ndc_y * 0.5) * height as f32,
+        w.abs().max(z.abs()),
+    ))
 }
 
 pub(crate) fn gi_probe_uniform_and_data(world: &RenderWorld) -> (GiProbeUniform, Vec<GiProbe>) {
@@ -718,6 +901,18 @@ pub(crate) fn select_forward_lights(world: &RenderWorld) -> Vec<&RenderLight> {
     selected
 }
 
+pub(crate) fn select_local_shadow_lights(world: &RenderWorld) -> Vec<&RenderLight> {
+    let selected = select_forward_lights(world);
+    let mut spot_lights: Vec<&RenderLight> = selected
+        .into_iter()
+        .filter(|light| {
+            light.kind == RenderLightKind::Spot && light.settings.casts_shadow && light.range > 0.0
+        })
+        .collect();
+    spot_lights.truncate(MAX_LOCAL_SHADOWS);
+    spot_lights
+}
+
 pub(crate) fn local_light_score(_world: &RenderWorld, light: &RenderLight) -> Option<f32> {
     if light.intensity <= 0.0 || light.range <= 0.0 {
         return None;
@@ -779,6 +974,37 @@ pub(crate) fn forward_light_uniform(light: &RenderLight) -> ForwardLightUniform 
             light.settings.contact_shadow_strength.max(0.0),
         ],
     }
+}
+
+pub(crate) fn spot_light_view_projection(light: &RenderLight) -> [[f32; 4]; 4] {
+    let position = light.transform.translation;
+    let direction = rotate_vec3(
+        light.transform.rotation,
+        engine_core::math::Vec3::new(0.0, 0.0, -1.0),
+    )
+    .normalized();
+    let direction = if direction.length_squared() <= f32::EPSILON {
+        engine_core::math::Vec3::new(0.0, -1.0, 0.0)
+    } else {
+        direction
+    };
+    let up = if direction.y.abs() > 0.95 {
+        engine_core::math::Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        engine_core::math::Vec3::new(0.0, 1.0, 0.0)
+    };
+    let view = look_at_rh(position, position + direction, up);
+    let fov = light.spot_angle.clamp(1.0, 175.0).to_radians();
+    let projection = perspective_rh(fov, 1.0, 0.05, light.range.max(0.1));
+    mul_mat4(&projection, &view)
+}
+
+pub(crate) fn local_shadow_atlas_rect(slot: usize) -> [f32; 4] {
+    let slot = slot as u32;
+    let column = slot % LOCAL_SHADOW_ATLAS_COLUMNS;
+    let row = slot / LOCAL_SHADOW_ATLAS_COLUMNS;
+    let scale = LOCAL_SHADOW_TILE_RESOLUTION as f32 / LOCAL_SHADOW_ATLAS_RESOLUTION as f32;
+    [column as f32 * scale, row as f32 * scale, scale, scale]
 }
 
 pub(crate) fn light_color_with_temperature(light: &RenderLight) -> engine_core::math::Vec3 {

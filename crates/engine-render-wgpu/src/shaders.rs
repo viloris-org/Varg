@@ -26,11 +26,29 @@ struct LightingUniform {
     lights: array<ForwardLight, 32>,
 };
 
+struct ClusterUniform {
+    tile_info: vec4<f32>,
+    params: vec4<u32>,
+};
+
+struct ClusterRange {
+    offset: u32,
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
 struct CsmUniform {
     cascade_vps: array<mat4x4<f32>, 5>,
     cascade_splits: vec4<f32>,
     params: vec4<f32>,
     fade_params: vec4<f32>,
+};
+
+struct LocalShadowUniform {
+    light_view_projections: array<mat4x4<f32>, 4>,
+    atlas_rects: array<vec4<f32>, 4>,
+    params: vec4<f32>,
 };
 
 struct FogUniform {
@@ -72,6 +90,12 @@ struct GiProbe {
 @group(0) @binding(14) var<uniform> temporal: TemporalUniform;
 @group(0) @binding(15) var<uniform> gi_probe_volume: GiProbeUniform;
 @group(0) @binding(16) var<storage, read> gi_probes: array<GiProbe>;
+@group(0) @binding(17) var<uniform> local_shadows: LocalShadowUniform;
+@group(0) @binding(18) var local_shadow_atlas: texture_depth_2d;
+@group(0) @binding(19) var<uniform> clusters: ClusterUniform;
+@group(0) @binding(20) var<storage, read> cluster_lights: array<ForwardLight>;
+@group(0) @binding(21) var<storage, read> cluster_ranges: array<ClusterRange>;
+@group(0) @binding(22) var<storage, read> cluster_light_indices: array<u32>;
 
 // Group 1: material textures
 @group(1) @binding(0) var base_color_tex: texture_2d<f32>;
@@ -351,6 +375,53 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
     return apply_csm_distance_fade(base_shadow, view_depth);
 }
 
+fn sample_spot_shadow(world_pos: vec3<f32>, n: vec3<f32>, light_dir: vec3<f32>, slot_f: f32) -> f32 {
+    let slot = u32(slot_f + 0.5);
+    if (slot >= u32(local_shadows.params.x) || slot >= 4u) {
+        return 1.0;
+    }
+    var light_vp = local_shadows.light_view_projections[0];
+    var atlas_rect = local_shadows.atlas_rects[0];
+    if (slot == 1u) {
+        light_vp = local_shadows.light_view_projections[1];
+        atlas_rect = local_shadows.atlas_rects[1];
+    } else if (slot == 2u) {
+        light_vp = local_shadows.light_view_projections[2];
+        atlas_rect = local_shadows.atlas_rects[2];
+    } else if (slot == 3u) {
+        light_vp = local_shadows.light_view_projections[3];
+        atlas_rect = local_shadows.atlas_rects[3];
+    }
+    let ndotl = max(dot(n, light_dir), 0.0);
+    let receiver_offset = n * (0.01 + (1.0 - ndotl) * 0.025);
+    let shadow_coord = light_vp * vec4<f32>(world_pos + receiver_offset, 1.0);
+    if (shadow_coord.w <= EPSILON) {
+        return 1.0;
+    }
+    let ndc = shadow_coord.xyz / shadow_coord.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    let local_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let atlas_uv = atlas_rect.xy + local_uv * atlas_rect.zw;
+    let texel = local_shadows.params.y;
+    let bias = local_shadows.params.z + local_shadows.params.w * (1.0 - ndotl);
+    var visibility = 0.0;
+    for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+            let uv = atlas_uv + vec2<f32>(f32(dx), f32(dy)) * texel * 1.5;
+            visibility += textureSampleCompare(local_shadow_atlas, csm_sampler, uv, ndc.z - bias);
+        }
+    }
+    return visibility / 9.0;
+}
+
+fn cluster_index_for_fragment(position: vec4<f32>) -> u32 {
+    let tile_x = min(u32(position.x / max(clusters.tile_info.z, 1.0)), u32(clusters.tile_info.x) - 1u);
+    let tile_y = min(u32(position.y / max(clusters.tile_info.w, 1.0)), u32(clusters.tile_info.y) - 1u);
+    return tile_x + tile_y * u32(clusters.tile_info.x);
+}
+
 @vertex
 fn vs_main(input: VsIn) -> VsOut {
     var out: VsOut;
@@ -428,15 +499,20 @@ fn fs_main(input: VsOut) -> FsOut {
     );
     var shadow_factor = 1.0;
     if (input.receive_shadows > 0.5) {
-        let shadow_light = lighting.lights[0];
+        let shadow_light = cluster_lights[0];
         if (shadow_light.position_type.w < 0.5 && shadow_light.spot_angles.z > 0.5) {
             let shadow_light_dir = normalize(-shadow_light.direction_range.xyz);
             shadow_factor = sample_csm_shadow(input.world_position, view_depth, tbn_n, shadow_light_dir);
         }
     }
 
-    for (var i: u32 = 0u; i < lighting.params.x; i = i + 1u) {
-        let light = lighting.lights[i];
+    let cluster_range = cluster_ranges[cluster_index_for_fragment(input.position)];
+    for (var cluster_i: u32 = 0u; cluster_i < cluster_range.count; cluster_i = cluster_i + 1u) {
+        let light_index = cluster_light_indices[cluster_range.offset + cluster_i];
+        if (light_index >= clusters.params.x) {
+            continue;
+        }
+        let light = cluster_lights[light_index];
         let light_type = light.position_type.w;
         let light_color = light.color_intensity.rgb;
         let intensity = light.color_intensity.w;
@@ -484,6 +560,8 @@ fn fs_main(input: VsOut) -> FsOut {
 
         if (light_type < 0.5 && light.spot_angles.z > 0.5) {
             radiance = radiance * shadow_factor;
+        } else if (light_type > 1.5 && light.quality.z >= 0.0 && input.receive_shadows > 0.5) {
+            radiance = radiance * sample_spot_shadow(input.world_position, n, light_dir, light.quality.z);
         }
 
         color = color + radiance * attenuation * spot;

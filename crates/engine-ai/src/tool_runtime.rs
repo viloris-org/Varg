@@ -63,6 +63,7 @@ impl AgentToolRuntimeRegistry {
         let mut registry = Self::default();
         registry.register(Arc::new(ReadFileRuntime));
         registry.register(Arc::new(ToolSearchRuntime));
+        registry.register(Arc::new(ToolLoadRuntime));
         registry.register(Arc::new(SkillRuntime));
         registry.register(Arc::new(RequestCapabilityRuntime));
         registry.register(Arc::new(ProjectContextRuntime));
@@ -142,6 +143,42 @@ impl AgentToolRuntime for ToolSearchRuntime {
             limit: *limit,
         })?;
         push_json_console(session.console, "ai-agent-tools", &results)
+    }
+}
+
+struct ToolLoadRuntime;
+
+impl AgentToolRuntime for ToolLoadRuntime {
+    fn operation_names(&self) -> &'static [&'static str] {
+        &["load_tool"]
+    }
+
+    fn execute(
+        &self,
+        invocation: &AgentToolInvocation<'_>,
+        session: &mut AgentToolSession<'_>,
+    ) -> EngineResult<()> {
+        let AgentOperation::LoadTool { name } = invocation.operation else {
+            return Err(unhandled_operation(invocation.operation));
+        };
+
+        let metadata = tools::metadata_for_tool(name)
+            .ok_or_else(|| EngineError::config(format!("unknown tool: {name}")))?;
+        if metadata.exposure == tools::ToolExposure::Hidden {
+            return Err(EngineError::config(format!(
+                "tool is not model-loadable: {name}"
+            )));
+        }
+        let definition = crate::agent_tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == name.as_str())
+            .ok_or_else(|| EngineError::config(format!("tool definition not found: {name}")))?;
+        let result = tools::ToolLoadResult {
+            name: name.clone(),
+            definition,
+            metadata,
+        };
+        push_json_console(session.console, "ai-agent-tools", &result)
     }
 }
 

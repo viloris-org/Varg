@@ -1322,6 +1322,162 @@ impl Default for SkyboxComponentData {
     }
 }
 
+/// Serializable scene environment component.
+///
+/// This is the renderer-facing home for sky, ambient, fog, and post-process
+/// controls. It supersedes standalone `Skybox` usage while keeping that older
+/// component valid for existing scenes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct EnvironmentComponentData {
+    /// Whether the sky is rendered before opaque geometry.
+    #[serde(default = "default_true")]
+    pub sky_enabled: bool,
+    /// Optional cubemap texture asset GUID (6-face cube).
+    #[serde(default)]
+    pub sky_cubemap: Option<AssetId>,
+    /// Zenith (top) color for the procedural gradient fallback.
+    #[serde(default = "default_skybox_zenith")]
+    pub sky_zenith_color: [f32; 3],
+    /// Horizon (bottom) color for the procedural gradient fallback.
+    #[serde(default = "default_skybox_horizon")]
+    pub sky_horizon_color: [f32; 3],
+    /// Rotation around the Y axis in degrees.
+    #[serde(default)]
+    pub sky_rotation_degrees: f32,
+    /// Intensity multiplier applied to the final skybox color.
+    #[serde(default = "default_skybox_intensity")]
+    pub sky_intensity: f32,
+    /// Ambient diffuse color applied before image-based lighting matures.
+    #[serde(default = "default_environment_ambient_color")]
+    pub ambient_color: [f32; 3],
+    /// Ambient diffuse multiplier.
+    #[serde(default = "default_environment_ambient_intensity")]
+    pub ambient_intensity: f32,
+    /// Whether exponential fog is active.
+    #[serde(default)]
+    pub fog_enabled: bool,
+    /// Exponential fog density.
+    #[serde(default = "default_environment_fog_density")]
+    pub fog_density: f32,
+    /// Fog RGB color.
+    #[serde(default = "default_environment_fog_color")]
+    pub fog_color: [f32; 3],
+    /// HDR exposure multiplier before tonemapping.
+    #[serde(default = "default_environment_exposure")]
+    pub exposure: f32,
+    /// Tonemapper name. Currently `aces` is implemented by the WGPU backend.
+    #[serde(default = "default_environment_tonemap")]
+    pub tonemap: String,
+    /// Whether bloom is composited.
+    #[serde(default = "default_true")]
+    pub bloom_enabled: bool,
+    /// Bloom contribution in post-process.
+    #[serde(default = "default_environment_bloom_intensity")]
+    pub bloom_intensity: f32,
+    /// Whether screen-space ambient occlusion is evaluated.
+    #[serde(default = "default_true")]
+    pub ssao_enabled: bool,
+    /// SSAO radius in screen-space reconstruction units.
+    #[serde(default = "default_environment_ssao_radius")]
+    pub ssao_radius: f32,
+    /// SSAO strength.
+    #[serde(default = "default_environment_ssao_intensity")]
+    pub ssao_intensity: f32,
+    /// Whether screen-space global illumination is evaluated.
+    #[serde(default = "default_true")]
+    pub ssgi_enabled: bool,
+    /// SSGI ray radius.
+    #[serde(default = "default_environment_ssgi_radius")]
+    pub ssgi_radius: f32,
+    /// SSGI contribution multiplier.
+    #[serde(default = "default_environment_ssgi_intensity")]
+    pub ssgi_intensity: f32,
+    /// Whether screen-space reflections are evaluated.
+    #[serde(default = "default_true")]
+    pub ssr_enabled: bool,
+    /// SSR contribution multiplier.
+    #[serde(default = "default_environment_ssr_intensity")]
+    pub ssr_intensity: f32,
+}
+
+fn default_environment_ambient_color() -> [f32; 3] {
+    [0.03, 0.035, 0.04]
+}
+
+fn default_environment_ambient_intensity() -> f32 {
+    1.0
+}
+
+fn default_environment_fog_density() -> f32 {
+    0.0003
+}
+
+fn default_environment_fog_color() -> [f32; 3] {
+    [0.6, 0.7, 0.85]
+}
+
+fn default_environment_exposure() -> f32 {
+    1.0
+}
+
+fn default_environment_tonemap() -> String {
+    "aces".to_string()
+}
+
+fn default_environment_bloom_intensity() -> f32 {
+    0.04
+}
+
+fn default_environment_ssao_radius() -> f32 {
+    0.035
+}
+
+fn default_environment_ssao_intensity() -> f32 {
+    1.0
+}
+
+fn default_environment_ssgi_radius() -> f32 {
+    2.25
+}
+
+fn default_environment_ssgi_intensity() -> f32 {
+    0.78
+}
+
+fn default_environment_ssr_intensity() -> f32 {
+    0.35
+}
+
+impl Default for EnvironmentComponentData {
+    fn default() -> Self {
+        Self {
+            sky_enabled: true,
+            sky_cubemap: None,
+            sky_zenith_color: default_skybox_zenith(),
+            sky_horizon_color: default_skybox_horizon(),
+            sky_rotation_degrees: 0.0,
+            sky_intensity: default_skybox_intensity(),
+            ambient_color: default_environment_ambient_color(),
+            ambient_intensity: default_environment_ambient_intensity(),
+            fog_enabled: false,
+            fog_density: default_environment_fog_density(),
+            fog_color: default_environment_fog_color(),
+            exposure: default_environment_exposure(),
+            tonemap: default_environment_tonemap(),
+            bloom_enabled: true,
+            bloom_intensity: default_environment_bloom_intensity(),
+            ssao_enabled: true,
+            ssao_radius: default_environment_ssao_radius(),
+            ssao_intensity: default_environment_ssao_intensity(),
+            ssgi_enabled: true,
+            ssgi_radius: default_environment_ssgi_radius(),
+            ssgi_intensity: default_environment_ssgi_intensity(),
+            ssr_enabled: true,
+            ssr_intensity: default_environment_ssr_intensity(),
+        }
+    }
+}
+
 /// Serializable 2D sprite component.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Sprite2DComponentData {
@@ -1671,6 +1827,8 @@ pub enum ComponentData {
     AudioStreamPlayer3D(AudioStreamPlayer3DComponentData),
     /// Skybox component.
     Skybox(SkyboxComponentData),
+    /// Scene environment component.
+    Environment(EnvironmentComponentData),
 }
 
 impl ComponentData {
@@ -1704,6 +1862,7 @@ impl ComponentData {
             Self::AudioStreamPlayer2D(_) => "AudioStreamPlayer2D",
             Self::AudioStreamPlayer3D(_) => "AudioStreamPlayer3D",
             Self::Skybox(_) => "Skybox",
+            Self::Environment(_) => "Environment",
         }
     }
 }

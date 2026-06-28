@@ -474,6 +474,81 @@ impl Default for RenderFog {
     }
 }
 
+/// Environment controls extracted from scene data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderEnvironment {
+    /// Whether sky rendering is enabled.
+    pub sky_enabled: bool,
+    /// Optional cubemap texture asset label.
+    pub sky_cubemap: Option<String>,
+    /// Procedural sky zenith color.
+    pub sky_zenith_color: [f32; 3],
+    /// Procedural sky horizon color.
+    pub sky_horizon_color: [f32; 3],
+    /// Sky rotation around the Y axis in degrees.
+    pub sky_rotation_degrees: f32,
+    /// Sky intensity.
+    pub sky_intensity: f32,
+    /// Ambient diffuse color.
+    pub ambient_color: [f32; 3],
+    /// Ambient diffuse multiplier.
+    pub ambient_intensity: f32,
+    /// Fog settings.
+    pub fog: RenderFog,
+    /// HDR exposure multiplier.
+    pub exposure: f32,
+    /// Tonemapper identifier.
+    pub tonemap: String,
+    /// Whether bloom is composited.
+    pub bloom_enabled: bool,
+    /// Bloom contribution.
+    pub bloom_intensity: f32,
+    /// Whether SSAO is evaluated.
+    pub ssao_enabled: bool,
+    /// SSAO radius.
+    pub ssao_radius: f32,
+    /// SSAO contribution.
+    pub ssao_intensity: f32,
+    /// Whether SSGI is evaluated.
+    pub ssgi_enabled: bool,
+    /// SSGI ray radius.
+    pub ssgi_radius: f32,
+    /// SSGI contribution.
+    pub ssgi_intensity: f32,
+    /// Whether SSR is evaluated.
+    pub ssr_enabled: bool,
+    /// SSR contribution.
+    pub ssr_intensity: f32,
+}
+
+impl Default for RenderEnvironment {
+    fn default() -> Self {
+        Self {
+            sky_enabled: true,
+            sky_cubemap: None,
+            sky_zenith_color: [0.15, 0.35, 0.65],
+            sky_horizon_color: [0.55, 0.7, 0.85],
+            sky_rotation_degrees: 0.0,
+            sky_intensity: 1.0,
+            ambient_color: [0.03, 0.035, 0.04],
+            ambient_intensity: 1.0,
+            fog: RenderFog::default(),
+            exposure: 1.0,
+            tonemap: "aces".to_string(),
+            bloom_enabled: true,
+            bloom_intensity: 0.04,
+            ssao_enabled: true,
+            ssao_radius: 0.035,
+            ssao_intensity: 1.0,
+            ssgi_enabled: true,
+            ssgi_radius: 2.25,
+            ssgi_intensity: 0.78,
+            ssr_enabled: true,
+            ssr_intensity: 0.35,
+        }
+    }
+}
+
 /// Minimal render queue shared by runtime, editor Scene View, and Game View.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderWorld {
@@ -495,6 +570,8 @@ pub struct RenderWorld {
     pub skybox: Option<RenderSkybox>,
     /// Optional fog configuration.
     pub fog: Option<RenderFog>,
+    /// Optional environment configuration.
+    pub environment: Option<RenderEnvironment>,
     /// Requested lighting path.
     pub lighting_mode: RenderLightingMode,
     /// Requested global illumination strategy.
@@ -515,6 +592,7 @@ impl Default for RenderWorld {
             particle_emitters: Vec::new(),
             skybox: None,
             fog: None,
+            environment: None,
             lighting_mode: RenderLightingMode::default(),
             global_illumination: RenderGlobalIllumination::ScreenSpace { intensity: 0.35 },
             shadow_virtualization: RenderShadowVirtualization::default(),
@@ -738,14 +816,67 @@ impl RenderWorld {
                         );
                     }
                     engine_ecs::ComponentData::Skybox(skybox) => {
+                        let cubemap = skybox
+                            .cubemap
+                            .map(|id| format!("asset:{:032x}", id.as_u128()));
                         world.skybox = Some(RenderSkybox {
-                            cubemap: skybox
-                                .cubemap
-                                .map(|id| format!("asset:{:032x}", id.as_u128())),
+                            cubemap: cubemap.clone(),
                             zenith_color: skybox.zenith_color,
                             horizon_color: skybox.horizon_color,
                             rotation_degrees: skybox.rotation_degrees,
                             intensity: skybox.intensity,
+                        });
+                        if world.environment.is_none() {
+                            world.environment = Some(RenderEnvironment {
+                                sky_enabled: true,
+                                sky_cubemap: cubemap,
+                                sky_zenith_color: skybox.zenith_color,
+                                sky_horizon_color: skybox.horizon_color,
+                                sky_rotation_degrees: skybox.rotation_degrees,
+                                sky_intensity: skybox.intensity,
+                                ..RenderEnvironment::default()
+                            });
+                        }
+                    }
+                    engine_ecs::ComponentData::Environment(environment) => {
+                        let sky_cubemap = environment
+                            .sky_cubemap
+                            .map(|id| format!("asset:{:032x}", id.as_u128()));
+                        let fog = RenderFog {
+                            density: environment.fog_density,
+                            color: environment.fog_color,
+                            enabled: environment.fog_enabled,
+                        };
+                        world.environment = Some(RenderEnvironment {
+                            sky_enabled: environment.sky_enabled,
+                            sky_cubemap: sky_cubemap.clone(),
+                            sky_zenith_color: environment.sky_zenith_color,
+                            sky_horizon_color: environment.sky_horizon_color,
+                            sky_rotation_degrees: environment.sky_rotation_degrees,
+                            sky_intensity: environment.sky_intensity,
+                            ambient_color: environment.ambient_color,
+                            ambient_intensity: environment.ambient_intensity,
+                            fog: fog.clone(),
+                            exposure: environment.exposure,
+                            tonemap: environment.tonemap.clone(),
+                            bloom_enabled: environment.bloom_enabled,
+                            bloom_intensity: environment.bloom_intensity,
+                            ssao_enabled: environment.ssao_enabled,
+                            ssao_radius: environment.ssao_radius,
+                            ssao_intensity: environment.ssao_intensity,
+                            ssgi_enabled: environment.ssgi_enabled,
+                            ssgi_radius: environment.ssgi_radius,
+                            ssgi_intensity: environment.ssgi_intensity,
+                            ssr_enabled: environment.ssr_enabled,
+                            ssr_intensity: environment.ssr_intensity,
+                        });
+                        world.fog = Some(fog);
+                        world.skybox = environment.sky_enabled.then_some(RenderSkybox {
+                            cubemap: sky_cubemap,
+                            zenith_color: environment.sky_zenith_color,
+                            horizon_color: environment.sky_horizon_color,
+                            rotation_degrees: environment.sky_rotation_degrees,
+                            intensity: environment.sky_intensity,
                         });
                     }
                     _ => {}
@@ -1559,5 +1690,49 @@ mod tests {
             scene.object(primary).unwrap().id
         );
         assert!(world.sprites.is_empty());
+    }
+
+    #[test]
+    fn extracts_environment_as_render_settings() {
+        let mut scene = Scene::new();
+        let environment = scene.create_object("World Environment").unwrap();
+        scene
+            .upsert_component(
+                environment,
+                ComponentData::Environment(engine_ecs::EnvironmentComponentData {
+                    sky_enabled: true,
+                    sky_zenith_color: [0.2, 0.3, 0.4],
+                    sky_horizon_color: [0.5, 0.6, 0.7],
+                    sky_rotation_degrees: 15.0,
+                    sky_intensity: 1.5,
+                    fog_enabled: true,
+                    fog_density: 0.002,
+                    fog_color: [0.1, 0.2, 0.3],
+                    exposure: 1.25,
+                    bloom_enabled: false,
+                    ssao_radius: 0.08,
+                    ssgi_enabled: false,
+                    ssr_intensity: 0.5,
+                    ..engine_ecs::EnvironmentComponentData::default()
+                }),
+            )
+            .unwrap();
+
+        let world = RenderWorld::extract(&scene);
+        let environment = world.environment.expect("environment extracted");
+
+        assert_eq!(environment.sky_zenith_color, [0.2, 0.3, 0.4]);
+        assert_eq!(environment.sky_horizon_color, [0.5, 0.6, 0.7]);
+        assert_eq!(environment.sky_rotation_degrees, 15.0);
+        assert_eq!(environment.sky_intensity, 1.5);
+        assert!(environment.fog.enabled);
+        assert_eq!(environment.fog.density, 0.002);
+        assert_eq!(environment.exposure, 1.25);
+        assert!(!environment.bloom_enabled);
+        assert_eq!(environment.ssao_radius, 0.08);
+        assert!(!environment.ssgi_enabled);
+        assert_eq!(environment.ssr_intensity, 0.5);
+        assert!(world.skybox.is_some());
+        assert!(world.fog.is_some());
     }
 }

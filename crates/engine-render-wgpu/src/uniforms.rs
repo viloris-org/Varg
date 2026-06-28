@@ -66,6 +66,37 @@ pub(crate) struct LightingUniform {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct ClusterUniform {
+    /// x: tile columns, y: tile rows, z: tile width in px, w: tile height in px.
+    pub(crate) layout: [f32; 4],
+    /// x: light count, y: max lights per cluster, z/w reserved.
+    pub(crate) params: [u32; 4],
+}
+
+impl Default for ClusterUniform {
+    fn default() -> Self {
+        Self {
+            layout: [
+                CLUSTER_TILE_COLUMNS as f32,
+                CLUSTER_TILE_ROWS as f32,
+                1.0,
+                1.0,
+            ],
+            params: [0, MAX_LIGHTS_PER_CLUSTER as u32, 0, 0],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct ClusterRange {
+    pub(crate) offset: u32,
+    pub(crate) count: u32,
+    pub(crate) _pad: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct GiProbeUniform {
     pub(crate) center: [f32; 4],
     pub(crate) extent: [f32; 4],
@@ -131,6 +162,31 @@ pub(crate) struct CsmUniform {
     pub(crate) params: [f32; 4],
     /// x: shadow fade start depth, y: shadow max distance.
     pub(crate) fade_params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct LocalShadowUniform {
+    pub(crate) light_view_projections: [[[f32; 4]; 4]; MAX_LOCAL_SHADOWS],
+    /// xy: atlas tile origin, zw: atlas tile scale.
+    pub(crate) atlas_rects: [[f32; 4]; MAX_LOCAL_SHADOWS],
+    /// x: active count, y: inverse atlas size, z: constant bias, w: normal bias.
+    pub(crate) params: [f32; 4],
+}
+
+impl Default for LocalShadowUniform {
+    fn default() -> Self {
+        Self {
+            light_view_projections: [IDENTITY_MAT4; MAX_LOCAL_SHADOWS],
+            atlas_rects: [[0.0; 4]; MAX_LOCAL_SHADOWS],
+            params: [
+                0.0,
+                1.0 / LOCAL_SHADOW_ATLAS_RESOLUTION as f32,
+                0.001,
+                0.004,
+            ],
+        }
+    }
 }
 
 #[repr(C)]

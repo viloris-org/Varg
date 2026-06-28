@@ -595,6 +595,61 @@ impl WgpuRenderDevice {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let local_shadow_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("varg local shadow atlas"),
+            size: wgpu::Extent3d {
+                width: LOCAL_SHADOW_ATLAS_RESOLUTION,
+                height: LOCAL_SHADOW_ATLAS_RESOLUTION,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let local_shadow_atlas_view =
+            local_shadow_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let local_shadow_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("varg local shadow uniform"),
+            contents: bytemuck::bytes_of(&LocalShadowUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let cluster_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("varg cluster uniform"),
+            contents: bytemuck::bytes_of(&ClusterUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let cluster_lights = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("varg clustered lights"),
+            contents: bytemuck::cast_slice(
+                &[ForwardLightUniform {
+                    position_type: [0.0; 4],
+                    direction_range: [0.0; 4],
+                    color_intensity: [0.0; 4],
+                    spot_angles: [0.0; 4],
+                    quality: [0.0; 4],
+                }; MAX_CLUSTERED_LIGHTS],
+            ),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let cluster_ranges = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("varg clustered light ranges"),
+            contents: bytemuck::cast_slice(
+                &[ClusterRange {
+                    offset: 0,
+                    count: 0,
+                    _pad: [0; 2],
+                }; CLUSTER_TILE_COUNT],
+            ),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let cluster_light_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("varg clustered light indices"),
+            contents: bytemuck::cast_slice(&[0u32; MAX_CLUSTER_LIGHT_INDICES]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
         // Pre-allocate cascade uniform buffers (updated via write_buffer per frame).
         let mut csm_cascade_uniforms = Vec::with_capacity(CSM_CASCADE_COUNT);
         for i in 0..CSM_CASCADE_COUNT {
@@ -609,6 +664,19 @@ impl WgpuRenderDevice {
         }
         let csm_cascade_uniforms: [wgpu::Buffer; CSM_CASCADE_COUNT] =
             csm_cascade_uniforms.try_into().unwrap();
+        let mut local_shadow_uniforms = Vec::with_capacity(MAX_LOCAL_SHADOWS);
+        for i in 0..MAX_LOCAL_SHADOWS {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("varg local shadow {i} uniform")),
+                contents: bytemuck::bytes_of(&ShadowUniform {
+                    light_view_projection: IDENTITY_MAT4,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            local_shadow_uniforms.push(buf);
+        }
+        let local_shadow_uniforms: [wgpu::Buffer; MAX_LOCAL_SHADOWS] =
+            local_shadow_uniforms.try_into().unwrap();
 
         // Group 0: camera + lighting + CSM + IBL
         let scene_bind_group_layout =
@@ -769,6 +837,66 @@ impl WgpuRenderDevice {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 16,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 18,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 19,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 20,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 21,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 22,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1036,6 +1164,30 @@ impl WgpuRenderDevice {
                 wgpu::BindGroupEntry {
                     binding: 16,
                     resource: gi_probe_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: local_shadow_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&local_shadow_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: cluster_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: cluster_lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: cluster_ranges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: cluster_light_indices.as_entire_binding(),
                 },
             ],
         });
@@ -1653,6 +1805,20 @@ impl WgpuRenderDevice {
         }
         let csm_cascade_bind_groups: [wgpu::BindGroup; CSM_CASCADE_COUNT] =
             csm_cascade_bind_groups.try_into().unwrap();
+        let mut local_shadow_bind_groups = Vec::with_capacity(MAX_LOCAL_SHADOWS);
+        for i in 0..MAX_LOCAL_SHADOWS {
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("varg local shadow {i} bind group")),
+                layout: &shadow_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: local_shadow_uniforms[i].as_entire_binding(),
+                }],
+            });
+            local_shadow_bind_groups.push(bg);
+        }
+        let local_shadow_bind_groups: [wgpu::BindGroup; MAX_LOCAL_SHADOWS] =
+            local_shadow_bind_groups.try_into().unwrap();
 
         // Skybox pipeline
         let skybox_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2828,6 +2994,15 @@ impl WgpuRenderDevice {
             csm_uniform,
             csm_cascade_uniforms,
             csm_cascade_bind_groups,
+            local_shadow_atlas_view,
+            _local_shadow_atlas_texture: local_shadow_atlas_texture,
+            local_shadow_uniform,
+            local_shadow_uniforms,
+            local_shadow_bind_groups,
+            cluster_uniform,
+            cluster_lights,
+            cluster_ranges,
+            cluster_light_indices,
             shadow_pipeline,
             _shadow_bind_group_layout: shadow_bind_group_layout,
             material_cache: HashMap::new(),

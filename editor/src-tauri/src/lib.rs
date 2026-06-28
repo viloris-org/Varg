@@ -15,7 +15,7 @@ use std::{
 };
 
 use base64::Engine as _;
-use engine_ai::{AgentOutcome, AgentPlan, AgentSession};
+use engine_ai::{AgentOutcome, AgentPlan, AgentSession, LoadedToolSet};
 use engine_core::{EngineConfig, EngineError, EngineResult, RuntimeProfile};
 use engine_editor::agent::{PermissionPolicy, TraceEntry};
 use engine_editor::{
@@ -1720,10 +1720,11 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
     let model = create_quest_model_from_prepared(prepared.model_provider)?;
     let first_action_started_at = Instant::now();
     let mut planning_trace = QuestModelTraceCapture::default();
-    let plan_request = session.prepare_request(
+    let plan_request = session.prepare_request_with_tools(
         &prompt,
         &[],
         parse_thinking_effort(&detail.record.model_config.thinking_effort),
+        LoadedToolSet::quest_base().definitions(),
     );
     let plan_response = session.respond_with_tool_results_streaming(
         model.as_ref(),
@@ -1816,10 +1817,11 @@ pub(crate) fn run_quest_execution(prepared: PreparedQuestExecution) -> EngineRes
         let repair_started_at = Instant::now();
         let repair_trace_id = format!("repair-plan-{repair_attempts}");
         let mut repair_trace = QuestModelTraceCapture::default();
-        let repair_request = session.prepare_request(
+        let repair_request = session.prepare_request_with_tools(
             &repair_prompt,
             &[],
             parse_thinking_effort(&detail.record.model_config.thinking_effort),
+            LoadedToolSet::quest_base().definitions(),
         );
         let repair_response = session.respond_with_tool_results_streaming(
             model.as_ref(),

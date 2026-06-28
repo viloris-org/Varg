@@ -593,6 +593,8 @@ impl EditorHost {
             "AcousticRoom" => ComponentData::AcousticRoom(Default::default()),
             "AcousticPortal" => ComponentData::AcousticPortal(Default::default()),
             "AudioZone" => ComponentData::AudioZone(Default::default()),
+            "Environment" => ComponentData::Environment(Default::default()),
+            "Skybox" => ComponentData::Skybox(Default::default()),
             "Script" => ComponentData::Script(engine_ecs::ScriptComponent::new(String::new())),
             _ => {
                 return Err(EngineError::config(format!(

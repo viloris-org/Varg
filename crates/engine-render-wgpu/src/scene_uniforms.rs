@@ -2,17 +2,32 @@ use crate::{math::*, uniforms::*};
 use engine_render::RenderWorld;
 
 pub(crate) fn skybox_uniform_from_world(world: &RenderWorld, use_cubemap: bool) -> SkyboxUniform {
-    let skybox = match &world.skybox {
-        Some(s) => s,
-        None => {
-            return SkyboxUniform {
-                view_rotation_only: IDENTITY_MAT4,
-                zenith_color: [0.15, 0.35, 0.65, 1.0],
-                horizon_color: [0.55, 0.7, 0.85, 1.0],
-                rotation_intensity: [0.0, 1.0, 0.0, 0.0],
-                use_cubemap: [0, 0, 0, 0],
-            };
-        }
+    let sky = world.environment.as_ref().and_then(|environment| {
+        environment.sky_enabled.then_some((
+            environment.sky_zenith_color,
+            environment.sky_horizon_color,
+            environment.sky_rotation_degrees,
+            environment.sky_intensity,
+        ))
+    });
+    let sky = sky.or_else(|| {
+        world.skybox.as_ref().map(|skybox| {
+            (
+                skybox.zenith_color,
+                skybox.horizon_color,
+                skybox.rotation_degrees,
+                skybox.intensity,
+            )
+        })
+    });
+    let Some((zenith_color, horizon_color, rotation_degrees, intensity)) = sky else {
+        return SkyboxUniform {
+            view_rotation_only: IDENTITY_MAT4,
+            zenith_color: [0.15, 0.35, 0.65, 1.0],
+            horizon_color: [0.55, 0.7, 0.85, 1.0],
+            rotation_intensity: [0.0, 1.0, 0.0, 0.0],
+            use_cubemap: [0, 0, 0, 0],
+        };
     };
 
     let eye = world
@@ -41,25 +56,20 @@ pub(crate) fn skybox_uniform_from_world(world: &RenderWorld, use_cubemap: bool) 
 
     SkyboxUniform {
         view_rotation_only: view,
-        zenith_color: [
-            skybox.zenith_color[0],
-            skybox.zenith_color[1],
-            skybox.zenith_color[2],
-            1.0,
-        ],
-        horizon_color: [
-            skybox.horizon_color[0],
-            skybox.horizon_color[1],
-            skybox.horizon_color[2],
-            1.0,
-        ],
-        rotation_intensity: [skybox.rotation_degrees, skybox.intensity, 0.0, 0.0],
+        zenith_color: [zenith_color[0], zenith_color[1], zenith_color[2], 1.0],
+        horizon_color: [horizon_color[0], horizon_color[1], horizon_color[2], 1.0],
+        rotation_intensity: [rotation_degrees, intensity, 0.0, 0.0],
         use_cubemap: [u32::from(use_cubemap), 0, 0, 0],
     }
 }
 
 pub(crate) fn fog_uniform_from_world(world: &RenderWorld) -> FogUniform {
-    match &world.fog {
+    match world
+        .environment
+        .as_ref()
+        .map(|environment| &environment.fog)
+        .or(world.fog.as_ref())
+    {
         Some(fog) => FogUniform {
             density: fog.density,
             _pad: [0.0; 3],

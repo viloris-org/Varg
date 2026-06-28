@@ -32,7 +32,7 @@ pub use tools::{
     VargToolMetadata, search_tools,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use engine_core::{EngineError, EngineResult};
@@ -125,7 +125,7 @@ pub struct ToolCall {
 }
 
 /// Definition of a tool available to the model.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ToolDefinition {
     /// Tool name (must match an `AgentOperation` action).
     pub name: String,
@@ -258,6 +258,53 @@ pub struct AiRequest {
     pub thinking_effort: Option<ThinkingEffort>,
     /// Tool definitions for native tool calling. Empty means no tools.
     pub tools: Vec<ToolDefinition>,
+}
+
+/// Explicit model-visible tool set for an agent request.
+#[derive(Clone, Debug, Default)]
+pub struct LoadedToolSet {
+    loaded: HashSet<String>,
+}
+
+impl LoadedToolSet {
+    /// Creates a loaded tool set from tool names.
+    pub fn new(tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            loaded: tools.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Creates a Quest-oriented tool set with discovery and completion tools.
+    pub fn quest_base() -> Self {
+        Self::new([
+            "tool_search",
+            "load_tool",
+            "request_capability",
+            "skill_search",
+            "skill_read",
+            "get_scene_info",
+            "read_file",
+            "complete",
+        ])
+    }
+
+    /// Adds one loaded tool name.
+    pub fn insert(&mut self, tool: impl Into<String>) {
+        self.loaded.insert(tool.into());
+    }
+
+    /// Returns true when the named tool is loaded.
+    pub fn contains(&self, tool: &str) -> bool {
+        self.loaded.contains(tool)
+    }
+
+    /// Returns loaded tool definitions in registry order.
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        agent_tool_definitions()
+            .into_iter()
+            .filter(|definition| self.contains(&definition.name))
+            .collect()
+    }
 }
 
 impl AiRequest {
@@ -479,6 +526,11 @@ pub enum AgentOperation {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Load the full schema for one discovered tool.
+    LoadTool {
+        /// Tool name returned by `tool_search`.
+        name: String,
+    },
     /// Search project and global Varg skills.
     SkillSearch {
         /// Natural-language search text.
@@ -664,6 +716,7 @@ impl AgentOperation {
             Self::BatchOperation { .. } => "batch_operation",
             Self::QuerySceneSemantic { .. } => "query_scene_semantic",
             Self::ToolSearch { .. } => "tool_search",
+            Self::LoadTool { .. } => "load_tool",
             Self::SkillSearch { .. } => "skill_search",
             Self::SkillRead { .. } => "skill_read",
             Self::RequestCapability { .. } => "request_capability",
@@ -752,7 +805,7 @@ pub struct MaterialSpec {
 /// Structured mesh operation descriptor.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct MeshOperationSpec {
-    /// Operation kind, such as cube, bevel, inset, extrude, mirror, boolean, or array.
+    /// Operation kind, such as box, cylinder, sphere, plane, bevel, mirror, or array.
     #[serde(rename = "type")]
     pub operation_type: String,
     /// Operation parameters.
@@ -1001,6 +1054,7 @@ impl AgentSession {
             for tool_result in &tool_result_messages {
                 request.messages.push(tool_result.to_chat_message());
             }
+            add_loaded_tools_to_request(&mut request, &resolved_operations);
             resolved_tool_results.extend(tool_result_messages);
 
             response = model.chat_stream(request.clone(), on_delta)?;
@@ -1023,6 +1077,22 @@ impl AgentSession {
         history: &[ChatMessage],
         thinking_effort: Option<ThinkingEffort>,
     ) -> AiRequest {
+        self.prepare_request_with_tools(
+            user_prompt,
+            history,
+            thinking_effort,
+            agent_tool_definitions(),
+        )
+    }
+
+    /// Builds a provider request with an explicit model-visible tool set.
+    pub fn prepare_request_with_tools(
+        &self,
+        user_prompt: &str,
+        history: &[ChatMessage],
+        thinking_effort: Option<ThinkingEffort>,
+        tools: Vec<ToolDefinition>,
+    ) -> AiRequest {
         let available_commands: Vec<&engine_editor::EditorCommand> =
             self.commands.list_executable().collect();
         let mut messages = history.to_vec();
@@ -1032,7 +1102,7 @@ impl AgentSession {
             context: self.context.to_ai_context(),
             messages,
             thinking_effort,
-            tools: agent_tool_definitions(),
+            tools,
         }
     }
 
@@ -1563,6 +1633,7 @@ impl AgentSession {
             } => self.execute_batch_operation_inner(operations, *rollback_on_failure, depth),
             AgentOperation::QuerySceneSemantic { query } => self.execute_semantic_query(query),
             AgentOperation::ToolSearch { .. } => unreachable!("tool_search is routed tool runtime"),
+            AgentOperation::LoadTool { .. } => unreachable!("load_tool is routed tool runtime"),
             AgentOperation::SkillSearch { .. } => {
                 unreachable!("skill_search is routed tool runtime")
             }
@@ -2843,6 +2914,7 @@ fn operation_is_transactional(operation: &AgentOperation) -> bool {
         AgentOperation::SkillSearch { .. }
         | AgentOperation::SkillRead { .. }
         | AgentOperation::ToolSearch { .. }
+        | AgentOperation::LoadTool { .. }
         | AgentOperation::ReadFile { .. }
         | AgentOperation::CheckScript { .. }
         | AgentOperation::CreateTask { .. }
@@ -2873,6 +2945,7 @@ fn operation_can_feed_model(operation: &AgentOperation) -> bool {
             | AgentOperation::CreateTask { .. }
             | AgentOperation::UpdateTask { .. }
             | AgentOperation::ToolSearch { .. }
+            | AgentOperation::LoadTool { .. }
             | AgentOperation::SkillSearch { .. }
             | AgentOperation::SkillRead { .. }
             | AgentOperation::RequestCapability { .. }
@@ -2919,6 +2992,32 @@ fn format_tool_result_messages(
             content: content.clone(),
         })
         .collect()
+}
+
+fn add_loaded_tools_to_request(request: &mut AiRequest, operations: &[AgentOperation]) {
+    let loaded_names = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            AgentOperation::LoadTool { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if loaded_names.is_empty() {
+        return;
+    }
+    let existing = request
+        .tools
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut additions = agent_tool_definitions()
+        .into_iter()
+        .filter(|definition| {
+            loaded_names.iter().any(|name| *name == definition.name)
+                && !existing.contains(definition.name.as_str())
+        })
+        .collect::<Vec<_>>();
+    request.tools.append(&mut additions);
 }
 
 fn format_tool_result_content(
@@ -2984,6 +3083,7 @@ fn operation_access(operation: &AgentOperation) -> OperationAccess {
         | AgentOperation::QueryDependencyGraph { .. }
         | AgentOperation::QuerySceneSemantic { .. }
         | AgentOperation::ToolSearch { .. }
+        | AgentOperation::LoadTool { .. }
         | AgentOperation::SkillSearch { .. }
         | AgentOperation::SkillRead { .. }
         | AgentOperation::RequestCapability { .. }
@@ -3328,6 +3428,9 @@ fn preview_operation(operation: &AgentOperation) -> String {
         AgentOperation::ToolSearch { query, .. } => {
             format!("Search AI tools: '{query}'")
         }
+        AgentOperation::LoadTool { name } => {
+            format!("Load AI tool schema `{name}`")
+        }
         AgentOperation::SkillSearch { query, source, .. } => match source {
             Some(source) => format!("Search {source} Varg skills: '{query}'"),
             None => format!("Search Varg skills: '{query}'"),
@@ -3483,6 +3586,9 @@ fn recovery_hint_for_success(operation: &AgentOperation) -> &'static str {
         AgentOperation::ToolSearch { .. } => {
             "No recovery needed; tool discovery does not grant permission."
         }
+        AgentOperation::LoadTool { .. } => {
+            "No recovery needed; loading a tool schema is read-only."
+        }
         AgentOperation::RequestCapability { .. } => {
             "No recovery needed; capability preflight does not grant permission."
         }
@@ -3572,6 +3678,7 @@ fn recovery_hint_for_failure(operation: &AgentOperation) -> &'static str {
         AgentOperation::ToolSearch { .. } => {
             "Try a shorter query or remove strict type, capability, stage, or risk filters."
         }
+        AgentOperation::LoadTool { .. } => "Use a tool name returned by tool_search.",
         AgentOperation::RequestCapability { .. } => {
             "Request a known capability or include tool names from tool_search results."
         }
@@ -3766,6 +3873,10 @@ fn tool_call_to_operation(tc: &ToolCall) -> EngineResult<AgentOperation> {
                 risk_max,
                 limit,
             })
+        }
+        "load_tool" => {
+            let name = args["name"].as_str().unwrap_or("").to_owned();
+            Ok(AgentOperation::LoadTool { name })
         }
         "skill_search" => {
             let query = args["query"].as_str().unwrap_or("").to_owned();
@@ -4035,19 +4146,19 @@ fn material_schema() -> serde_json::Value {
 fn mesh_operations_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "array",
-        "description": ".vmodel authoring operations are evaluated in order. Start with cube/box, then layer transforms, bevels, arrays, and inset panels.",
+        "description": ".vmodel authoring operations are evaluated in order. Start with a primitive, then layer transforms, bevels, arrays, mirroring, radial arrays, material slots, and inset panels.",
         "items": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["cube", "box", "bevel", "translate", "scale", "array", "inset_panel"],
-                    "description": "Supported .vmodel operation kind. Use inset_panel, not inset. Extrude, mirror, and boolean are not supported yet."
+                    "enum": ["cube", "box", "cylinder", "cone", "sphere", "plane", "bevel", "translate", "scale", "rotate", "array", "radial_array", "mirror", "material_slot", "inset_panel"],
+                    "description": "Supported .vmodel operation kind. Use inset_panel, not inset. Extrude and boolean are not supported yet."
                 },
                 "params": {
                     "type": "object",
-                    "description": "Operation parameters. cube/box: size, position/translation, scale, bevel. bevel: amount/radius. translate: offset/position. scale: value/scale. array: count plus offset, or axis and spacing. inset_panel: face, margin/amount, depth."
+                    "description": "Operation parameters. primitives: size, position/translation, scale, rotation degrees, segments, bevel, material. bevel: amount/radius. translate: offset/position. scale: value/scale. rotate: rotation/value/euler in degrees. array: count plus offset, or axis and spacing. radial_array: count, radius, axis, start_angle, step_angle. mirror: axis. material_slot: index. inset_panel: face, margin/amount, depth."
                 }
             },
             "required": ["type"]
@@ -4070,6 +4181,7 @@ fn modeling_object_schema(properties: serde_json::Value, required: &[&str]) -> s
 pub fn agent_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         tools::tool_search_definition(),
+        tools::tool_load_definition(),
         tools::request_capability_definition(),
         skills::skill_search_definition(),
         skills::skill_read_definition(),
@@ -4665,6 +4777,7 @@ mod tests {
         assert!(tools.contains("create_task"));
         assert!(tools.contains("update_task"));
         assert!(tools.contains("tool_search"));
+        assert!(tools.contains("load_tool"));
         assert!(tools.contains("request_capability"));
         assert!(tools.contains("skill_search"));
         assert!(tools.contains("skill_read"));
@@ -4755,6 +4868,22 @@ mod tests {
             } if id == "project://skills/combat" && path == "references/moves.md"
         ));
         assert!(!operation_access(&read).requires_write);
+    }
+
+    #[test]
+    fn load_tool_call_maps_to_read_only_operation() {
+        let load = tool_call_to_operation(&ToolCall {
+            id: "load-tool-1".into(),
+            name: "load_tool".into(),
+            arguments: serde_json::json!({ "name": "create_mesh_asset" }),
+        })
+        .unwrap();
+
+        assert!(
+            matches!(load, AgentOperation::LoadTool { ref name } if name == "create_mesh_asset")
+        );
+        assert!(!operation_access(&load).requires_write);
+        assert!(operation_can_feed_model(&load));
     }
 
     #[test]
@@ -4852,15 +4981,22 @@ mod tests {
             vec![
                 "cube",
                 "box",
+                "cylinder",
+                "cone",
+                "sphere",
+                "plane",
                 "bevel",
                 "translate",
                 "scale",
+                "rotate",
                 "array",
+                "radial_array",
+                "mirror",
+                "material_slot",
                 "inset_panel"
             ]
         );
         assert!(!operation_types.contains(&"extrude"));
-        assert!(!operation_types.contains(&"mirror"));
         assert!(!operation_types.contains(&"boolean"));
         assert!(!operation_types.contains(&"inset"));
     }

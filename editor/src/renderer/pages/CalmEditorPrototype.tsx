@@ -436,7 +436,7 @@ const buildTargets: BuildTargetOption[] = [
   },
 ];
 
-const componentTypes = ['Camera', 'Light', 'MeshRenderer', 'Rigidbody', 'Collider', 'Script', 'AudioSource', 'AnimationPlayer', 'AudioStreamPlayer2D', 'AudioStreamPlayer3D'];
+const componentTypes = ['Camera', 'Light', 'MeshRenderer', 'Environment', 'Skybox', 'Rigidbody', 'Collider', 'Script', 'AudioSource', 'AnimationPlayer', 'AudioStreamPlayer2D', 'AudioStreamPlayer3D'];
 const pickRadiusPx = 30;
 const viewportFovDeg = 60;
 const editorViewportTargetFps = 75;

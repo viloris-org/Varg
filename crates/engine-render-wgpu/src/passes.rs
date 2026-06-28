@@ -198,6 +198,75 @@ pub(crate) fn encode_shadow_pass(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_local_shadow_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    depth_view: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    vertex_buffer: &wgpu::Buffer,
+    index_buffer: &wgpu::Buffer,
+    instance_buffer: &wgpu::Buffer,
+    batches: &[RenderBatchDraw],
+    mesh_cache: &HashMap<String, MeshBuffers>,
+    slot: usize,
+) {
+    let column = (slot as u32) % LOCAL_SHADOW_ATLAS_COLUMNS;
+    let row = (slot as u32) / LOCAL_SHADOW_ATLAS_COLUMNS;
+    let x = column * LOCAL_SHADOW_TILE_RESOLUTION;
+    let y = row * LOCAL_SHADOW_TILE_RESOLUTION;
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("varg local shadow pass"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: if slot == 0 {
+                    wgpu::LoadOp::Clear(1.0)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_viewport(
+        x as f32,
+        y as f32,
+        LOCAL_SHADOW_TILE_RESOLUTION as f32,
+        LOCAL_SHADOW_TILE_RESOLUTION as f32,
+        0.0,
+        1.0,
+    );
+    pass.set_scissor_rect(
+        x,
+        y,
+        LOCAL_SHADOW_TILE_RESOLUTION,
+        LOCAL_SHADOW_TILE_RESOLUTION,
+    );
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+
+    for batch in batches {
+        if batch.count == 0 || !batch.casts_shadows {
+            continue;
+        }
+        let buffers = mesh_cache.get(&batch.mesh_name);
+        let (vertex_buf, index_buf, index_count) = match buffers {
+            Some(b) => (&b.vertex_buffer, &b.index_buffer, b.index_count),
+            None => (vertex_buffer, index_buffer, CUBE_INDEX_COUNT),
+        };
+        pass.set_vertex_buffer(0, vertex_buf.slice(..));
+        pass.set_vertex_buffer(1, instance_buffer.slice(..));
+        pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..index_count, 0, 0..batch.count);
+    }
+}
+
 pub(crate) fn encode_grid_pass(
     encoder: &mut wgpu::CommandEncoder,
     color_view: &wgpu::TextureView,
