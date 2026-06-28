@@ -49,13 +49,14 @@ impl RenderDevice for WgpuRenderDevice {
         self.upload_gi_probes(world);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
-        let use_cubemap = self.prepare_skybox_environment(world);
-        let skybox = skybox_uniform_from_world(world, use_cubemap);
+        let environment = self.prepare_environment(world);
+        self.queue.write_buffer(
+            &self.skybox_uniform,
+            0,
+            bytemuck::bytes_of(&environment.skybox),
+        );
         self.queue
-            .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
-        let fog = fog_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.fog_uniform, 0, bytemuck::bytes_of(&fog));
+            .write_buffer(&self.fog_uniform, 0, bytemuck::bytes_of(&environment.fog));
 
         if self.surface.is_some() {
             if self.surface_suspended {

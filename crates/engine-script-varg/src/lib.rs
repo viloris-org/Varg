@@ -283,6 +283,16 @@ pub enum VargRenderCommand {
     },
     /// Change GI intensity without replacing the current GI mode.
     SetGiIntensity(f32),
+    /// Enable and select a runtime weather preset.
+    SetWeatherPreset(String),
+    /// Set normalized time of day in hours `[0.0, 24.0)`.
+    SetWeatherTimeOfDay(f32),
+    /// Set cloud cover in `[0.0, 1.0]`.
+    SetWeatherCloudCover(f32),
+    /// Set precipitation in `[0.0, 1.0]`.
+    SetWeatherPrecipitation(f32),
+    /// Set global weather wind velocity.
+    SetWeatherWind(Vec3),
 }
 
 /// A lightweight procedural audio request emitted by Varg gameplay scripts.
@@ -715,6 +725,11 @@ enum RuntimeStatement {
         intensity: Expression,
     },
     SetGiIntensity(Expression),
+    SetWeatherPreset(Expression),
+    SetWeatherTimeOfDay(Expression),
+    SetWeatherCloudCover(Expression),
+    SetWeatherPrecipitation(Expression),
+    SetWeatherWind(Expression),
     SetMouseCapture(Expression),
     UiLabel {
         id: Expression,
@@ -3382,6 +3397,33 @@ impl RuntimeEnvironment<'_> {
                 self.render_commands
                     .push(VargRenderCommand::SetGiIntensity(intensity));
             }
+            RuntimeStatement::SetWeatherPreset(preset) => {
+                let preset = self
+                    .eval_string(preset)
+                    .unwrap_or_else(|| "clear".to_string());
+                self.render_commands
+                    .push(VargRenderCommand::SetWeatherPreset(preset));
+            }
+            RuntimeStatement::SetWeatherTimeOfDay(time_of_day) => {
+                let time_of_day = self.eval_number(time_of_day);
+                self.render_commands
+                    .push(VargRenderCommand::SetWeatherTimeOfDay(time_of_day));
+            }
+            RuntimeStatement::SetWeatherCloudCover(cloud_cover) => {
+                let cloud_cover = self.eval_number(cloud_cover);
+                self.render_commands
+                    .push(VargRenderCommand::SetWeatherCloudCover(cloud_cover));
+            }
+            RuntimeStatement::SetWeatherPrecipitation(precipitation) => {
+                let precipitation = self.eval_number(precipitation);
+                self.render_commands
+                    .push(VargRenderCommand::SetWeatherPrecipitation(precipitation));
+            }
+            RuntimeStatement::SetWeatherWind(wind) => {
+                let wind = self.eval_vec3(wind);
+                self.render_commands
+                    .push(VargRenderCommand::SetWeatherWind(wind));
+            }
             RuntimeStatement::SetMouseCapture(expression) => {
                 *self.mouse_capture = Some(self.eval_bool(expression));
             }
@@ -4497,6 +4539,45 @@ fn parse_runtime_statement(
     for method in ["render.gi.setIntensity", "Render.gi.setIntensity"] {
         if let Some(content) = method_args(line, method) {
             return Some(RuntimeStatement::SetGiIntensity(parse_expression(content)?));
+        }
+    }
+    for method in ["render.weather.set", "Render.weather.set"] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetWeatherPreset(parse_expression(
+                content,
+            )?));
+        }
+    }
+    for method in ["render.weather.setTimeOfDay", "Render.weather.setTimeOfDay"] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetWeatherTimeOfDay(parse_expression(
+                content,
+            )?));
+        }
+    }
+    for method in [
+        "render.weather.setCloudCover",
+        "Render.weather.setCloudCover",
+    ] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetWeatherCloudCover(parse_expression(
+                content,
+            )?));
+        }
+    }
+    for method in [
+        "render.weather.setPrecipitation",
+        "Render.weather.setPrecipitation",
+    ] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetWeatherPrecipitation(parse_expression(
+                content,
+            )?));
+        }
+    }
+    for method in ["render.weather.setWind", "Render.weather.setWind"] {
+        if let Some(content) = method_args(line, method) {
+            return Some(RuntimeStatement::SetWeatherWind(parse_expression(content)?));
         }
     }
     if line.trim() == "Input.captureMouse()" {
@@ -6643,6 +6724,61 @@ mod tests {
         assert_eq!(
             output.render_commands[2],
             VargRenderCommand::SetGiIntensity(0.5)
+        );
+    }
+
+    #[test]
+    fn runtime_emits_weather_commands() {
+        let (script, diagnostics) = compile_script_source(
+            "scripts/weather.varg",
+            r#"script Weather {
+    func update(_ dt: Float) {
+        render.weather.set("storm")
+        render.weather.setTimeOfDay(18.5)
+        render.weather.setCloudCover(0.85)
+        render.weather.setPrecipitation(0.7)
+        render.weather.setWind(Vec3(3.0, 0.0, -1.0))
+    }
+}
+"#,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let script = script.unwrap();
+        let output = script.run_hook(
+            "update",
+            VargRuntimeContext {
+                transform: Transform::default(),
+                input: engine_platform::InputState::default(),
+                delta_time: 0.016,
+                total_time: 0.016,
+                frame_index: 1,
+                exported_values: HashMap::new(),
+                state: HashMap::new(),
+                scene: VargSceneContext::default(),
+            },
+        );
+
+        assert_eq!(output.render_commands.len(), 5);
+        assert_eq!(
+            output.render_commands[0],
+            VargRenderCommand::SetWeatherPreset("storm".to_string())
+        );
+        assert_eq!(
+            output.render_commands[1],
+            VargRenderCommand::SetWeatherTimeOfDay(18.5)
+        );
+        assert_eq!(
+            output.render_commands[2],
+            VargRenderCommand::SetWeatherCloudCover(0.85)
+        );
+        assert_eq!(
+            output.render_commands[3],
+            VargRenderCommand::SetWeatherPrecipitation(0.7)
+        );
+        assert_eq!(
+            output.render_commands[4],
+            VargRenderCommand::SetWeatherWind(Vec3::new(3.0, 0.0, -1.0))
         );
     }
 

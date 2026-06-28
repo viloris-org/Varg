@@ -47,10 +47,10 @@ use engine_platform::{ActionMap, InputState};
 use engine_render::{
     AntiAliasingMode, BatteryPolicy, FrameGenerationKind, GuiDrawCmd, GuiDrawList, GuiTextureId,
     GuiVertex, HeadlessRenderDevice, ImageHandle, PresentStrategy, RenderApi, RenderDevice,
-    RenderFrame, RenderGlobalIllumination, RenderGraph, RenderGraphBuilder,
-    RenderPerformanceConfig, RenderPlatformClass, RenderProbeVolume, RenderQualityMode,
-    RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState, UiCompositionPolicy,
-    UpscalerKind,
+    RenderEnvironment, RenderFog, RenderFrame, RenderGlobalIllumination, RenderGraph,
+    RenderGraphBuilder, RenderPerformanceConfig, RenderPlatformClass, RenderProbeVolume,
+    RenderQualityMode, RenderScalingContext, RenderScalingSettings, RenderWorld, ThermalState,
+    UiCompositionPolicy, UpscalerKind,
 };
 #[cfg(feature = "asset-import")]
 use engine_render::{ImageDesc, ImageFormat, ImageUsage, RenderMaterialTextures};
@@ -212,12 +212,45 @@ pub struct RuntimeStats {
 pub struct RuntimeRenderEnvironment {
     /// Requested global illumination strategy.
     pub global_illumination: RenderGlobalIllumination,
+    /// Runtime weather simulation state.
+    pub weather: RuntimeWeatherState,
 }
 
 impl Default for RuntimeRenderEnvironment {
     fn default() -> Self {
         Self {
             global_illumination: RenderGlobalIllumination::default(),
+            weather: RuntimeWeatherState::default(),
+        }
+    }
+}
+
+/// Runtime weather state that scripts may drive between frames.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeWeatherState {
+    /// Whether runtime weather should override the extracted environment.
+    pub enabled: bool,
+    /// Weather preset name: `clear`, `overcast`, `rain`, `storm`, or `night`.
+    pub preset: String,
+    /// Local time of day in hours `[0.0, 24.0)`.
+    pub time_of_day: f32,
+    /// Cloud cover in `[0.0, 1.0]`.
+    pub cloud_cover: f32,
+    /// Precipitation intensity in `[0.0, 1.0]`.
+    pub precipitation: f32,
+    /// Global weather wind velocity.
+    pub wind: Vec3,
+}
+
+impl Default for RuntimeWeatherState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset: "clear".to_string(),
+            time_of_day: 12.0,
+            cloud_cover: 0.0,
+            precipitation: 0.0,
+            wind: Vec3::ZERO,
         }
     }
 }
@@ -723,6 +756,7 @@ impl<R: RenderDevice> RuntimeServices<R> {
         // ── render_submit ──────────────────────────────────────────────
         self.render_world = extract_render_world(&self.scene);
         self.render_world.global_illumination = self.render_environment.global_illumination.clone();
+        apply_runtime_weather_environment(&mut self.render_world, &self.render_environment.weather);
         Self::resolve_render_materials(&mut self.render_world, &self.mesh_resources);
         let frame = RenderFrame {
             frame_index: self.frame_counter.get(),
@@ -1052,6 +1086,27 @@ impl<R: RenderDevice> RuntimeServices<R> {
                         *screen_space_intensity = intensity;
                     }
                 }
+            }
+            VargRenderCommand::SetWeatherPreset(preset) => {
+                self.render_environment.weather.enabled = true;
+                self.render_environment.weather.preset = normalize_weather_preset(&preset);
+                apply_weather_preset_defaults(&mut self.render_environment.weather);
+            }
+            VargRenderCommand::SetWeatherTimeOfDay(time_of_day) => {
+                self.render_environment.weather.enabled = true;
+                self.render_environment.weather.time_of_day = normalize_time_of_day(time_of_day);
+            }
+            VargRenderCommand::SetWeatherCloudCover(cloud_cover) => {
+                self.render_environment.weather.enabled = true;
+                self.render_environment.weather.cloud_cover = cloud_cover.clamp(0.0, 1.0);
+            }
+            VargRenderCommand::SetWeatherPrecipitation(precipitation) => {
+                self.render_environment.weather.enabled = true;
+                self.render_environment.weather.precipitation = precipitation.clamp(0.0, 1.0);
+            }
+            VargRenderCommand::SetWeatherWind(wind) => {
+                self.render_environment.weather.enabled = true;
+                self.render_environment.weather.wind = wind;
             }
         }
     }
@@ -2869,6 +2924,148 @@ pub fn extract_render_world(scene: &Scene) -> RenderWorld {
     RenderWorld::extract(scene)
 }
 
+fn apply_runtime_weather_environment(world: &mut RenderWorld, weather: &RuntimeWeatherState) {
+    if !weather.enabled {
+        return;
+    }
+
+    let mut environment = world.resolved_environment();
+    blend_weather_into_environment(&mut environment, weather);
+    world.environment = Some(environment.clone());
+    world.skybox = environment
+        .sky_enabled
+        .then_some(engine_render::RenderSkybox {
+            cubemap: environment.sky_cubemap.clone(),
+            zenith_color: environment.sky_zenith_color,
+            horizon_color: environment.sky_horizon_color,
+            rotation_degrees: environment.sky_rotation_degrees,
+            intensity: environment.sky_intensity,
+        });
+    world.fog = environment.fog.enabled.then_some(environment.fog);
+}
+
+fn blend_weather_into_environment(
+    environment: &mut RenderEnvironment,
+    weather: &RuntimeWeatherState,
+) {
+    let preset = normalize_weather_preset(&weather.preset);
+    let cloud_cover = weather.cloud_cover.clamp(0.0, 1.0);
+    let precipitation = weather.precipitation.clamp(0.0, 1.0);
+    let sun = daylight_factor(weather.time_of_day);
+    let dusk = dusk_factor(weather.time_of_day);
+
+    let clear_zenith = mix_color([0.035, 0.05, 0.09], [0.18, 0.42, 0.78], sun);
+    let clear_horizon = mix_color([0.09, 0.08, 0.12], [0.62, 0.75, 0.92], sun);
+    let storm_zenith = [0.055, 0.065, 0.08];
+    let storm_horizon = [0.18, 0.2, 0.22];
+    let dusk_tint = [1.0, 0.55, 0.28];
+
+    let storm_mix = match preset.as_str() {
+        "storm" => 0.85_f32,
+        "rain" => 0.65_f32,
+        "overcast" => 0.5_f32,
+        "night" => 0.25_f32,
+        _ => 0.0_f32,
+    }
+    .max(cloud_cover * 0.75)
+    .max(precipitation * 0.7)
+    .clamp(0.0, 1.0);
+
+    environment.sky_enabled = true;
+    environment.sky_cubemap = None;
+    environment.sky_zenith_color = mix_color(clear_zenith, storm_zenith, storm_mix);
+    environment.sky_horizon_color = mix_color(clear_horizon, storm_horizon, storm_mix);
+    environment.sky_horizon_color =
+        mix_color(environment.sky_horizon_color, dusk_tint, dusk * 0.35);
+    environment.sky_rotation_degrees = weather.wind.x.atan2(weather.wind.z).to_degrees();
+    environment.sky_intensity =
+        (0.18 + sun * 0.95) * (1.0 - cloud_cover * 0.42) * (1.0 - precipitation * 0.18);
+
+    let ambient = 0.18 + sun * 0.82;
+    environment.ambient_color = mix_color([0.025, 0.03, 0.04], [0.08, 0.09, 0.1], sun);
+    environment.ambient_intensity = ambient * (1.0 - cloud_cover * 0.35);
+
+    let fog_density = 0.00025 + cloud_cover * 0.0008 + precipitation * 0.0014;
+    environment.fog = RenderFog {
+        enabled: fog_density > 0.0003,
+        density: fog_density,
+        color: mix_color(
+            environment.sky_horizon_color,
+            [0.12, 0.13, 0.15],
+            precipitation * 0.5,
+        ),
+    };
+    environment.exposure = (0.78 + sun * 0.42).max(0.45) * (1.0 - cloud_cover * 0.15);
+    environment.bloom_intensity = (0.03 + dusk * 0.08) * (1.0 - precipitation * 0.3);
+    environment.ssgi_intensity = (0.35 + sun * 0.35) * (1.0 - cloud_cover * 0.2);
+    environment.ssr_intensity = if precipitation > 0.0 {
+        (0.22 + precipitation * 0.28).min(0.65)
+    } else {
+        environment.ssr_intensity
+    };
+}
+
+fn normalize_weather_preset(preset: &str) -> String {
+    match preset.trim().to_ascii_lowercase().as_str() {
+        "overcast" | "cloudy" => "overcast".to_string(),
+        "rain" | "rainy" => "rain".to_string(),
+        "storm" | "stormy" | "thunder" => "storm".to_string(),
+        "night" => "night".to_string(),
+        _ => "clear".to_string(),
+    }
+}
+
+fn apply_weather_preset_defaults(weather: &mut RuntimeWeatherState) {
+    match weather.preset.as_str() {
+        "overcast" => {
+            weather.cloud_cover = weather.cloud_cover.max(0.75);
+            weather.precipitation = weather.precipitation.min(0.2);
+        }
+        "rain" => {
+            weather.cloud_cover = weather.cloud_cover.max(0.82);
+            weather.precipitation = weather.precipitation.max(0.45);
+        }
+        "storm" => {
+            weather.cloud_cover = weather.cloud_cover.max(0.95);
+            weather.precipitation = weather.precipitation.max(0.75);
+        }
+        "night" => {
+            weather.time_of_day = 22.0;
+            weather.cloud_cover = weather.cloud_cover.max(0.2);
+        }
+        _ => {
+            weather.cloud_cover = weather.cloud_cover.min(0.25);
+            weather.precipitation = weather.precipitation.min(0.05);
+        }
+    }
+}
+
+fn normalize_time_of_day(time_of_day: f32) -> f32 {
+    time_of_day.rem_euclid(24.0)
+}
+
+fn daylight_factor(time_of_day: f32) -> f32 {
+    let hour = normalize_time_of_day(time_of_day);
+    let angle = ((hour - 6.0) / 12.0) * std::f32::consts::PI;
+    angle.sin().clamp(0.0, 1.0)
+}
+
+fn dusk_factor(time_of_day: f32) -> f32 {
+    let hour = normalize_time_of_day(time_of_day);
+    let sunrise = (1.0 - ((hour - 6.0).abs() / 2.0)).clamp(0.0, 1.0);
+    let sunset = (1.0 - ((hour - 18.0).abs() / 2.0)).clamp(0.0, 1.0);
+    sunrise.max(sunset)
+}
+
+fn mix_color(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        a[0] * (1.0 - t) + b[0] * t,
+        a[1] * (1.0 - t) + b[1] * t,
+        a[2] * (1.0 - t) + b[2] * t,
+    ]
+}
+
 /// Builds the native runtime performance policy from environment overrides.
 ///
 /// Supported variables are `VARG_PRESENT_MODE`, `VARG_TARGET_FPS`,
@@ -4511,6 +4708,71 @@ mod tests {
             services.render_world.global_illumination,
             RenderGlobalIllumination::ScreenSpace { intensity: 0.35 }
         );
+    }
+
+    #[test]
+    fn varg_script_can_drive_runtime_weather_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("weather.varg"),
+            r#"script WeatherController {
+    func update(_ dt: Float) {
+        render.weather.set("storm")
+        render.weather.setTimeOfDay(18.0)
+        render.weather.setCloudCover(0.9)
+        render.weather.setPrecipitation(0.8)
+        render.weather.setWind(Vec3(4.0, 0.0, -2.0))
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let mut services = RuntimeServices::minimal(EngineConfig::default());
+        services.set_project_root(root.path());
+        let entity = services.scene.create_object("Weather").unwrap();
+        services
+            .scene
+            .upsert_component(
+                entity,
+                ComponentData::Script(engine_ecs::ScriptComponent::new("scripts/weather.varg")),
+            )
+            .unwrap();
+
+        services
+            .tick_game_frame(Duration::from_millis(16), false)
+            .unwrap();
+
+        let weather = &services.render_environment.weather;
+        assert!(weather.enabled);
+        assert_eq!(weather.preset, "storm");
+        assert_eq!(weather.time_of_day, 18.0);
+        assert_eq!(weather.cloud_cover, 0.9);
+        assert_eq!(weather.precipitation, 0.8);
+        assert_eq!(weather.wind, Vec3::new(4.0, 0.0, -2.0));
+
+        let environment = services
+            .render_world
+            .environment
+            .as_ref()
+            .expect("weather should author render environment");
+        assert!(environment.sky_enabled);
+        assert!(environment.fog.enabled);
+        assert!(environment.fog.density > 0.001);
+        assert!(environment.ssr_intensity > 0.22);
+        assert!(services.render_world.active_skybox().is_some());
+    }
+
+    #[test]
+    fn runtime_weather_is_inactive_by_default() {
+        let mut world = RenderWorld::default();
+        apply_runtime_weather_environment(&mut world, &RuntimeWeatherState::default());
+
+        assert!(world.environment.is_none());
+        assert!(world.skybox.is_none());
+        assert!(world.fog.is_none());
     }
 
     #[test]

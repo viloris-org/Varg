@@ -1829,9 +1829,9 @@ impl WgpuRenderDevice {
             label: Some("varg skybox uniform"),
             contents: bytemuck::bytes_of(&SkyboxUniform {
                 view_rotation_only: IDENTITY_MAT4,
-                zenith_color: [0.09, 0.11, 0.14, 1.0],
-                horizon_color: [0.18, 0.2, 0.22, 1.0],
-                rotation_intensity: [0.0, 0.35, 0.0, 0.0],
+                zenith_color: [0.13, 0.23, 0.38, 1.0],
+                horizon_color: [0.62, 0.68, 0.74, 1.0],
+                rotation_intensity: [0.0, 0.8, 0.0, 0.0],
                 use_cubemap: [0, 0, 0, 0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1850,7 +1850,15 @@ impl WgpuRenderDevice {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        for face in 0..6u32 {
+        let default_skybox_faces: [[u8; 4]; 6] = [
+            [132, 145, 164, 255],
+            [94, 108, 132, 255],
+            [58, 96, 152, 255],
+            [98, 86, 72, 255],
+            [178, 162, 132, 255],
+            [84, 98, 124, 255],
+        ];
+        for (face, rgba) in default_skybox_faces.iter().enumerate() {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &skybox_default_cubemap,
@@ -1858,11 +1866,11 @@ impl WgpuRenderDevice {
                     origin: wgpu::Origin3d {
                         x: 0,
                         y: 0,
-                        z: face,
+                        z: face as u32,
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &[42, 46, 52, 255],
+                rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4),
@@ -2095,16 +2103,16 @@ impl WgpuRenderDevice {
                 output_height: height as f32,
                 inv_output_width: 1.0 / width as f32,
                 inv_output_height: 1.0 / height as f32,
-                exposure: 1.0,
-                bloom_intensity: 0.04,
+                exposure: 1.08,
+                bloom_intensity: 0.12,
                 ssao_enabled: 0.0,
                 upscale_sharpness: 0.35,
                 ssgi_enabled: 1.0,
-                ssgi_intensity: SSGI_INTENSITY,
+                ssgi_intensity: 0.45,
                 ssr_enabled: 1.0,
-                ssr_intensity: 0.35,
+                ssr_intensity: 0.22,
                 taa_reset: 1.0,
-                taa_history_weight: 0.72,
+                taa_history_weight: 0.62,
                 taa_enabled: 1.0,
                 _pad: 0.0,
             }),
@@ -2599,9 +2607,9 @@ impl WgpuRenderDevice {
         let bloom_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("varg bloom uniform"),
             contents: bytemuck::bytes_of(&BloomUniform {
-                intensity: 0.04,
-                threshold: 1.0,
-                knee: 0.5,
+                intensity: 0.12,
+                threshold: 0.92,
+                knee: 0.38,
                 _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,

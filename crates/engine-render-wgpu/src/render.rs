@@ -20,14 +20,15 @@ use engine_core::{EngineError, EngineResult, Handle};
 use engine_render::{RenderTargetDesc, RenderWorld};
 use std::time::Instant;
 
+pub(crate) struct PreparedEnvironment {
+    pub(crate) skybox: SkyboxUniform,
+    pub(crate) fog: FogUniform,
+}
+
 impl WgpuRenderDevice {
     pub(crate) fn screen_space_gi_enabled(&self, world: &RenderWorld) -> bool {
         self.ssgi_compute_pipeline.is_some()
-            && world
-                .environment
-                .as_ref()
-                .map(|environment| environment.ssgi_enabled)
-                .unwrap_or(true)
+            && world.resolved_environment().ssgi_enabled
             && matches!(
                 world.global_illumination,
                 engine_render::RenderGlobalIllumination::ScreenSpace { .. }
@@ -35,19 +36,11 @@ impl WgpuRenderDevice {
     }
 
     pub(crate) fn environment_ssao_enabled(world: &RenderWorld) -> bool {
-        world
-            .environment
-            .as_ref()
-            .map(|environment| environment.ssao_enabled)
-            .unwrap_or(true)
+        world.resolved_environment().ssao_enabled
     }
 
     pub(crate) fn environment_bloom_enabled(world: &RenderWorld) -> bool {
-        world
-            .environment
-            .as_ref()
-            .map(|environment| environment.bloom_enabled)
-            .unwrap_or(true)
+        world.resolved_environment().bloom_enabled
     }
 
     pub(crate) fn screen_space_gi_intensity(world: &RenderWorld) -> f32 {
@@ -59,9 +52,9 @@ impl WgpuRenderDevice {
         }
     }
 
-    pub(crate) fn prepare_skybox_environment(&mut self, world: &RenderWorld) -> bool {
+    pub(crate) fn prepare_environment(&mut self, world: &RenderWorld) -> PreparedEnvironment {
         let requested = world
-            .skybox
+            .active_skybox()
             .as_ref()
             .and_then(|skybox| skybox.cubemap.as_deref())
             .and_then(|label| self.skybox_cubemaps.get(label).copied())
@@ -113,7 +106,11 @@ impl WgpuRenderDevice {
             _ => {}
         }
 
-        requested.is_some()
+        let uses_skybox_cubemap = requested.is_some();
+        PreparedEnvironment {
+            skybox: skybox_uniform_from_world(world, uses_skybox_cubemap),
+            fog: fog_uniform_from_world(world),
+        }
     }
 
     pub(crate) fn upload_lighting_uniform(&mut self, world: &RenderWorld) {
@@ -738,7 +735,7 @@ impl WgpuRenderDevice {
             batch_count = batches.len(),
             total_instances,
             has_camera = world.camera.is_some(),
-            skybox = world.skybox.is_some(),
+            skybox = world.active_skybox().is_some(),
             encoder_label,
             "render_world_to_target"
         );
@@ -746,13 +743,14 @@ impl WgpuRenderDevice {
         self.upload_gi_probes(world);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
-        let use_cubemap = self.prepare_skybox_environment(world);
-        let skybox = skybox_uniform_from_world(world, use_cubemap);
+        let environment = self.prepare_environment(world);
+        self.queue.write_buffer(
+            &self.skybox_uniform,
+            0,
+            bytemuck::bytes_of(&environment.skybox),
+        );
         self.queue
-            .write_buffer(&self.skybox_uniform, 0, bytemuck::bytes_of(&skybox));
-        let fog = fog_uniform_from_world(world);
-        self.queue
-            .write_buffer(&self.fog_uniform, 0, bytemuck::bytes_of(&fog));
+            .write_buffer(&self.fog_uniform, 0, bytemuck::bytes_of(&environment.fog));
 
         // Resolve target dimensions before any mutable operations.
         let (tw, th) = {
@@ -906,44 +904,22 @@ impl WgpuRenderDevice {
         bloom_enabled: bool,
         _encoder_label: &str,
     ) -> FrameResources {
-        let environment = world.environment.as_ref();
-        let ssao_enabled = ssao_enabled
-            && environment
-                .map(|environment| environment.ssao_enabled)
-                .unwrap_or(true);
-        let ssgi_enabled = ssgi_enabled
-            && environment
-                .map(|environment| environment.ssgi_enabled)
-                .unwrap_or(true);
-        let bloom_enabled = bloom_enabled
-            && environment
-                .map(|environment| environment.bloom_enabled)
-                .unwrap_or(true);
-        let exposure = environment
-            .map(|environment| environment.exposure.max(0.0))
-            .unwrap_or(1.0);
-        let bloom_intensity = environment
-            .map(|environment| environment.bloom_intensity.max(0.0))
-            .unwrap_or(0.04);
-        let ssao_radius = environment
-            .map(|environment| environment.ssao_radius.max(0.0))
-            .unwrap_or(SSAO_RADIUS);
-        let ssao_intensity = environment
-            .map(|environment| environment.ssao_intensity.max(0.0))
-            .unwrap_or(1.0);
-        let ssgi_radius = environment
-            .map(|environment| environment.ssgi_radius.max(0.0))
-            .unwrap_or(SSGI_RADIUS);
-        let ssgi_intensity = environment
-            .map(|environment| environment.ssgi_intensity.max(0.0))
-            .unwrap_or(ssgi_intensity);
-        let ssr_enabled = !diagnostics::disable_ssr()
-            && environment
-                .map(|environment| environment.ssr_enabled)
-                .unwrap_or(true);
-        let ssr_intensity = environment
-            .map(|environment| environment.ssr_intensity.max(0.0))
-            .unwrap_or(0.35);
+        let environment = world.resolved_environment();
+        let ssao_enabled = ssao_enabled && environment.ssao_enabled;
+        let ssgi_enabled = ssgi_enabled && environment.ssgi_enabled;
+        let bloom_enabled = bloom_enabled && environment.bloom_enabled;
+        let exposure = environment.exposure.max(0.0);
+        let bloom_intensity = environment.bloom_intensity.max(0.0);
+        let ssao_radius = environment.ssao_radius.max(0.0);
+        let ssao_intensity = environment.ssao_intensity.max(0.0);
+        let ssgi_radius = environment.ssgi_radius.max(0.0);
+        let ssgi_intensity = if world.environment.is_some() {
+            environment.ssgi_intensity.max(0.0)
+        } else {
+            ssgi_intensity
+        };
+        let ssr_enabled = !diagnostics::disable_ssr() && environment.ssr_enabled;
+        let ssr_intensity = environment.ssr_intensity.max(0.0);
         let taa_enabled = self.anti_aliasing == engine_render::AntiAliasingMode::Taa
             && self
                 .active_frame_plan
@@ -978,7 +954,7 @@ impl WgpuRenderDevice {
                 } else {
                     0.0
                 },
-                taa_history_weight: 0.72,
+                taa_history_weight: 0.62,
                 taa_enabled: if taa_enabled { 1.0 } else { 0.0 },
                 _pad: 0.0,
             }),
@@ -1010,7 +986,7 @@ impl WgpuRenderDevice {
                 thickness: 0.055,
                 sample_count: 12.0,
                 frame_index: self.submitted_worlds as f32,
-                history_blend: 0.86,
+                history_blend: 0.72,
                 reset_history: if self.reset_temporal_history {
                     1.0
                 } else {

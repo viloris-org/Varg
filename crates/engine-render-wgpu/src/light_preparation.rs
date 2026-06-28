@@ -321,6 +321,14 @@ fn csm_cascade_view_depth_bounds_for_plan(
 
 pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUniform {
     let mut uniform = LightingUniform::default();
+    let environment = world.resolved_environment();
+    let intensity = environment.ambient_intensity.max(0.0);
+    uniform.ambient = [
+        environment.ambient_color[0] * intensity,
+        environment.ambient_color[1] * intensity,
+        environment.ambient_color[2] * intensity,
+        1.0,
+    ];
     let mut count = 0usize;
     let local_shadow_lights = select_local_shadow_lights(world);
 
@@ -345,7 +353,7 @@ pub(crate) fn lighting_uniform_from_world(world: &RenderWorld) -> LightingUnifor
         uniform.lights[0] = ForwardLightUniform {
             position_type: [0.0, 0.0, 0.0, 0.0],
             direction_range: [-0.5, -1.0, -0.25, 0.0],
-            color_intensity: [1.0, 1.0, 1.0, 1.0],
+            color_intensity: [1.0, 0.96, 0.9, 1.35],
             spot_angles: [1.0, 1.0, 1.0, 0.0],
             quality: [2.0, 1.0, 1.0, 0.0],
         };
@@ -386,7 +394,7 @@ pub(crate) fn cluster_lighting_data_from_world(
         lights.push(ForwardLightUniform {
             position_type: [0.0, 0.0, 0.0, 0.0],
             direction_range: [-0.5, -1.0, -0.25, 0.0],
-            color_intensity: [1.0, 1.0, 1.0, 1.0],
+            color_intensity: [1.0, 0.96, 0.9, 1.35],
             spot_angles: [1.0, 1.0, 0.0, 0.0],
             quality: [2.0, 1.0, -1.0, 0.0],
         });
@@ -689,7 +697,7 @@ fn probe_irradiance_for_normal(
     let mut irradiance = engine_core::math::Vec3::new(0.018, 0.02, 0.024)
         * sky_visibility
         * (0.35 + sky_direction * 0.65);
-    if let Some(skybox) = &world.skybox {
+    if let Some(skybox) = world.active_skybox() {
         let sky_mix = (normal.y * 0.5 + 0.5).clamp(0.0, 1.0);
         let horizon = engine_core::math::Vec3::new(
             skybox.horizon_color[0],

@@ -148,6 +148,30 @@ fn fullscreen_shaders_use_oversized_triangle() {
 }
 
 #[test]
+fn skybox_uses_camera_rotation_without_translation() {
+    let world = RenderWorld {
+        camera: Some(engine_render::RenderCamera {
+            object: engine_core::EntityId::from_u128(42),
+            transform: engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(12.0, 5.0, -8.0),
+                ..engine_core::math::Transform::IDENTITY
+            },
+            projection: engine_render::RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.1,
+            far: 100.0,
+            look_at_target: Some(engine_core::math::Vec3::new(12.0, 5.0, -9.0)),
+        }),
+        ..RenderWorld::default()
+    };
+
+    let skybox = crate::scene_uniforms::skybox_uniform_from_world(&world, false);
+
+    assert_eq!(skybox.view_rotation_only[3], [0.0, 0.0, 0.0, 1.0]);
+    assert!(SKYBOX_SHADER.contains("vec4<f32>(view_ray, 0.0)"));
+}
+
+#[test]
 fn forward_shader_binds_and_samples_all_csm_cascades() {
     for cascade in 0..CSM_CASCADE_COUNT {
         assert!(FORWARD_SHADER.contains(&format!("var csm_shadow_{cascade}:")));
@@ -155,8 +179,8 @@ fn forward_shader_binds_and_samples_all_csm_cascades() {
     }
     assert!(FORWARD_SHADER.contains("params: vec4<f32>"));
     assert!(FORWARD_SHADER.contains("let texel = csm.params.y"));
-    assert!(FORWARD_SHADER.contains("blocker_ratio"));
-    assert!(FORWARD_SHADER.contains("let penumbra = mix(0.85, 3.5, blocker_ratio)"));
+    assert!(FORWARD_SHADER.contains("let filter_radius = texel * mix(1.15, 2.35"));
+    assert!(FORWARD_SHADER.contains("corner_weight"));
     assert!(!FORWARD_SHADER.contains("let texel = 1.0 / 4096.0"));
     assert!(!FORWARD_SHADER.contains("- 4.0"));
 }
@@ -371,10 +395,11 @@ fn screen_space_reflections_are_enabled_with_camera_matrices() {
     assert!(render_source.contains("inv_view_projection"));
     assert!(render_source.contains("view_projection: camera.view_projection"));
     assert!(render_source.contains("diagnostics::disable_ssr()"));
-    assert!(render_source.contains("unwrap_or(0.35)"));
+    assert!(render_source.contains("world.resolved_environment()"));
+    assert!(render_source.contains("environment.ssr_intensity.max(0.0)"));
     assert!(render_source.contains("ssr_intensity,"));
     assert!(constructor_source.contains("ssr_enabled: 1.0"));
-    assert!(constructor_source.contains("ssr_intensity: 0.35"));
+    assert!(constructor_source.contains("ssr_intensity: 0.22"));
     assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_SSR"));
 }
 
@@ -728,6 +753,17 @@ fn compute_ibl_sampling_uses_explicit_lod_and_dynamic_mip_resolution() {
     assert!(IBL_IRRADIANCE_SHADER.contains("textureSampleLevel(env_map"));
     assert!(IBL_PREFILTER_SHADER.contains("textureSampleLevel(env_map"));
     assert!(IBL_PREFILTER_SHADER.contains("let res = params.resolution"));
+    assert!(IBL_IRRADIANCE_SHADER.contains("let right = normalize(cross(up, dir))"));
+    assert!(IBL_IRRADIANCE_SHADER.contains("let tangent_up = cross(dir, right)"));
+    assert!(!IBL_IRRADIANCE_SHADER.contains("tangent.y * vec3<f32>(0.0, 1.0, 0.0)"));
+}
+
+#[test]
+fn bloom_downsample_uses_soft_knee_threshold() {
+    assert!(BLOOM_DOWNSAMPLE_SHADER.contains("let knee = params.y"));
+    assert!(BLOOM_DOWNSAMPLE_SHADER.contains("let knee_start = threshold - soft"));
+    assert!(BLOOM_DOWNSAMPLE_SHADER.contains("soft_contribution"));
+    assert!(!BLOOM_DOWNSAMPLE_SHADER.contains("color *= max(brightness - threshold"));
 }
 
 #[test]
@@ -738,7 +774,7 @@ fn post_shader_leaves_srgb_encoding_to_the_output_attachment() {
 
 #[test]
 fn post_shader_uses_godot_aces_transform() {
-    assert!(POST_SHADER.contains("let exposure_bias = 1.8"));
+    assert!(POST_SHADER.contains("let exposure_bias = 1.28"));
     assert!(POST_SHADER.contains("let rgb_to_rrt = mat3x3<f32>"));
     assert!(POST_SHADER.contains("let odt_to_rgb = mat3x3<f32>"));
     assert!(POST_SHADER.contains("0.0245786"));
@@ -1179,7 +1215,7 @@ fn uses_fallback_directional_light_when_scene_has_no_lights() {
 
     assert_eq!(uniform.params[0], 1);
     assert_eq!(uniform.lights[0].position_type[3], 0.0);
-    assert_eq!(uniform.lights[0].color_intensity[3], 1.0);
+    assert_eq!(uniform.lights[0].color_intensity[3], 1.35);
     assert_eq!(uniform.lights[0].spot_angles[2], 1.0);
 }
 

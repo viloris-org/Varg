@@ -2,25 +2,7 @@ use crate::{math::*, uniforms::*};
 use engine_render::RenderWorld;
 
 pub(crate) fn skybox_uniform_from_world(world: &RenderWorld, use_cubemap: bool) -> SkyboxUniform {
-    let sky = world.environment.as_ref().and_then(|environment| {
-        environment.sky_enabled.then_some((
-            environment.sky_zenith_color,
-            environment.sky_horizon_color,
-            environment.sky_rotation_degrees,
-            environment.sky_intensity,
-        ))
-    });
-    let sky = sky.or_else(|| {
-        world.skybox.as_ref().map(|skybox| {
-            (
-                skybox.zenith_color,
-                skybox.horizon_color,
-                skybox.rotation_degrees,
-                skybox.intensity,
-            )
-        })
-    });
-    let Some((zenith_color, horizon_color, rotation_degrees, intensity)) = sky else {
+    let Some(skybox) = world.active_skybox() else {
         return SkyboxUniform {
             view_rotation_only: IDENTITY_MAT4,
             zenith_color: [0.15, 0.35, 0.65, 1.0],
@@ -30,51 +12,36 @@ pub(crate) fn skybox_uniform_from_world(world: &RenderWorld, use_cubemap: bool) 
         };
     };
 
-    let eye = world
-        .camera
-        .as_ref()
-        .map(|c| c.transform.translation)
-        .unwrap_or(engine_core::math::Vec3::new(0.0, 0.0, 5.0));
-    let target = world
-        .camera
-        .as_ref()
-        .and_then(|c| c.look_at_target)
-        .unwrap_or_else(|| {
-            let q = world
-                .camera
-                .as_ref()
-                .map(|c| c.transform.rotation)
-                .unwrap_or(engine_core::math::Quat::IDENTITY);
-            let fwd = engine_core::math::Vec3::new(
-                2.0 * (q.x * q.z + q.w * q.y),
-                2.0 * (q.y * q.z - q.w * q.x),
-                1.0 - 2.0 * (q.x * q.x + q.y * q.y),
-            );
-            engine_core::math::Vec3::new(eye.x - fwd.x, eye.y - fwd.y, eye.z - fwd.z)
-        });
-    let view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
+    let (_, eye, target, _) = camera_temporal_basis(world, 1.0);
+    let mut view = look_at_rh(eye, target, engine_core::math::Vec3::new(0.0, 1.0, 0.0));
+    view[3] = [0.0, 0.0, 0.0, 1.0];
 
     SkyboxUniform {
         view_rotation_only: view,
-        zenith_color: [zenith_color[0], zenith_color[1], zenith_color[2], 1.0],
-        horizon_color: [horizon_color[0], horizon_color[1], horizon_color[2], 1.0],
-        rotation_intensity: [rotation_degrees, intensity, 0.0, 0.0],
+        zenith_color: [
+            skybox.zenith_color[0],
+            skybox.zenith_color[1],
+            skybox.zenith_color[2],
+            1.0,
+        ],
+        horizon_color: [
+            skybox.horizon_color[0],
+            skybox.horizon_color[1],
+            skybox.horizon_color[2],
+            1.0,
+        ],
+        rotation_intensity: [skybox.rotation_degrees, skybox.intensity, 0.0, 0.0],
         use_cubemap: [u32::from(use_cubemap), 0, 0, 0],
     }
 }
 
 pub(crate) fn fog_uniform_from_world(world: &RenderWorld) -> FogUniform {
-    match world
-        .environment
-        .as_ref()
-        .map(|environment| &environment.fog)
-        .or(world.fog.as_ref())
-    {
+    match world.active_fog() {
         Some(fog) => FogUniform {
             density: fog.density,
             _pad: [0.0; 3],
             color: fog.color,
-            enabled: if fog.enabled { 1.0 } else { 0.0 },
+            enabled: 1.0,
         },
         None => FogUniform {
             density: 0.0,

@@ -54,6 +54,12 @@ import {
   projectToScreen,
 } from './gizmoMath';
 import { safeJsonStringify } from '../safeJson';
+import {
+  buildEditorCommands,
+  filterEditorCommands,
+  type EditorCommand,
+  type EditorCommandId,
+} from './editorCommands';
 
 const AiPanel = lazy(() => import('./AiPanel'));
 const ScriptEditor = lazy(() => import('./ScriptEditor'));
@@ -95,6 +101,10 @@ type BottomTab = 'console' | 'problems' | 'tasks' | 'assets' | 'performance';
 type InspectorSection = 'transform' | 'script' | 'input' | 'physics' | 'render' | 'tags';
 type SceneViewMode = '2d' | '3d';
 type ViewMode = SceneViewMode | 'scripts';
+type AssetViewMode = 'list' | 'grid';
+type AssetSortMode = 'name' | 'kind' | 'path';
+type SceneTypeFilter = 'all' | 'camera' | 'light' | 'mesh' | 'audio' | 'entity';
+type ConsoleLevelFilter = 'all' | 'error' | 'warn' | 'info';
 type BuildTarget = 'windows-x64' | 'linux-x64' | 'macos-universal' | 'android-arm64' | 'ios-universal' | 'embedded-linux';
 type BuildFormat = 'folder' | 'exe' | 'msi' | 'nsis' | 'appimage' | 'deb' | 'rpm' | 'dmg' | 'apk' | 'aab' | 'ipa' | 'ipk';
 
@@ -549,6 +559,24 @@ function sceneObjectGroup(object: SceneObject): string {
   return 'Scene';
 }
 
+function sceneTypeFamily(entity: { type: string }) {
+  const type = entity.type.toLowerCase();
+  if (type.includes('camera')) return 'camera';
+  if (type.includes('light')) return 'light';
+  if (type.includes('mesh') || type.includes('terrain') || type.includes('model')) return 'mesh';
+  if (type.includes('audio')) return 'audio';
+  return 'entity';
+}
+
+function sceneIconForType(entity: { type: string }) {
+  const family = sceneTypeFamily(entity);
+  if (family === 'camera') return <IconView />;
+  if (family === 'light') return <IconSparkles />;
+  if (family === 'mesh') return <IconModel />;
+  if (family === 'audio') return <IconSend />;
+  return <IconPackage />;
+}
+
 function mapSceneObject(object: SceneObject): SceneEntity {
   return {
     id: object.id,
@@ -571,6 +599,28 @@ function mapAsset(asset: ProjectAssetMeta) {
     path: asset.source_path,
     updated: asset.importer || 'imported',
   };
+}
+
+function assetFamily(asset: { kind: string; path: string }) {
+  const value = `${asset.kind} ${asset.path}`.toLowerCase();
+  if (/scene|\.vscene$|\.scene$/.test(value)) return 'scene';
+  if (/script|\.varg$|\.ts$|\.js$|\.lua$/.test(value)) return 'script';
+  if (/material|\.mat$|\.vasset$/.test(value)) return 'material';
+  if (/animation|\/animations?\//.test(value)) return 'animation';
+  if (/audio|\.wav$|\.ogg$|\.mp3$|\.flac$/.test(value)) return 'audio';
+  if (/model|mesh|\.gltf$|\.glb$|\.fbx$/.test(value)) return 'model';
+  if (/texture|image|\.png$|\.jpg$|\.jpeg$|\.ktx2$/.test(value)) return 'texture';
+  return 'other';
+}
+
+function assetIconForKind(asset: { kind: string; path: string }) {
+  const family = assetFamily(asset);
+  if (family === 'script') return <IconCode />;
+  if (family === 'scene') return <IconView />;
+  if (family === 'material' || family === 'model') return <IconModel />;
+  if (family === 'animation') return <IconRotate />;
+  if (family === 'audio') return <IconSend />;
+  return <IconFile />;
 }
 
 function SectionHeader({
@@ -1202,13 +1252,23 @@ export default function CalmEditorPrototype({
   const [selectedEntityId, setSelectedEntityId] = useState('player');
   const [tool, setTool] = useState<TransformTool>('move');
   const [bottomTab, setBottomTab] = useState<BottomTab>('problems');
+  const [drawerSearch, setDrawerSearch] = useState('');
+  const [consoleLevelFilter, setConsoleLevelFilter] = useState<ConsoleLevelFilter>('all');
   const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
   const [shellState, setShellState] = useState<ShellState | null>(null);
   const [sceneVersion, setSceneVersion] = useState(0);
   const [sceneSearch, setSceneSearch] = useState('');
+  const [sceneTypeFilter, setSceneTypeFilter] = useState<SceneTypeFilter>('all');
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [entityVisibility, setEntityVisibility] = useState<Record<string, boolean>>({});
+  const [entityLocks, setEntityLocks] = useState<Record<string, boolean>>({});
   const [assetSearch, setAssetSearch] = useState('');
+  const [assetKindFilter, setAssetKindFilter] = useState('all');
+  const [assetSortMode, setAssetSortMode] = useState<AssetSortMode>('name');
+  const [assetViewMode, setAssetViewMode] = useState<AssetViewMode>('list');
   const [projectFileSearch, setProjectFileSearch] = useState('');
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [showDrawer, setShowDrawer] = useState(true);
@@ -1275,6 +1335,7 @@ export default function CalmEditorPrototype({
     render: false,
     tags: true,
   });
+  const [openComponents, setOpenComponents] = useState<Record<string, boolean>>({});
   const [entities, setEntities] = useState(mockSceneEntities);
   const [projectAssets, setProjectAssets] = useState(mockAssets);
   const [consoleEntries, setConsoleEntries] = useState<EditorConsoleEntry[]>([]);
@@ -1309,8 +1370,13 @@ export default function CalmEditorPrototype({
       components: selectedEntityDetails.components,
     }
     : selectedEntity;
-  const filteredEntities = entities.filter((entity) => {
+  const filteredEntities = entities.map((entity) => ({
+    ...entity,
+    visible: entityVisibility[entity.id] ?? entity.visible,
+    locked: entityLocks[entity.id] ?? entity.locked,
+  })).filter((entity) => {
     const query = sceneSearch.trim().toLowerCase();
+    if (sceneTypeFilter !== 'all' && sceneTypeFamily(entity) !== sceneTypeFilter) return false;
     if (!query) return true;
     return `${entity.name} ${entity.type} ${entity.group}`.toLowerCase().includes(query);
   });
@@ -1320,11 +1386,27 @@ export default function CalmEditorPrototype({
       return groups;
     }, {});
   }, [filteredEntities]);
-  const filteredAssets = projectAssets.filter((asset) => {
+  const assetKindOptions = useMemo(() => {
+    const kinds = new Set(projectAssets.map((asset) => assetFamily(asset)));
+    return ['all', ...Array.from(kinds).sort((left, right) => left.localeCompare(right))];
+  }, [projectAssets]);
+  const filteredAssets = useMemo(() => {
     const query = assetSearch.trim().toLowerCase();
-    if (!query) return true;
-    return `${asset.name} ${asset.kind} ${asset.path}`.toLowerCase().includes(query);
-  });
+    return projectAssets
+      .filter((asset) => {
+        if (assetKindFilter !== 'all' && assetFamily(asset) !== assetKindFilter) return false;
+        if (!query) return true;
+        return `${asset.name} ${asset.kind} ${asset.path}`.toLowerCase().includes(query);
+      })
+      .sort((left, right) => {
+        if (assetSortMode === 'kind') {
+          const byKind = assetFamily(left).localeCompare(assetFamily(right));
+          if (byKind !== 0) return byKind;
+        }
+        if (assetSortMode === 'path') return left.path.localeCompare(right.path);
+        return left.name.localeCompare(right.name);
+      });
+  }, [assetKindFilter, assetSearch, assetSortMode, projectAssets]);
   const scriptAssets = useMemo(() => (
     projectAssets
       .filter((asset) => /script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path))
@@ -1378,9 +1460,31 @@ export default function CalmEditorPrototype({
       line: entry.line ?? 0,
       title: entry.message,
     }));
-  const visibleProblems = sceneValidationRows.length > 0
+  const allProblems = sceneValidationRows.length > 0
     ? sceneValidationRows
     : problemRows.length > 0 ? problemRows : mockProblems;
+  const visibleProblems = allProblems.filter((problem) => {
+    const query = drawerSearch.trim().toLowerCase();
+    if (!query) return true;
+    return `${problem.severity} ${problem.title} ${problem.file} ${problem.line}`.toLowerCase().includes(query);
+  });
+  const visibleConsoleRows = (consoleEntries.length > 0 ? consoleEntries.map((entry) => ({
+    level: entry.level,
+    source: entry.subsystem,
+    message: entry.message,
+    file: entry.file ?? null,
+    line: entry.line ?? null,
+  })) : mockConsoleRows.map((row) => ({
+    ...row,
+    file: null,
+    line: null,
+  }))).filter((row) => {
+    const level = row.level.toLowerCase();
+    if (consoleLevelFilter !== 'all' && !level.includes(consoleLevelFilter)) return false;
+    const query = drawerSearch.trim().toLowerCase();
+    if (!query) return true;
+    return `${row.level} ${row.source} ${row.message} ${row.file ?? ''} ${row.line ?? ''}`.toLowerCase().includes(query);
+  });
   const sceneObjects = useMemo<SceneObject[]>(() => entities.map((entity) => ({
     id: entity.id,
     name: entity.name,
@@ -1602,6 +1706,10 @@ export default function CalmEditorPrototype({
     setOpenInspector((current) => ({ ...current, [section]: !current[section] }));
   };
 
+  const toggleComponentSection = (key: string) => {
+    setOpenComponents((current) => ({ ...current, [key]: !(current[key] ?? true) }));
+  };
+
   const updateComponentField = async (componentType: string, fieldName: string, value: unknown) => {
     setSelectedEntityDetails((current) => {
       if (!current) return current;
@@ -1719,14 +1827,32 @@ export default function CalmEditorPrototype({
     { id: 'ai', label: 'AI' },
   ];
 
-  const commands = [
-    { title: 'Create Camera', detail: 'Add a camera object to Meadow.scene' },
-    { title: 'Open Selected Script', detail: selectedEditorPath ?? 'No script selected' },
-    { title: 'Run Scene Validation', detail: 'Check components, assets, and policy rules' },
-    { title: 'Package Current Build', detail: `${selectedBuildTarget.label} / ${buildFormat} / ${buildChannel}` },
-    { title: 'Reset Layout', detail: 'Restore editor panels to the default workspace' },
-    { title: isPlaying ? 'Stop Play Mode' : 'Enter Play Mode', detail: 'Run Meadow.scene in editor' },
-  ];
+  const commands = useMemo(() => buildEditorCommands({
+    canSaveScene: backendReady && Boolean(shellState?.scene_dirty),
+    canUndo: backendReady && Boolean(shellState?.can_undo),
+    canRedo: backendReady && Boolean(shellState?.can_redo),
+    backendReady,
+    isPlaying,
+    selectedEditorPath,
+    canSaveScript: backendReady && Boolean(selectedEditorPath) && scriptContent !== scriptSavedContent && !scriptSaving,
+    buildTargetLabel: selectedBuildTarget.label,
+    buildFormat,
+    buildChannel,
+  }), [
+    backendReady,
+    buildChannel,
+    buildFormat,
+    isPlaying,
+    selectedBuildTarget.label,
+    selectedEditorPath,
+    shellState?.can_redo,
+    shellState?.can_undo,
+    shellState?.scene_dirty,
+    scriptContent,
+    scriptSavedContent,
+    scriptSaving,
+  ]);
+  const filteredCommands = useMemo(() => filterEditorCommands(commands, commandQuery), [commandQuery, commands]);
 
   useEffect(() => {
     window.localStorage.setItem('varg.calmEditor.leftDashboardWidth', String(leftDashboardWidth));
@@ -2003,14 +2129,29 @@ export default function CalmEditorPrototype({
     await refreshSceneTree();
   };
 
-  const createCameraObject = async () => {
+  const createSceneObject = async (name: string, componentType?: string, parentId?: string | null) => {
     if (!backendReady) return;
-    const created = await rpc<SceneObject>('shell/create_object', { name: 'Camera' }).catch(() => null);
-    if (created) {
-      await rpc('shell/add_component', { id: created.id, component_type: 'Camera' }).catch(() => {});
+    const created = await rpc<SceneObject>('shell/create_object', {
+      name,
+      parent_id: parentId ?? undefined,
+    }).catch(() => null);
+    if (created && componentType) {
+      await rpc('shell/add_component', { id: created.id, component_type: componentType }).catch(() => {});
     }
     await refreshSceneTree();
     if (created) selectEntity(created.id);
+  };
+
+  const createCameraObject = async () => {
+    await createSceneObject('Camera', 'Camera');
+  };
+
+  const createLightObject = async () => {
+    await createSceneObject('Light', 'Light');
+  };
+
+  const createEmptyObject = async () => {
+    await createSceneObject('Empty Object');
   };
 
   const deleteSceneObject = async (id: string) => {
@@ -2041,10 +2182,23 @@ export default function CalmEditorPrototype({
   };
 
   const createChildObject = async (parentId: string) => {
-    if (!backendReady) return;
-    const created = await rpc<SceneObject>('shell/create_object', { name: 'Child Object', parent_id: parentId }).catch(() => null);
-    await refreshSceneTree();
-    if (created) selectEntity(created.id);
+    await createSceneObject('Child Object', undefined, parentId);
+  };
+
+  const toggleEntityVisibility = (id: string) => {
+    setEntityVisibility((current) => {
+      const entity = entities.find((item) => item.id === id);
+      const currentValue = current[id] ?? entity?.visible ?? true;
+      return { ...current, [id]: !currentValue };
+    });
+  };
+
+  const toggleEntityLock = (id: string) => {
+    setEntityLocks((current) => {
+      const entity = entities.find((item) => item.id === id);
+      const currentValue = current[id] ?? entity?.locked ?? false;
+      return { ...current, [id]: !currentValue };
+    });
   };
 
   const reparentSceneObjectToRoot = async (id: string) => {
@@ -2109,6 +2263,58 @@ export default function CalmEditorPrototype({
     setShowDrawer(true);
   };
 
+  const openDiagnosticTarget = (target: { file?: string | null; line?: number | null; title?: string; message?: string }) => {
+    const rawTarget = (target.file ?? '').trim();
+    const haystack = `${rawTarget} ${target.title ?? ''} ${target.message ?? ''}`.trim();
+    const lowerTarget = rawTarget.toLowerCase();
+    const matchingFile = projectFiles.find((entry) => (
+      entry.kind === 'file'
+      && (entry.path.toLowerCase() === lowerTarget || entry.path.toLowerCase().endsWith(`/${lowerTarget}`))
+    ));
+    if (matchingFile) {
+      openProjectFile(matchingFile);
+      return;
+    }
+
+    const matchingAsset = projectAssets.find((asset) => {
+      const lowerPath = asset.path.toLowerCase();
+      return lowerPath === lowerTarget
+        || lowerPath.endsWith(`/${lowerTarget}`)
+        || haystack.toLowerCase().includes(lowerPath);
+    });
+    if (matchingAsset) {
+      setSelectedAssetPath(matchingAsset.path);
+      setActiveNav('assets');
+      if (/script/i.test(matchingAsset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(matchingAsset.path)) {
+        openScript(matchingAsset.path);
+      }
+      return;
+    }
+
+    const matchingEntity = entities.find((entity) => {
+      const value = `${entity.id} ${entity.name} ${entity.type}`.toLowerCase();
+      return value.includes(haystack.toLowerCase()) || haystack.toLowerCase().includes(entity.name.toLowerCase());
+    });
+    if (matchingEntity) {
+      setActiveNav('scene');
+      selectEntity(matchingEntity.id);
+      return;
+    }
+
+    if (rawTarget) {
+      setActiveNav(/\.(varg|vscene|vasset|js|ts|lua)$/i.test(rawTarget) ? 'scripts' : 'assets');
+      setAssetSearch(rawTarget);
+      setProjectFileSearch(rawTarget);
+      setSceneSearch(rawTarget);
+    }
+  };
+
+  const clearConsole = async () => {
+    if (backendReady) await rpc('console/clear').catch(() => {});
+    setConsoleEntries([]);
+    await refreshConsole();
+  };
+
   const resetEditorLayout = () => {
     setLeftDashboardWidth(leftDashboardDefaultWidth);
     setRightDashboardWidth(rightDashboardDefaultWidth);
@@ -2145,18 +2351,45 @@ export default function CalmEditorPrototype({
     setIsPlaying((value) => !value);
   };
 
-  const runCommand = async (title: string) => {
-    if (title === 'Create Camera') await createCameraObject();
-    else if (title === 'Open Selected Script' && selectedEditorPath) setViewMode('scripts');
-    else if (title === 'Run Scene Validation') await runSceneValidation();
-    else if (title === 'Package Current Build') await runBuild();
-    else if (title === 'Reset Layout') resetEditorLayout();
-    else if (title.includes('Play') || title.includes('Stop')) await runGame();
+  const runCommand = useCallback(async (id: EditorCommandId) => {
+    const command = commands.find((item) => item.id === id);
+    if (command?.disabled) return;
+    if (id === 'scene.save') await saveScene();
+    else if (id === 'scene.undo') await undoScene();
+    else if (id === 'scene.redo') await redoScene();
+    else if (id === 'scene.createEmpty') await createEmptyObject();
+    else if (id === 'scene.createCamera') await createCameraObject();
+    else if (id === 'scene.createLight') await createLightObject();
+    else if (id === 'script.save') await saveScript();
+    else if (id === 'script.openSelected' && selectedEditorPath) setViewMode('scripts');
+    else if (id === 'scene.validate') await runSceneValidation();
+    else if (id === 'build.package') await runBuild();
+    else if (id === 'layout.reset') resetEditorLayout();
+    else if (id === 'play.toggle') await runGame();
     setCommandOpen(false);
-  };
+    setCommandQuery('');
+  }, [
+    commands,
+    createCameraObject,
+    createEmptyObject,
+    createLightObject,
+    resetEditorLayout,
+    redoScene,
+    runBuild,
+    runGame,
+    runSceneValidation,
+    saveScene,
+    saveScript,
+    selectedEditorPath,
+    undoScene,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editingText = target?.tagName === 'INPUT'
+        || target?.tagName === 'TEXTAREA'
+        || target?.isContentEditable;
       if (event.key === 'Escape') {
         setCommandOpen(false);
         return;
@@ -2164,12 +2397,36 @@ export default function CalmEditorPrototype({
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setCommandOpen(true);
+        setCommandQuery('');
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        runCommand(viewMode === 'scripts' ? 'script.save' : 'scene.save');
+        return;
+      }
+      if (editingText) return;
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        runCommand('scene.createEmpty');
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+        event.preventDefault();
+        runCommand('scene.undo');
+      } else if (
+        ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y')
+        || ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'z')
+      ) {
+        event.preventDefault();
+        runCommand('scene.redo');
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        runCommand('play.toggle');
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [runCommand, viewMode]);
 
   return (
     <div
@@ -2200,7 +2457,14 @@ export default function CalmEditorPrototype({
 
         <div className="flex items-center gap-1">
           {[
-            { label: 'Save', icon: <IconSave />, action: saveScene, disabled: backendReady && !shellState?.scene_dirty },
+            {
+              label: viewMode === 'scripts' ? 'Save Script' : 'Save Scene',
+              icon: <IconSave />,
+              action: () => runCommand(viewMode === 'scripts' ? 'script.save' : 'scene.save'),
+              disabled: viewMode === 'scripts'
+                ? !(backendReady && selectedEditorPath && scriptContent !== scriptSavedContent && !scriptSaving)
+                : backendReady && !shellState?.scene_dirty,
+            },
             { label: 'Undo', icon: <IconUndo />, action: undoScene, disabled: backendReady && !shellState?.can_undo },
             { label: 'Redo', icon: <IconRedo />, action: redoScene, disabled: backendReady && !shellState?.can_redo },
           ].map((item) => (
@@ -2300,14 +2564,43 @@ export default function CalmEditorPrototype({
               <div className="font-mono text-[10px] text-[var(--text-muted)]">{backendReady ? 'Live backend' : 'Prototype data'}</div>
             </div>
             <div className="flex items-center gap-1">
-              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40" onClick={createCameraObject} disabled={!backendReady} title="Create camera">
+              <button
+                type="button"
+                className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() => setCreateMenuOpen((open) => !open)}
+                disabled={!backendReady}
+                title="Create scene object"
+              >
                 <IconPlus size={13} />
               </button>
-              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
+              <button type="button" className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]" onClick={() => setCreateMenuOpen((open) => !open)} disabled={!backendReady}>
                 <IconChevronDown size={13} />
               </button>
             </div>
           </div>
+          {createMenuOpen && activeNav === 'scene' && (
+            <div className="border-b border-[var(--border)] bg-[var(--bg-surface)] p-2">
+              <div className="grid grid-cols-3 gap-1">
+                {[
+                  { label: 'Empty', action: createEmptyObject },
+                  { label: 'Camera', action: createCameraObject },
+                  { label: 'Light', action: createLightObject },
+                ].map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                    onClick={() => {
+                      setCreateMenuOpen(false);
+                      item.action();
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="border-b border-[var(--border)] p-2">
             <label className="flex h-8 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[12px] text-[var(--text-muted)]">
@@ -2323,33 +2616,130 @@ export default function CalmEditorPrototype({
                 }}
               />
             </label>
+            {activeNav === 'scene' && (
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <select
+                  className="h-7 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-primary)] outline-none"
+                  value={sceneTypeFilter}
+                  onChange={(event) => setSceneTypeFilter(event.target.value as SceneTypeFilter)}
+                  aria-label="Filter scene object type"
+                >
+                  <option value="all">All objects</option>
+                  <option value="entity">Entities</option>
+                  <option value="camera">Cameras</option>
+                  <option value="light">Lights</option>
+                  <option value="mesh">Meshes</option>
+                  <option value="audio">Audio</option>
+                </select>
+                <span className="shrink-0 font-mono text-[10px] text-[var(--text-muted)]">{filteredEntities.length}/{entities.length}</span>
+              </div>
+            )}
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto py-1">
             {activeNav === 'assets' ? (
-              filteredAssets.map((asset) => (
-                <button
-                  key={asset.path}
-                  type="button"
-                  className={cx(
-                    'flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]',
-                    selectedAssetPath === asset.path && 'bg-[rgba(34,197,94,0.10)]',
-                  )}
-                  onClick={() => {
-                    setSelectedAssetPath(asset.path);
-                    if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
-                  }}
-                >
-                  <span className="grid size-7 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)]">
-                    {asset.kind === 'script' ? <IconCode /> : asset.kind === 'scene' ? <IconView /> : <IconFile />}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[12px] text-[var(--text-primary)]">{asset.name}</span>
-                    <span className="block truncate font-mono text-[10px] text-[var(--text-muted)]">{asset.path}</span>
-                  </span>
-                  <span className="shrink-0 text-[10px] text-[var(--text-muted)]">{asset.updated}</span>
-                </button>
-              ))
+              <div className="space-y-2 px-2 py-1">
+                <div className="grid grid-cols-[1fr_1fr] gap-1">
+                  <select
+                    className="h-7 min-w-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-primary)] outline-none"
+                    value={assetKindFilter}
+                    onChange={(event) => setAssetKindFilter(event.target.value)}
+                    aria-label="Filter asset type"
+                  >
+                    {assetKindOptions.map((kind) => (
+                      <option key={kind} value={kind}>{kind === 'all' ? 'All types' : kind}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="h-7 min-w-0 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-primary)] outline-none"
+                    value={assetSortMode}
+                    onChange={(event) => setAssetSortMode(event.target.value as AssetSortMode)}
+                    aria-label="Sort assets"
+                  >
+                    <option value="name">Sort by name</option>
+                    <option value="kind">Sort by type</option>
+                    <option value="path">Sort by path</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between px-1 text-[10px] text-[var(--text-muted)]">
+                  <span>{filteredAssets.length} of {projectAssets.length} assets</span>
+                  <div className="flex items-center gap-1">
+                    {(['list', 'grid'] as AssetViewMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={cx(
+                          'h-6 rounded-[var(--radius-sm)] border px-2 capitalize transition-colors',
+                          assetViewMode === mode
+                            ? 'border-[rgba(34,197,94,0.28)] bg-[rgba(34,197,94,0.12)] text-[var(--brand)]'
+                            : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                        )}
+                        onClick={() => setAssetViewMode(mode)}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {filteredAssets.length === 0 ? (
+                  <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-muted)]">
+                    No assets match the current filter.
+                  </div>
+                ) : assetViewMode === 'grid' ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {filteredAssets.map((asset) => (
+                      <button
+                        key={asset.path}
+                        type="button"
+                        className={cx(
+                          'min-h-[92px] rounded-[var(--radius-md)] border p-2 text-left transition-colors hover:bg-[var(--bg-hover)]',
+                          selectedAssetPath === asset.path
+                            ? 'border-[rgba(34,197,94,0.34)] bg-[rgba(34,197,94,0.10)]'
+                            : 'border-[var(--border)] bg-[var(--bg-base)]',
+                        )}
+                        title={asset.path}
+                        onClick={() => setSelectedAssetPath(asset.path)}
+                        onDoubleClick={() => {
+                          if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
+                        }}
+                      >
+                        <span className="mb-2 grid h-9 w-full place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[rgba(255,255,255,0.03)] text-[var(--text-secondary)]">
+                          {assetIconForKind(asset)}
+                        </span>
+                        <span className="block truncate text-[12px] text-[var(--text-primary)]">{asset.name}</span>
+                        <span className="mt-1 block truncate font-mono text-[10px] text-[var(--text-muted)]">{assetFamily(asset)}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-0.5">
+                    {filteredAssets.map((asset) => (
+                      <button
+                        key={asset.path}
+                        type="button"
+                        className={cx(
+                          'flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-2 text-left transition-colors hover:bg-[var(--bg-hover)]',
+                          selectedAssetPath === asset.path && 'bg-[rgba(34,197,94,0.10)]',
+                        )}
+                        title={asset.path}
+                        onClick={() => setSelectedAssetPath(asset.path)}
+                        onDoubleClick={() => {
+                          if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
+                        }}
+                      >
+                        <span className="grid size-7 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)]">
+                          {assetIconForKind(asset)}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12px] text-[var(--text-primary)]">{asset.name}</span>
+                          <span className="block truncate font-mono text-[10px] text-[var(--text-muted)]">{asset.path}</span>
+                        </span>
+                        <span className="shrink-0 rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">{assetFamily(asset)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             ) : activeNav === 'scripts' ? (
               <div className="space-y-2 px-3 py-2">
                 <label className="flex h-8 items-center justify-between rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-secondary)]">
@@ -2568,50 +2958,97 @@ export default function CalmEditorPrototype({
                 </AiPanelBoundary>
               </div>
             ) : (
-              Object.entries(groupedEntities).map(([group, groupEntities]) => (
-                <div key={group} className="pb-1">
-                  <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">{group}</div>
-                  {groupEntities.map((entity) => (
-                    <button
-                      key={entity.id}
-                      type="button"
-                      draggable={backendReady}
-                      className={cx(
-                        'flex h-8 w-full items-center gap-2 px-3 text-left transition-colors',
-                        selectedEntity.id === entity.id ? 'bg-[rgba(34,197,94,0.10)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
-                      )}
-                      style={{ paddingLeft: 12 + Math.min(4, entity.parentId ? 1 : 0) * 14 }}
-                      onClick={() => selectEntity(entity.id)}
-                      onDragStart={(event) => {
-                        event.dataTransfer.setData('application/x-varg-entity', entity.id);
-                      }}
-                      onDragOver={(event) => {
-                        if (event.dataTransfer.types.includes('application/x-varg-entity')) event.preventDefault();
-                      }}
-                      onDrop={(event) => {
-                        const draggedId = event.dataTransfer.getData('application/x-varg-entity');
-                        if (!draggedId || draggedId === entity.id) return;
-                        rpc('shell/reparent_object', { id: draggedId, parent_id: entity.id })
-                          .then(() => refreshSceneTree())
-                          .catch(() => {});
-                      }}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        selectEntity(entity.id);
-                        setHierarchyContextMenu({
-                          x: event.clientX,
-                          y: event.clientY,
-                          entity,
-                        });
-                      }}
-                    >
-                      <span className={cx('size-1.5 rounded-full', entity.visible ? 'bg-[var(--brand)]' : 'bg-[var(--text-muted)]')} />
-                      <span className="min-w-0 flex-1 truncate">{entity.name}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-[var(--text-muted)]">{entity.type}</span>
-                    </button>
-                  ))}
+              Object.entries(groupedEntities).length === 0 ? (
+                <div className="mx-2 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-3 text-[12px] text-[var(--text-muted)]">
+                  No scene objects match the current filter.
                 </div>
-              ))
+              ) : Object.entries(groupedEntities).map(([group, groupEntities]) => (
+                  <div key={group} className="pb-1">
+                    <div className="grid grid-cols-[44px_1fr_56px] items-center px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                      <span>State</span>
+                      <span>{group}</span>
+                      <span className="text-right">{groupEntities.length}</span>
+                    </div>
+                    {groupEntities.map((entity) => (
+                      <div
+                        key={entity.id}
+                        className={cx(
+                          'grid h-8 grid-cols-[44px_1fr_auto] items-center gap-2 px-2 text-[12px] transition-colors',
+                          selectedEntity.id === entity.id ? 'bg-[rgba(34,197,94,0.10)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                          !entity.visible && 'opacity-55',
+                        )}
+                        style={{ paddingLeft: 8 + Math.min(4, entity.parentId ? 1 : 0) * 14 }}
+                        draggable={backendReady && !entity.locked}
+                        onDragStart={(event) => {
+                          if (entity.locked) {
+                            event.preventDefault();
+                            return;
+                          }
+                          event.dataTransfer.setData('application/x-varg-entity', entity.id);
+                        }}
+                        onDragOver={(event) => {
+                          if (!entity.locked && event.dataTransfer.types.includes('application/x-varg-entity')) event.preventDefault();
+                        }}
+                        onDrop={(event) => {
+                          const draggedId = event.dataTransfer.getData('application/x-varg-entity');
+                          if (!draggedId || draggedId === entity.id || entity.locked) return;
+                          rpc('shell/reparent_object', { id: draggedId, parent_id: entity.id })
+                            .then(() => refreshSceneTree())
+                            .catch(() => {});
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          selectEntity(entity.id);
+                          setHierarchyContextMenu({
+                            x: event.clientX,
+                            y: event.clientY,
+                            entity,
+                          });
+                        }}
+                      >
+                        <span className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className={cx(
+                              'grid size-5 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                              entity.visible && 'text-[var(--brand)]',
+                            )}
+                            title={entity.visible ? 'Hide object' : 'Show object'}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleEntityVisibility(entity.id);
+                            }}
+                          >
+                            <IconView size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            className={cx(
+                              'grid size-5 place-items-center rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]',
+                              entity.locked && 'text-[var(--warning)]',
+                            )}
+                            title={entity.locked ? 'Unlock object' : 'Lock object'}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleEntityLock(entity.id);
+                            }}
+                          >
+                            <IconShield size={11} />
+                          </button>
+                        </span>
+                        <button
+                          type="button"
+                          className="flex min-w-0 items-center gap-2 text-left"
+                          onClick={() => selectEntity(entity.id)}
+                        >
+                          <span className="grid size-5 shrink-0 place-items-center text-[var(--text-muted)]">{sceneIconForType(entity)}</span>
+                          <span className="min-w-0 flex-1 truncate">{entity.name}</span>
+                        </button>
+                        <span className="shrink-0 rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">{sceneTypeFamily(entity)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))
             )}
           </div>
 
@@ -2619,18 +3056,56 @@ export default function CalmEditorPrototype({
             {activeNav === 'assets' && selectedAsset ? (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
-                  <span>Import Settings</span>
-                  <span className="font-mono">{selectedAsset.kind}</span>
+                  <span>Asset Details</span>
+                  <span className="font-mono">{assetFamily(selectedAsset)}</span>
                 </div>
                 <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2 text-[11px] leading-5 text-[var(--text-secondary)]">
-                  <div className="truncate font-mono text-[10px] text-[var(--text-muted)]">{selectedAsset.path}</div>
-                  <div>Importer: {selectedAsset.updated}</div>
-                  <div>References: {assetReferenceBusy ? 'loading' : assetReferences.length}</div>
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="grid size-7 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--text-secondary)]">
+                      {assetIconForKind(selectedAsset)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-semibold text-[var(--text-primary)]">{selectedAsset.name}</span>
+                      <span className="block truncate font-mono text-[10px] text-[var(--text-muted)]">{selectedAsset.path}</span>
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-[72px_1fr] gap-x-2">
+                    <span className="text-[var(--text-muted)]">Kind</span>
+                    <span className="truncate font-mono">{selectedAsset.kind}</span>
+                    <span className="text-[var(--text-muted)]">Importer</span>
+                    <span className="truncate">{selectedAsset.updated}</span>
+                    <span className="text-[var(--text-muted)]">Refs</span>
+                    <span>{assetReferenceBusy ? 'loading' : assetReferences.length}</span>
+                  </div>
                 </div>
-                <div className="grid grid-cols-3 gap-1">
+                <div className="grid grid-cols-4 gap-1">
+                  <button
+                    type="button"
+                    className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40"
+                    disabled={!(/script/i.test(selectedAsset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(selectedAsset.path))}
+                    onClick={() => openScript(selectedAsset.path)}
+                  >
+                    Open
+                  </button>
                   <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={reimportSelectedAsset}>Reimport</button>
                   <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40" disabled={!backendReady} onClick={renameSelectedAsset}>Rename</button>
                   <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[rgba(248,113,113,0.28)] text-[11px] text-[var(--danger)] hover:bg-[var(--danger-dim)] disabled:opacity-40" disabled={!backendReady} onClick={deleteSelectedAsset}>Delete</button>
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-base)] p-2">
+                  <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                    <span>References</span>
+                    <button type="button" className="normal-case tracking-normal text-[var(--brand)] hover:text-[var(--brand-hover)]" onClick={() => { setBottomTab('assets'); setShowDrawer(true); }}>
+                      Details
+                    </button>
+                  </div>
+                  {assetReferences.length === 0 ? (
+                    <div className="text-[11px] text-[var(--text-muted)]">{assetReferenceBusy ? 'Loading references...' : 'No references found.'}</div>
+                  ) : assetReferences.slice(0, 3).map((row) => (
+                    <div key={`${row.kind}-${row.label}-${row.detail}`} className="grid grid-cols-[58px_1fr] gap-2 py-0.5 font-mono text-[10px]">
+                      <span className="truncate text-[var(--text-muted)]">{row.kind}</span>
+                      <span className="truncate text-[var(--text-secondary)]" title={row.detail}>{row.label}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : (
@@ -2918,9 +3393,40 @@ export default function CalmEditorPrototype({
                     </button>
                   ))}
                 </div>
-                <button type="button" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]" onClick={() => setShowDrawer(false)}>
-                  Hide
-                </button>
+                <div className="flex min-w-0 items-center gap-2">
+                  {(bottomTab === 'console' || bottomTab === 'problems' || bottomTab === 'assets') && (
+                    <label className="flex h-7 w-[min(260px,28vw)] min-w-[120px] items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-muted)]">
+                      <IconSearch size={11} />
+                      <input
+                        className="min-w-0 flex-1 bg-transparent text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
+                        placeholder="Filter drawer"
+                        value={drawerSearch}
+                        onChange={(event) => setDrawerSearch(event.target.value)}
+                      />
+                    </label>
+                  )}
+                  {bottomTab === 'console' && (
+                    <>
+                      <select
+                        className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] px-2 text-[11px] text-[var(--text-primary)] outline-none"
+                        value={consoleLevelFilter}
+                        onChange={(event) => setConsoleLevelFilter(event.target.value as ConsoleLevelFilter)}
+                        aria-label="Filter console level"
+                      >
+                        <option value="all">All</option>
+                        <option value="error">Error</option>
+                        <option value="warn">Warn</option>
+                        <option value="info">Info</option>
+                      </select>
+                      <button type="button" className="h-7 rounded-[var(--radius-sm)] border border-[var(--border)] px-2 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]" onClick={clearConsole}>
+                        Clear
+                      </button>
+                    </>
+                  )}
+                  <button type="button" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]" onClick={() => setShowDrawer(false)}>
+                    Hide
+                  </button>
+                </div>
               </div>
               <div className="overflow-auto" style={{ height: Math.max(0, bottomDashboardHeight - 40) }}>
                 {bottomTab === 'problems' && visibleProblems.map((problem) => (
@@ -2930,20 +3436,34 @@ export default function CalmEditorPrototype({
                       <div className="truncate text-[var(--text-primary)]">{problem.title}</div>
                       <div className="truncate font-mono text-[10px] text-[var(--text-muted)]">{problem.file}:{problem.line}</div>
                     </div>
-                    <button type="button" className="rounded-[var(--radius-sm)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">Open</button>
+                    <button
+                      type="button"
+                      className="rounded-[var(--radius-sm)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                      onClick={() => openDiagnosticTarget(problem)}
+                    >
+                      Open
+                    </button>
                   </div>
                 ))}
-                {bottomTab === 'console' && (consoleEntries.length > 0 ? consoleEntries.map((entry) => ({
-                  level: entry.level,
-                  source: entry.subsystem,
-                  message: entry.message,
-                })) : mockConsoleRows).map((row) => (
-                  <div key={`${row.source}-${row.message}`} className="grid grid-cols-[64px_96px_1fr] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 font-mono text-[11px]">
-                    <span className={row.level === 'warn' ? 'text-[var(--warning)]' : 'text-[var(--text-muted)]'}>{row.level}</span>
+                {bottomTab === 'problems' && visibleProblems.length === 0 && (
+                  <div className="px-4 py-8 text-center text-[12px] text-[var(--text-muted)]">No problems match the current filter.</div>
+                )}
+                {bottomTab === 'console' && visibleConsoleRows.map((row) => (
+                  <button
+                    key={`${row.source}-${row.message}-${row.file ?? ''}-${row.line ?? ''}`}
+                    type="button"
+                    className="grid w-full grid-cols-[64px_96px_1fr_auto] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-left font-mono text-[11px] hover:bg-[var(--bg-hover)]"
+                    onClick={() => openDiagnosticTarget({ file: row.file, line: row.line, message: row.message })}
+                  >
+                    <span className={/error/i.test(row.level) ? 'text-[var(--danger)]' : /warn/i.test(row.level) ? 'text-[var(--warning)]' : 'text-[var(--text-muted)]'}>{row.level}</span>
                     <span className="text-[var(--text-muted)]">{row.source}</span>
                     <span className="truncate text-[var(--text-secondary)]">{row.message}</span>
-                  </div>
+                    <span className="text-right text-[10px] text-[var(--text-muted)]">{row.file ? `${row.file}:${row.line ?? 0}` : ''}</span>
+                  </button>
                 ))}
+                {bottomTab === 'console' && visibleConsoleRows.length === 0 && (
+                  <div className="px-4 py-8 text-center text-[12px] text-[var(--text-muted)]">No console entries match the current filter.</div>
+                )}
                 {bottomTab === 'tasks' && tasks.map((task) => (
                   <div key={task.title} className="grid grid-cols-[1fr_96px] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-[12px]">
                     <span>{task.title}</span>
@@ -2951,9 +3471,20 @@ export default function CalmEditorPrototype({
                   </div>
                 ))}
                 {bottomTab === 'assets' && filteredAssets.map((asset) => (
-                  <button key={asset.path} type="button" className="grid w-full grid-cols-[1fr_72px_84px] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-left text-[12px] hover:bg-[var(--bg-hover)]" onClick={() => setSelectedAssetPath(asset.path)}>
+                  <button
+                    key={asset.path}
+                    type="button"
+                    className={cx(
+                      'grid w-full grid-cols-[1fr_72px_84px] border-b border-[rgba(212,212,216,0.08)] px-3 py-2 text-left text-[12px] hover:bg-[var(--bg-hover)]',
+                      selectedAssetPath === asset.path && 'bg-[rgba(34,197,94,0.08)]',
+                    )}
+                    onClick={() => setSelectedAssetPath(asset.path)}
+                    onDoubleClick={() => {
+                      if (/script/i.test(asset.kind) || /\.(varg|vscene|vasset|js|ts|lua)$/i.test(asset.path)) openScript(asset.path);
+                    }}
+                  >
                     <span className="truncate">{asset.path}</span>
-                    <span className="font-mono text-[10px] text-[var(--text-muted)]">{asset.kind}</span>
+                    <span className="font-mono text-[10px] text-[var(--text-muted)]">{assetFamily(asset)}</span>
                     <span className="text-right text-[11px] text-[var(--text-muted)]">{asset.updated}</span>
                   </button>
                 ))}
@@ -3089,12 +3620,15 @@ export default function CalmEditorPrototype({
               </div>
             )}
 
-            {(inspectorEntity.components ?? []).map((component) => (
-              <div key={component.type}>
+            {(inspectorEntity.components ?? []).map((component, componentIndex) => {
+              const componentKey = `${inspectorEntity.id}:${component.type}:${componentIndex}`;
+              const componentOpen = openComponents[componentKey] ?? true;
+              return (
+              <div key={componentKey}>
                 <SectionHeader
                   title={component.type}
-                  open={openInspector.script}
-                  onToggle={() => toggleInspector('script')}
+                  open={componentOpen}
+                  onToggle={() => toggleComponentSection(componentKey)}
                 >
                   <button
                     type="button"
@@ -3109,7 +3643,7 @@ export default function CalmEditorPrototype({
                     <IconTrash size={12} />
                   </button>
                 </SectionHeader>
-                {openInspector.script && (
+                {componentOpen && (
                   <div className="py-2">
                     {Object.entries(component.data ?? {}).length === 0 ? (
                       <div className="px-3 text-[12px] text-[var(--text-muted)]">No editable fields.</div>
@@ -3137,7 +3671,8 @@ export default function CalmEditorPrototype({
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </aside>
 
@@ -3245,26 +3780,55 @@ export default function CalmEditorPrototype({
           <div className="w-[min(640px,calc(100vw-32px))] overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-light)] bg-[var(--bg-surface)] shadow-[var(--shadow-lg)]" onMouseDown={(event) => event.stopPropagation()}>
             <div className="flex h-12 items-center gap-3 border-b border-[var(--border)] px-4">
               <IconSearch size={15} className="text-[var(--text-muted)]" />
-              <input autoFocus className="min-w-0 flex-1 bg-transparent text-[14px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]" placeholder="Search actions, assets, entities..." />
+              <input
+                autoFocus
+                className="min-w-0 flex-1 bg-transparent text-[14px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
+                placeholder="Search actions, assets, entities..."
+                value={commandQuery}
+                onChange={(event) => setCommandQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    const firstAvailable = filteredCommands.find((command) => !command.disabled);
+                    if (firstAvailable) runCommand(firstAvailable.id);
+                  }
+                }}
+              />
               <span className="font-mono text-[10px] text-[var(--text-muted)]">Esc</span>
             </div>
             <div className="max-h-[360px] overflow-auto p-2">
-              {commands.map((command) => (
+              {filteredCommands.map((command: EditorCommand) => (
                 <button
-                  key={command.title}
+                  key={command.id}
                   type="button"
-                  className="flex w-full items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-left hover:bg-[var(--bg-hover)]"
-                  onClick={() => runCommand(command.title)}
+                  className={cx(
+                    'flex w-full items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-left hover:bg-[var(--bg-hover)]',
+                    command.disabled && 'cursor-not-allowed opacity-45 hover:bg-transparent',
+                  )}
+                  title={command.disabled ? command.disabledReason : undefined}
+                  disabled={command.disabled}
+                  onClick={() => runCommand(command.id)}
                 >
                   <span className="grid size-8 shrink-0 place-items-center rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg-base)] text-[var(--text-secondary)]">
                     <IconSparkles size={14} />
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] text-[var(--text-primary)]">{command.title}</span>
-                    <span className="block truncate text-[11px] text-[var(--text-muted)]">{command.detail}</span>
+                    <span className="block truncate text-[11px] text-[var(--text-muted)]">
+                      {command.disabled && command.disabledReason ? command.disabledReason : command.detail}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">{command.category}</span>
+                    {command.shortcut && <span className="font-mono text-[10px] text-[var(--text-muted)]">{command.shortcut}</span>}
                   </span>
                 </button>
               ))}
+              {filteredCommands.length === 0 && (
+                <div className="px-4 py-8 text-center text-[12px] text-[var(--text-muted)]">
+                  No commands match "{commandQuery}".
+                </div>
+              )}
             </div>
           </div>
         </div>

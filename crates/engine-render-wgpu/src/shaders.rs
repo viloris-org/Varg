@@ -230,7 +230,8 @@ fn compute_ibl(n: vec3<f32>, v: vec3<f32>, base_color: vec3<f32>, metallic: f32,
     let f = fresnel_schlick_roughness(ndotv, f0, roughness);
     let kd = (1.0 - f) * (1.0 - metallic);
     let irradiance = sample_ibl_irradiance(n);
-    let diffuse = kd * irradiance * base_color;
+    let ambient_irradiance = max(irradiance + lighting.ambient.rgb, vec3<f32>(0.0));
+    let diffuse = kd * ambient_irradiance * base_color;
     let brdf = sample_ibl_brdf(ndotv, roughness);
     let specular_ibl = sample_ibl_specular(n, v, roughness);
     let specular = specular_ibl * (f * brdf.x + brdf.y);
@@ -298,8 +299,12 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>, dist
     if (fog.enabled < 0.5) {
         return color;
     }
-    let fog_factor = 1.0 - exp(-fog.density * dist * dist);
-    return mix(color, fog.color, clamp(fog_factor, 0.0, 1.0));
+    let distance_fog = 1.0 - exp(-fog.density * dist * max(dist, 1.0));
+    let height_delta = max(camera_pos.y - world_pos.y, 0.0);
+    let height_fog = 1.0 - exp(-fog.density * height_delta * 18.0);
+    let fog_factor = clamp(distance_fog + height_fog * 0.35, 0.0, 0.88);
+    let aerial_color = mix(fog.color, vec3<f32>(0.62, 0.68, 0.76), 0.28);
+    return mix(color, aerial_color, fog_factor);
 }
 
 fn compare_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32) -> f32 {
@@ -320,27 +325,16 @@ fn compare_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32) -> f32 {
 fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32) -> f32 {
     let bias = csm.params.z + csm.params.w * (1.0 - ndotl);
     let texel = csm.params.y;
-    var blocker_count = 0.0;
-    let search_radius = texel * 4.0;
-    for (var bx = -2; bx <= 2; bx++) {
-        for (var by = -2; by <= 2; by++) {
-            let offset = vec2<f32>(f32(bx), f32(by)) * search_radius;
-            let visible = compare_cascade_shadow(cascade_idx, uv + offset, depth - bias);
-            if (visible < 0.5) {
-                blocker_count += 1.0;
-            }
-        }
-    }
-    let blocker_ratio = blocker_count / 25.0;
-    let penumbra = mix(0.85, 3.5, blocker_ratio);
     var shadow_factor = 0.0;
-    for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            let offset = vec2<f32>(f32(dx), f32(dy)) * texel * penumbra;
-            shadow_factor += compare_cascade_shadow(cascade_idx, uv + offset, depth - bias);
+    let filter_radius = texel * mix(1.15, 2.35, 1.0 - ndotl);
+    for (var dx = -2; dx <= 2; dx++) {
+        for (var dy = -2; dy <= 2; dy++) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * filter_radius;
+            let corner_weight = 1.0 - 0.08 * length(vec2<f32>(f32(dx), f32(dy)));
+            shadow_factor += compare_cascade_shadow(cascade_idx, uv + offset, depth - bias) * corner_weight;
         }
     }
-    return shadow_factor / 9.0;
+    return clamp(shadow_factor / 21.8, 0.0, 1.0);
 }
 
 fn apply_csm_distance_fade(shadow_factor: f32, view_depth: f32) -> f32 {
@@ -530,8 +524,11 @@ fn fs_main(input: VsOut) -> FsOut {
 
     let f0 = mix(vec3<f32>(0.04), base_color, metallic);
 
-    // Ambient from IBL
+    // Ambient from IBL plus scene environment. This prevents flat, under-lit scenes
+    // when no authored cubemap or probe volume is present.
     var color = compute_ibl(n, v, base_color, metallic, roughness, f0) * ao;
+    let ambient_floor = lighting.ambient.rgb * base_color * (1.0 - metallic) * 0.45;
+    color = color + ambient_floor * ao;
     color = color + sample_gi_probe_volume(input.world_position, n, base_color, metallic) * ao;
 
     // CSM shadow
@@ -850,8 +847,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     );
     let position = uv * 2.0 - vec2<f32>(1.0);
     out.position = vec4<f32>(position, 0.0, 1.0);
-    let inv_proj = vec4<f32>(position, 1.0, 1.0);
-    let view_dir = (skybox.view_rotation_only * inv_proj).xyz;
+    let view_ray = normalize(vec3<f32>(position.x, position.y, -1.0));
+    let view_dir = (skybox.view_rotation_only * vec4<f32>(view_ray, 0.0)).xyz;
     out.direction = view_dir;
     return out;
 }
@@ -909,19 +906,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= res || gid.y >= res) { return; }
     let uv = (vec2<f32>(gid.xy) + 0.5) / f32(res);
     let dir = normalize(cube_face_uv_to_dir(params.face_idx, uv));
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dir.y) > 0.999) { up = vec3<f32>(1.0, 0.0, 0.0); }
+    let right = normalize(cross(up, dir));
+    let tangent_up = cross(dir, right);
     var color = vec3<f32>(0.0);
     var sample_count = 0.0;
     let delta = 0.05;
     for (var dphi: f32 = 0.0; dphi < 2.0 * 3.14159265; dphi += delta) {
         for (var dtheta: f32 = 0.0; dtheta < 0.5 * 3.14159265; dtheta += delta) {
             let tangent = vec3<f32>(cos(dphi) * sin(dtheta), cos(dtheta), sin(dphi) * sin(dtheta));
-            let sample_dir = tangent.x * dir + tangent.y * vec3<f32>(0.0, 1.0, 0.0) + tangent.z * vec3<f32>(1.0, 0.0, 0.0);
+            let sample_dir = tangent.x * right + tangent.y * dir + tangent.z * tangent_up;
             let sample_dir_normalized = normalize(sample_dir);
             color += textureSampleLevel(env_map, env_sampler, sample_dir_normalized, 0.0).rgb * cos(dtheta) * sin(dtheta);
             sample_count += 1.0;
         }
     }
-    let output = color * 3.14159265 / sample_count * 2.0;
+    let output = color * 3.14159265 / max(sample_count, 1.0);
     textureStore(output_tex, vec2<i32>(gid.xy), vec4<f32>(output, 1.0));
 }
 "#;
@@ -1173,12 +1174,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let knee = params.y;
     var color = textureSampleLevel(src_tex, bilinear, uv, 0.0).rgb;
     let brightness = max(max(color.r, color.g), color.b);
-    var contribution = 0.0;
+    var contribution = 1.0;
     if (threshold > 0.0) {
-        contribution = max(brightness - threshold, 0.0);
-        contribution /= max(brightness, 0.001);
-    } else {
-        contribution = 1.0;
+        let soft = max(knee, 0.0001);
+        let knee_start = threshold - soft;
+        let soft_curve = clamp((brightness - knee_start) / (soft * 2.0), 0.0, 1.0);
+        let soft_contribution = soft_curve * soft_curve * (3.0 - 2.0 * soft_curve);
+        let hard_contribution = max(brightness - threshold, 0.0) / max(brightness, 0.001);
+        contribution = max(hard_contribution, soft_contribution * 0.45);
     }
     color *= contribution;
     textureStore(dst_tex, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));
@@ -1396,7 +1399,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 }
 
 fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
-    let exposure_bias = 1.8;
+    let exposure_bias = 1.28;
     let rgb_to_rrt = mat3x3<f32>(
         vec3<f32>(0.59719 * exposure_bias, 0.07600 * exposure_bias, 0.02840 * exposure_bias),
         vec3<f32>(0.35458 * exposure_bias, 0.90834 * exposure_bias, 0.13383 * exposure_bias),
@@ -1416,6 +1419,13 @@ fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
     let tonemapped = (rrt * (rrt + vec3<f32>(a)) - vec3<f32>(b))
         / (rrt * (vec3<f32>(c) * rrt + vec3<f32>(d)) + vec3<f32>(e));
     return saturate(odt_to_rgb * tonemapped);
+}
+
+fn grade_display_color(color: vec3<f32>) -> vec3<f32> {
+    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let contrast = mix(vec3<f32>(luma), color, 1.08);
+    let warm_highlights = contrast * vec3<f32>(1.025, 1.0, 0.965);
+    return saturate(warm_highlights);
 }
 
 fn cubic_weight(distance: f32) -> f32 {
@@ -1550,15 +1560,18 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let bloom = textureSampleLevel(bloom_tex, lin_sampler, input.uv, 0.0).rgb * post.bloom_intensity;
     var color = hdr + bloom;
     if (post.ssgi_enabled > 0.5) {
-        color = color + textureSampleLevel(ssgi_tex, lin_sampler, input.uv, 0.0).rgb * post.ssgi_intensity;
+        let gi = textureSampleLevel(ssgi_tex, lin_sampler, input.uv, 0.0).rgb;
+        color = color + min(gi, vec3<f32>(1.8)) * post.ssgi_intensity;
     }
     color = color + screen_space_reflection(input.uv);
     color = color * post.exposure;
     if (post.ssao_enabled > 0.5) {
         let ao = textureSampleLevel(ssao_tex, lin_sampler, input.uv, 0.0).r;
-        color = color * (0.5 + ao * 0.5);
+        let ao_strength = 0.34;
+        color = color * mix(1.0, clamp(ao, 0.45, 1.0), ao_strength);
     }
     color = aces_tonemap(color);
+    color = grade_display_color(color);
     return vec4<f32>(color, 1.0);
 }
 "#;

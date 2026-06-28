@@ -467,9 +467,9 @@ pub struct RenderFog {
 impl Default for RenderFog {
     fn default() -> Self {
         Self {
-            density: 0.0003,
-            color: [0.6, 0.7, 0.85],
-            enabled: false,
+            density: 0.00018,
+            color: [0.62, 0.68, 0.76],
+            enabled: true,
         }
     }
 }
@@ -526,25 +526,25 @@ impl Default for RenderEnvironment {
         Self {
             sky_enabled: true,
             sky_cubemap: None,
-            sky_zenith_color: [0.15, 0.35, 0.65],
-            sky_horizon_color: [0.55, 0.7, 0.85],
+            sky_zenith_color: [0.13, 0.23, 0.38],
+            sky_horizon_color: [0.62, 0.68, 0.74],
             sky_rotation_degrees: 0.0,
-            sky_intensity: 1.0,
-            ambient_color: [0.03, 0.035, 0.04],
-            ambient_intensity: 1.0,
+            sky_intensity: 0.8,
+            ambient_color: [0.07, 0.08, 0.095],
+            ambient_intensity: 1.15,
             fog: RenderFog::default(),
-            exposure: 1.0,
+            exposure: 1.08,
             tonemap: "aces".to_string(),
             bloom_enabled: true,
-            bloom_intensity: 0.04,
+            bloom_intensity: 0.12,
             ssao_enabled: true,
             ssao_radius: 0.035,
-            ssao_intensity: 1.0,
+            ssao_intensity: 0.65,
             ssgi_enabled: true,
             ssgi_radius: 2.25,
-            ssgi_intensity: 0.78,
+            ssgi_intensity: 0.45,
             ssr_enabled: true,
-            ssr_intensity: 0.35,
+            ssr_intensity: 0.22,
         }
     }
 }
@@ -601,6 +601,50 @@ impl Default for RenderWorld {
 }
 
 impl RenderWorld {
+    /// Resolves the single renderer-facing environment for this frame.
+    ///
+    /// `environment` is the canonical input. Standalone `skybox` and `fog`
+    /// remain as legacy authoring adapters for older scenes and direct tests.
+    pub fn resolved_environment(&self) -> RenderEnvironment {
+        if let Some(environment) = &self.environment {
+            return environment.clone();
+        }
+
+        let mut environment = RenderEnvironment::default();
+        if let Some(skybox) = &self.skybox {
+            environment.sky_enabled = true;
+            environment.sky_cubemap = skybox.cubemap.clone();
+            environment.sky_zenith_color = skybox.zenith_color;
+            environment.sky_horizon_color = skybox.horizon_color;
+            environment.sky_rotation_degrees = skybox.rotation_degrees;
+            environment.sky_intensity = skybox.intensity;
+        } else {
+            environment.sky_enabled = false;
+        }
+        if let Some(fog) = &self.fog {
+            environment.fog = fog.clone();
+        }
+        environment
+    }
+
+    /// Returns the skybox representation derived from the resolved environment.
+    pub fn active_skybox(&self) -> Option<RenderSkybox> {
+        let environment = self.resolved_environment();
+        environment.sky_enabled.then_some(RenderSkybox {
+            cubemap: environment.sky_cubemap,
+            zenith_color: environment.sky_zenith_color,
+            horizon_color: environment.sky_horizon_color,
+            rotation_degrees: environment.sky_rotation_degrees,
+            intensity: environment.sky_intensity,
+        })
+    }
+
+    /// Returns the fog representation derived from the resolved environment.
+    pub fn active_fog(&self) -> Option<RenderFog> {
+        let environment = self.resolved_environment();
+        environment.fog.enabled.then_some(environment.fog)
+    }
+
     /// Returns true when there is visible geometry and a camera.
     pub fn is_visible(&self) -> bool {
         self.camera.is_some()
@@ -608,7 +652,9 @@ impl RenderWorld {
                 || !self.sprites.is_empty()
                 || !self.particles.is_empty()
                 || !self.particle_emitters.is_empty()
-                || self.skybox.is_some())
+                || self
+                    .active_skybox()
+                    .is_some_and(|skybox| skybox.intensity > 0.0))
     }
 
     /// Extracts renderable data from a [`Scene`](engine_ecs::Scene).
@@ -1719,7 +1765,7 @@ mod tests {
             .unwrap();
 
         let world = RenderWorld::extract(&scene);
-        let environment = world.environment.expect("environment extracted");
+        let environment = world.environment.as_ref().expect("environment extracted");
 
         assert_eq!(environment.sky_zenith_color, [0.2, 0.3, 0.4]);
         assert_eq!(environment.sky_horizon_color, [0.5, 0.6, 0.7]);
@@ -1734,5 +1780,88 @@ mod tests {
         assert_eq!(environment.ssr_intensity, 0.5);
         assert!(world.skybox.is_some());
         assert!(world.fog.is_some());
+        let resolved = world.resolved_environment();
+        assert_eq!(resolved.sky_zenith_color, [0.2, 0.3, 0.4]);
+        assert_eq!(resolved.fog.density, 0.002);
+        assert_eq!(world.active_skybox().expect("active skybox").intensity, 1.5);
+        assert_eq!(
+            world.active_fog().expect("active fog").color,
+            [0.1, 0.2, 0.3]
+        );
+    }
+
+    #[test]
+    fn resolves_legacy_skybox_and_fog_as_environment() {
+        let world = RenderWorld {
+            skybox: Some(RenderSkybox {
+                cubemap: Some("asset:sky".to_string()),
+                zenith_color: [0.1, 0.2, 0.3],
+                horizon_color: [0.4, 0.5, 0.6],
+                rotation_degrees: 42.0,
+                intensity: 2.0,
+            }),
+            fog: Some(RenderFog {
+                density: 0.01,
+                color: [0.7, 0.8, 0.9],
+                enabled: true,
+            }),
+            ..RenderWorld::default()
+        };
+
+        let environment = world.resolved_environment();
+
+        assert!(environment.sky_enabled);
+        assert_eq!(environment.sky_cubemap.as_deref(), Some("asset:sky"));
+        assert_eq!(environment.sky_zenith_color, [0.1, 0.2, 0.3]);
+        assert_eq!(environment.sky_horizon_color, [0.4, 0.5, 0.6]);
+        assert_eq!(environment.sky_rotation_degrees, 42.0);
+        assert_eq!(environment.sky_intensity, 2.0);
+        assert_eq!(environment.fog.density, 0.01);
+        assert_eq!(environment.fog.color, [0.7, 0.8, 0.9]);
+        assert!(world.active_skybox().is_some());
+        assert!(world.active_fog().is_some());
+    }
+
+    #[test]
+    fn environment_takes_priority_over_legacy_skybox_and_fog() {
+        let world = RenderWorld {
+            environment: Some(RenderEnvironment {
+                sky_enabled: true,
+                sky_cubemap: Some("asset:environment".to_string()),
+                sky_zenith_color: [0.9, 0.8, 0.7],
+                sky_horizon_color: [0.6, 0.5, 0.4],
+                sky_rotation_degrees: 12.0,
+                sky_intensity: 0.75,
+                fog: RenderFog {
+                    density: 0.02,
+                    color: [0.3, 0.2, 0.1],
+                    enabled: true,
+                },
+                ..RenderEnvironment::default()
+            }),
+            skybox: Some(RenderSkybox {
+                cubemap: Some("asset:legacy".to_string()),
+                zenith_color: [0.0, 0.0, 0.0],
+                horizon_color: [0.0, 0.0, 0.0],
+                rotation_degrees: 180.0,
+                intensity: 9.0,
+            }),
+            fog: Some(RenderFog {
+                density: 1.0,
+                color: [1.0, 1.0, 1.0],
+                enabled: true,
+            }),
+            ..RenderWorld::default()
+        };
+
+        let skybox = world.active_skybox().expect("active skybox");
+        let fog = world.active_fog().expect("active fog");
+
+        assert_eq!(skybox.cubemap.as_deref(), Some("asset:environment"));
+        assert_eq!(skybox.zenith_color, [0.9, 0.8, 0.7]);
+        assert_eq!(skybox.rotation_degrees, 12.0);
+        assert_eq!(skybox.intensity, 0.75);
+        assert_eq!(fog.density, 0.02);
+        assert_eq!(fog.color, [0.3, 0.2, 0.1]);
     }
 }
