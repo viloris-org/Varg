@@ -1324,7 +1324,7 @@ impl EditorHost {
         }
         copilot_settings.api_key = credentials.copilot_api_key.clone();
 
-        let mut host = Self {
+        let host = Self {
             hub,
             shell: EditorShell::with_core_services(EditorPreferences::default()),
             durable_state,
@@ -1352,7 +1352,6 @@ impl EditorHost {
             quest_store: QuestStore::new(quest_root),
         };
 
-        host.reopen_last_project_if_needed();
         Ok(host)
     }
 

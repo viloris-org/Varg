@@ -32,6 +32,8 @@ interface HubState {
     runtime_available: boolean;
   }>;
   open_project: string | null;
+  last_open_project?: string | null;
+  reopen_last_project?: boolean;
   desktop_integration?: DesktopIntegration;
 }
 
@@ -122,7 +124,30 @@ export default function App() {
         document.documentElement.dataset.theme = state.theme;
       }
       setHubState(state);
-      setScreen(state.open_project ? 'editor' : 'hub');
+      const deferredProject = state.open_project
+        ? null
+        : (state.reopen_last_project === false ? null : state.last_open_project);
+      if (!deferredProject) {
+        setScreen(state.open_project ? 'editor' : 'hub');
+        return;
+      }
+
+      window.requestAnimationFrame(() => {
+        rpc('hub/open_project', { path: deferredProject })
+          .then(() => refreshHubState())
+          .then((nextState) => {
+            if (nextState) {
+              setHubState(nextState);
+              setScreen('editor');
+            } else {
+              setScreen('hub');
+            }
+          })
+          .catch((err) => {
+            console.error('Failed to reopen project:', err);
+            setScreen('hub');
+          });
+      });
     }).catch((err) => {
       console.error('Failed to connect to host:', err);
       if (import.meta.env.DEV) {
@@ -142,7 +167,7 @@ export default function App() {
       setStartupError(message || 'The editor backend did not respond.');
       setScreen('loading');
     });
-  }, [applyDesktopIntegration]);
+  }, [applyDesktopIntegration, refreshHubState]);
 
   // ── Init ──
   useEffect(() => {

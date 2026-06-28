@@ -41,19 +41,6 @@ impl EditorHost {
         self.store.save(&self.durable_state).ok();
     }
 
-    pub(crate) fn reopen_last_project_if_needed(&mut self) {
-        if !self.hub.preferences().reopen_last_project {
-            return;
-        }
-        let Some(path) = self.durable_state.last_open_project.clone() else {
-            return;
-        };
-        if self.shell.open_project(&path).is_ok() {
-            self.hub.mark_project_open(path);
-            self.drain_shell_console();
-        }
-    }
-
     fn create_play_runtime(&self) -> EngineResult<RuntimeServices> {
         let Some(project) = self.shell.project() else {
             return Err(EngineError::config("no project open"));
@@ -203,7 +190,7 @@ impl EditorHost {
     }
 }
 
-fn project_runtime_render_scaling(
+pub(crate) fn project_runtime_render_scaling(
     project: &engine_editor::ProjectContext,
 ) -> Option<engine_render::RenderScalingSettings> {
     let build_path = project.root.join(&project.manifest.build_config);
@@ -212,7 +199,7 @@ fn project_runtime_render_scaling(
     Some(runtime_min::render_scaling_settings_from_build(&build))
 }
 
-fn editor_game_view_render_scaling(
+pub(crate) fn editor_game_view_render_scaling(
     settings: engine_render::RenderScalingSettings,
 ) -> engine_render::RenderScalingSettings {
     engine_render::RenderScalingSettings {

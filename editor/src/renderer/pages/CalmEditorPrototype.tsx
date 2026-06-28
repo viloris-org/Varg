@@ -23,6 +23,7 @@ import {
   IconSearch,
   IconSend,
   IconSettings,
+  IconShield,
   IconSparkles,
   IconStop,
   IconTrash,

@@ -60,6 +60,8 @@ impl EditorHost {
                 "runtime_available": i.runtime_available,
             })).collect::<Vec<_>>(),
             "open_project": self.shell.project().map(|p| p.root.to_string_lossy()),
+            "last_open_project": self.durable_state.last_open_project.as_ref().map(|p| p.to_string_lossy()),
+            "reopen_last_project": self.hub.preferences().reopen_last_project,
             "desktop_integration": self.desktop_integration.as_json(),
         }))
     }

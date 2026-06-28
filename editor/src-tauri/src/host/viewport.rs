@@ -9,7 +9,7 @@ impl EditorHost {
     /// and returns `(0, 0, empty_vec)` as a no-change signal.
     fn render_viewport(&mut self, params: &Value) -> EngineResult<(u32, u32, Vec<u8>)> {
         use engine_core::math::{Transform, Vec3};
-        use engine_render::{RenderCamera, RenderProjection};
+        use engine_render::{RenderCamera, RenderDevice, RenderProjection};
         use runtime_min::extract_render_world;
 
         let play_mode = params
@@ -33,6 +33,12 @@ impl EditorHost {
         let (width, height) = (
             params.get("width").and_then(|v| v.as_u64()).unwrap_or(640) as u32,
             params.get("height").and_then(|v| v.as_u64()).unwrap_or(480) as u32,
+        );
+        let viewport_scaling = super::runtime::editor_game_view_render_scaling(
+            self.shell
+                .project()
+                .and_then(super::runtime::project_runtime_render_scaling)
+                .unwrap_or_else(runtime_min::runtime_scaling_settings_from_env),
         );
 
         tracing::debug!(
@@ -212,6 +218,7 @@ impl EditorHost {
             self.render_device = Some(device);
         }
         let device = self.render_device.as_mut().unwrap();
+        device.configure_render_scaling(&viewport_scaling, runtime_min::runtime_scaling_context());
 
         // Resize if needed
         let (cur_w, cur_h) = device.default_target_size();

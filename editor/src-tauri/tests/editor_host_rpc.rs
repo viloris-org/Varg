@@ -1,7 +1,7 @@
 //! Integration tests for the Tauri editor RPC backend.
 //!
 //! Tests the `EditorHost` RPC dispatch directly (headless, no Tauri window).
-use engine_editor::FileEditorStore;
+use engine_editor::{DurableEditorState, EditorPreferences, FileEditorStore};
 use varg_editor_tauri_lib::EditorHost;
 
 fn temp_store() -> (tempfile::TempDir, FileEditorStore) {
@@ -58,6 +58,34 @@ fn hub_get_state_returns_recent_projects() {
         .expect("get state");
     let projects = state["recent_projects"].as_array().unwrap();
     assert!(projects.is_empty(), "no projects initially");
+}
+
+#[test]
+fn host_init_defers_last_project_reopen() {
+    let (tmp, store) = temp_store();
+    let project_root = tmp.path().join("DeferredProject");
+    let state = DurableEditorState {
+        preferences: EditorPreferences::default(),
+        last_open_project: Some(project_root.clone()),
+        ..DurableEditorState::default()
+    };
+    store.save(&state).expect("save durable state");
+
+    let mut host = EditorHost::new(store).expect("create editor host");
+    let hub = host
+        .handle("hub/get_state", &serde_json::json!({}))
+        .expect("get hub state");
+    let shell = host
+        .handle("shell/get_state", &serde_json::json!({}))
+        .expect("get shell state");
+
+    assert_eq!(hub["open_project"], serde_json::Value::Null);
+    assert_eq!(
+        hub["last_open_project"].as_str(),
+        Some(project_root.to_string_lossy().as_ref())
+    );
+    assert_eq!(hub["reopen_last_project"], true);
+    assert_eq!(shell["has_project"], false);
 }
 
 #[test]
