@@ -9,6 +9,7 @@ use engine_core::{
 use serde::Deserialize;
 
 use crate::{
+    object_store::{ObjectImportMap, ObjectRef, ObjectStore},
     transform::TransformHierarchy,
     world::{Entity, Lifecycle, World},
 };
@@ -1932,11 +1933,7 @@ pub struct SceneFile {
 
 #[derive(Default)]
 struct SceneState {
-    world: World,
-    transforms: TransformHierarchy,
-    objects: HashMap<Entity, GameObject>,
-    by_id: HashMap<EntityId, Entity>,
-    id_allocator: ObjectIdAllocator,
+    objects: ObjectStore,
     version: u64,
     pending_destroy: Vec<Entity>,
 }
@@ -1954,12 +1951,7 @@ impl fmt::Debug for SceneState {
 
 impl SceneState {
     fn spawn_object(&mut self, name: impl Into<String>) -> EngineResult<Entity> {
-        let entity = self.world.spawn()?;
-        let object = GameObject::new(self.id_allocator.allocate(), name);
-        self.by_id.insert(object.id, entity);
-        self.objects.insert(entity, object);
-        self.transforms.set_local(entity, Transform::IDENTITY);
-        self.transforms.set_parent(entity, None)?;
+        let entity = self.objects.spawn(name)?;
         self.bump_version();
         Ok(entity)
     }
@@ -2012,22 +2004,22 @@ impl Scene {
 
     /// Returns active transform hierarchy.
     pub fn transforms(&self) -> &TransformHierarchy {
-        &self.active().transforms
+        self.active().objects.transforms()
     }
 
     /// Returns active transform hierarchy mutably.
     pub fn transforms_mut(&mut self) -> &mut TransformHierarchy {
-        &mut self.active_mut().transforms
+        self.active_mut().objects.transforms_mut()
     }
 
     /// Returns active ECS world.
     pub fn world(&self) -> &World {
-        &self.active().world
+        self.active().objects.world()
     }
 
     /// Returns active ECS world mutably.
     pub fn world_mut(&mut self) -> &mut World {
-        &mut self.active_mut().world
+        self.active_mut().objects.world_mut()
     }
 
     /// Creates a new object at the scene root.
@@ -2037,27 +2029,19 @@ impl Scene {
 
     /// Returns immutable object metadata.
     pub fn object(&self, entity: Entity) -> Option<&GameObject> {
-        self.active().objects.get(&entity)
+        self.active().objects.object(entity)
     }
 
     /// Returns all active object entities and metadata in deterministic order.
     pub fn objects(&self) -> Vec<(Entity, &GameObject)> {
-        let mut objects = self
-            .active()
-            .objects
-            .iter()
-            .map(|(entity, object)| (*entity, object))
-            .collect::<Vec<_>>();
+        let mut objects = self.active().objects.iter().collect::<Vec<_>>();
         objects.sort_by_key(|(_, object)| object.id.as_u128());
         objects
     }
 
     /// Iterates active object entities and metadata without allocating or sorting.
     pub fn iter_objects(&self) -> impl Iterator<Item = (Entity, &GameObject)> {
-        self.active()
-            .objects
-            .iter()
-            .map(|(entity, object)| (*entity, object))
+        self.active().objects.iter()
     }
 
     /// Returns the number of active objects without allocating.
@@ -2068,14 +2052,14 @@ impl Scene {
     /// Returns mutable object metadata and bumps scene version.
     pub fn object_mut(&mut self, entity: Entity) -> Option<&mut GameObject> {
         self.active_mut().bump_version();
-        self.active_mut().objects.get_mut(&entity)
+        self.active_mut().objects.object_mut(entity)
     }
 
     /// Returns serialized components attached to an object.
     pub fn components(&self, entity: Entity) -> Option<&[ComponentData]> {
         self.active()
             .objects
-            .get(&entity)
+            .object(entity)
             .map(|object| object.components.as_slice())
     }
 
@@ -2089,7 +2073,7 @@ impl Scene {
         Self::ensure_alive(state, entity)?;
         let object = state
             .objects
-            .get_mut(&entity)
+            .object_mut(entity)
             .ok_or_else(|| EngineError::invalid_handle("object metadata is missing"))?;
         let component_type = component.type_id();
         if let Some(existing) = object
@@ -2111,7 +2095,7 @@ impl Scene {
         Self::ensure_alive(state, entity)?;
         let object = state
             .objects
-            .get_mut(&entity)
+            .object_mut(entity)
             .ok_or_else(|| EngineError::invalid_handle("object metadata is missing"))?;
         let before = object.components.len();
         object
@@ -2135,7 +2119,7 @@ impl Scene {
         Self::ensure_alive(scene_state, entity)?;
         let object = scene_state
             .objects
-            .get_mut(&entity)
+            .object_mut(entity)
             .ok_or_else(|| EngineError::invalid_handle("object metadata is missing"))?;
         let mut updated = false;
         for candidate in &mut object.scripts {
@@ -2160,12 +2144,12 @@ impl Scene {
         self.active()
             .objects
             .iter()
-            .find_map(|(entity, object)| (object.name == name).then_some(*entity))
+            .find_map(|(entity, object)| (object.name == name).then_some(entity))
     }
 
     /// Finds an object by its stable scene object ID.
     pub fn find_by_id(&self, id: EntityId) -> Option<Entity> {
-        self.active().by_id.get(&id).copied()
+        self.active().objects.resolve(ObjectRef::new(id))
     }
 
     /// Finds all objects with a tag.
@@ -2173,7 +2157,7 @@ impl Scene {
         self.active()
             .objects
             .iter()
-            .filter_map(|(entity, object)| (object.tag == tag).then_some(*entity))
+            .filter_map(|(entity, object)| (object.tag == tag).then_some(entity))
             .collect()
     }
 
@@ -2182,7 +2166,7 @@ impl Scene {
         self.active()
             .objects
             .iter()
-            .filter_map(|(entity, object)| (object.layer == layer).then_some(*entity))
+            .filter_map(|(entity, object)| (object.layer == layer).then_some(entity))
             .collect()
     }
 
@@ -2199,11 +2183,7 @@ impl Scene {
     /// Sets an object's parent.
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) -> EngineResult<()> {
         let state = self.active_mut();
-        Self::ensure_alive(state, child)?;
-        if let Some(parent) = parent {
-            Self::ensure_alive(state, parent)?;
-        }
-        state.transforms.set_parent(child, parent)?;
+        state.objects.set_parent(child, parent)?;
         state.bump_version();
         Ok(())
     }
@@ -2223,13 +2203,7 @@ impl Scene {
         let state = self.active_mut();
         let pending = std::mem::take(&mut state.pending_destroy);
         for entity in pending {
-            if let Some(object) = state.objects.remove(&entity) {
-                state.by_id.remove(&object.id);
-            }
-            state.transforms.remove(entity);
-            if state.world.is_alive(entity) {
-                state.world.despawn(entity)?;
-            }
+            let _ = state.objects.remove(entity)?;
             state.bump_version();
         }
         Ok(())
@@ -2237,7 +2211,10 @@ impl Scene {
 
     /// Runs lifecycle hooks in the required stage order chosen by the caller.
     pub fn run_lifecycle(&mut self, stage: LifecycleStage) {
-        self.active_mut().world.run_lifecycle(stage.into());
+        self.active_mut()
+            .objects
+            .world_mut()
+            .run_lifecycle(stage.into());
     }
 
     /// Runs a variable runtime frame in `Start`, `Update`, then `LateUpdate` order.
@@ -2251,7 +2228,7 @@ impl Scene {
     /// Advances all particle emitters in the active scene by `delta_seconds`.
     pub fn tick_particles(&mut self, delta_seconds: f32) {
         let state = self.active_mut();
-        for object in state.objects.values_mut() {
+        for (_, object) in state.objects.iter_mut() {
             for component in &mut object.components {
                 if let ComponentData::ParticleEmitter(emitter) = component {
                     emitter.tick(delta_seconds);
@@ -2275,24 +2252,7 @@ impl Scene {
     pub fn clone_object(&mut self, source: Entity) -> EngineResult<Entity> {
         let state = self.active_mut();
         Self::ensure_alive(state, source)?;
-        let source_object = state
-            .objects
-            .get(&source)
-            .ok_or_else(|| EngineError::invalid_handle("source object is missing metadata"))?
-            .clone();
-        let new_entity = state.world.spawn()?;
-        let mut cloned = source_object;
-        cloned.id = state.id_allocator.allocate();
-        cloned.name = format!("{} (Copy)", cloned.name);
-        state.by_id.insert(cloned.id, new_entity);
-        state.objects.insert(new_entity, cloned);
-        state.transforms.set_local(
-            new_entity,
-            state.transforms.local(source).unwrap_or_default(),
-        );
-        state
-            .transforms
-            .set_parent(new_entity, state.transforms.parent(source))?;
+        let new_entity = state.objects.clone_object(source)?;
         state.bump_version();
         Ok(new_entity)
     }
@@ -2326,17 +2286,22 @@ impl Scene {
     pub fn to_scene_file(&self, name: impl Into<String>) -> EngineResult<SceneFile> {
         let state = self.active();
         let mut objects = Vec::with_capacity(state.objects.len());
-        for (entity, object) in &state.objects {
+        for (entity, object) in state.objects.iter() {
             let parent = state
-                .transforms
-                .parent(*entity)
-                .and_then(|parent| state.objects.get(&parent))
+                .objects
+                .transforms()
+                .parent(entity)
+                .and_then(|parent| state.objects.object(parent))
                 .map(|parent| parent.id);
             objects.push(SerializedGameObject {
                 object: object.clone(),
-                local_transform: state.transforms.local(*entity).unwrap_or_default(),
+                local_transform: state.objects.transforms().local(entity).unwrap_or_default(),
                 parent,
-                sibling_index: state.transforms.sibling_index(*entity).unwrap_or_default(),
+                sibling_index: state
+                    .objects
+                    .transforms()
+                    .sibling_index(entity)
+                    .unwrap_or_default(),
             });
         }
         objects.sort_by_key(|object| (object.parent.map(EntityId::as_u128), object.sibling_index));
@@ -2371,27 +2336,21 @@ impl Scene {
 
     fn load_objects_from_scene_file(&mut self, file: &SceneFile) -> EngineResult<Vec<Entity>> {
         let state = self.active_mut();
-        let mut source_to_entity = HashMap::new();
+        let mut imported = ObjectImportMap::default();
         let mut created = Vec::with_capacity(file.objects.len());
 
         for record in &file.objects {
-            let entity = state.world.spawn()?;
-            let mut object = record.object.clone();
-            object.id = state.id_allocator.allocate();
-            state.id_allocator.observe(object.id);
-            state.by_id.insert(object.id, entity);
-            state.objects.insert(entity, object);
-            state.transforms.set_local(entity, record.local_transform);
-            source_to_entity.insert(record.object.id, entity);
+            let entity = state
+                .objects
+                .instantiate_object(record.object.clone(), record.local_transform)?;
+            imported.insert(ObjectRef::new(record.object.id), entity);
             created.push(entity);
         }
 
         for record in &file.objects {
-            let entity = source_to_entity[&record.object.id];
-            let parent = record
-                .parent
-                .and_then(|id| source_to_entity.get(&id).copied());
-            state.transforms.set_parent(entity, parent)?;
+            let entity = imported.resolve_required(ObjectRef::new(record.object.id))?;
+            let parent = imported.resolve_optional(record.parent.map(ObjectRef::new))?;
+            state.objects.set_parent(entity, parent)?;
         }
         state.bump_version();
         Ok(created)
@@ -2405,30 +2364,24 @@ impl Scene {
             )));
         }
         let mut state = SceneState::default();
-        let mut source_to_entity = HashMap::new();
+        let mut imported = ObjectImportMap::default();
         let mut records = file.objects.clone();
         records.sort_by_key(|record| (record.parent.map(EntityId::as_u128), record.sibling_index));
 
         for record in &records {
-            let entity = state.world.spawn()?;
-            state.id_allocator.observe(record.object.id);
-            state.by_id.insert(record.object.id, entity);
             let mut object = record.object.clone();
             for component in &mut object.components {
                 if let ComponentData::AudioSource(source) = component {
                     source.migrate_legacy();
                 }
             }
-            state.objects.insert(entity, object);
-            state.transforms.set_local(entity, record.local_transform);
-            source_to_entity.insert(record.object.id, entity);
+            let entity = state.objects.load_object(object, record.local_transform)?;
+            imported.insert(ObjectRef::new(record.object.id), entity);
         }
         for record in &records {
-            let entity = source_to_entity[&record.object.id];
-            let parent = record
-                .parent
-                .and_then(|id| source_to_entity.get(&id).copied());
-            state.transforms.set_parent(entity, parent)?;
+            let entity = imported.resolve_required(ObjectRef::new(record.object.id))?;
+            let parent = imported.resolve_optional(record.parent.map(ObjectRef::new))?;
+            state.objects.set_parent(entity, parent)?;
         }
         Ok(state)
     }
@@ -2448,18 +2401,14 @@ impl Scene {
     }
 
     fn ensure_alive(state: &SceneState, entity: Entity) -> EngineResult<()> {
-        if state.world.is_alive(entity) {
-            Ok(())
-        } else {
-            Err(EngineError::invalid_handle("scene object is not live"))
-        }
+        state.objects.ensure_alive(entity)
     }
 
     fn find_camera(&self, role: CameraRole) -> Option<Entity> {
         self.active()
             .objects
             .iter()
-            .find_map(|(entity, object)| (object.camera_role == Some(role)).then_some(*entity))
+            .find_map(|(entity, object)| (object.camera_role == Some(role)).then_some(entity))
     }
 }
 
@@ -2569,6 +2518,27 @@ mod tests {
         scene.process_deferred_destroy().unwrap();
 
         assert!(!scene.world().is_alive(entity));
+    }
+
+    #[test]
+    fn scene_load_preserves_ids_but_prefab_instances_get_new_ids() {
+        let mut scene = Scene::new();
+        let source = scene.create_object("Source").unwrap();
+        let source_id = scene.object(source).unwrap().id;
+        let file = scene.to_scene_file("IDs").unwrap();
+
+        let loaded = Scene::from_scene_file(file.clone()).unwrap();
+        assert!(loaded.find_by_id(source_id).is_some());
+
+        let mut target = Scene::new();
+        let existing = target.create_object("Existing").unwrap();
+        let existing_id = target.object(existing).unwrap().id;
+        let prefab = crate::schema::PrefabFile::new("Prefab", file);
+        let instantiated = target.instantiate_prefab(&prefab).unwrap();
+
+        assert_eq!(instantiated.len(), 1);
+        assert_ne!(target.object(instantiated[0]).unwrap().id, existing_id);
+        assert_eq!(target.find_by_id(existing_id), Some(existing));
     }
 
     #[test]

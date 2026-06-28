@@ -3,6 +3,7 @@
 
 //! Atomic ECS and base scene storage.
 
+mod object_store;
 pub mod particle;
 pub mod scene;
 pub mod schema;
