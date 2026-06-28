@@ -1,10 +1,212 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::{device::*, meshes::*, uniforms::*};
 use engine_render::RenderWorld;
 use wgpu::util::DeviceExt;
 
-pub(crate) type RenderBatch = (String, Vec<Instance>, String, bool);
+#[derive(Clone)]
+pub(crate) struct RenderBatchInstance {
+    pub(crate) instance: Instance,
+    pub(crate) shadow_center: engine_core::math::Vec3,
+    pub(crate) shadow_radius: f32,
+    pub(crate) shadow_depth_min: f32,
+    pub(crate) shadow_depth_max: f32,
+}
+
+#[derive(Clone)]
+pub(crate) struct RenderBatchDraw {
+    pub(crate) mesh_name: String,
+    pub(crate) count: u32,
+    pub(crate) material_name: String,
+    pub(crate) casts_shadows: bool,
+    pub(crate) instance_start: u32,
+    pub(crate) shadow_ranges: [Vec<Range<u32>>; CSM_CASCADE_COUNT],
+}
+
+pub(crate) type RenderBatch = (String, Vec<RenderBatchInstance>, String, bool);
+
+fn render_instance(instance: Instance) -> RenderBatchInstance {
+    let shadow_center =
+        engine_core::math::Vec3::new(instance.offset[0], instance.offset[1], instance.offset[2]);
+    let shadow_radius = instance.scale[0]
+        .abs()
+        .max(instance.scale[1].abs())
+        .max(instance.scale[2].abs());
+    RenderBatchInstance {
+        instance,
+        shadow_center,
+        shadow_radius,
+        shadow_depth_min: f32::NEG_INFINITY,
+        shadow_depth_max: f32::INFINITY,
+    }
+}
+
+fn object_shadow_instance(
+    object: &engine_render::RenderObject,
+    camera: Option<&engine_render::RenderCamera>,
+    instance: Instance,
+) -> RenderBatchInstance {
+    let scaled_center = engine_core::math::Vec3::new(
+        object.bounds.center.x * object.transform.scale.x,
+        object.bounds.center.y * object.transform.scale.y,
+        object.bounds.center.z * object.transform.scale.z,
+    );
+    let world_center =
+        object.transform.translation + object.transform.rotation.rotate(scaled_center);
+    let scale = object
+        .transform
+        .scale
+        .x
+        .abs()
+        .max(object.transform.scale.y.abs())
+        .max(object.transform.scale.z.abs());
+    let radius = object.bounds.radius.max(0.0) * scale.max(0.0001);
+    let (shadow_depth_min, shadow_depth_max) = camera
+        .map(|camera| {
+            let forward = camera
+                .look_at_target
+                .map(|target| (target - camera.transform.translation).normalized())
+                .unwrap_or_else(|| {
+                    camera
+                        .transform
+                        .rotation
+                        .rotate(engine_core::math::Vec3::new(0.0, 0.0, -1.0))
+                        .normalized()
+                });
+            let relative = world_center - camera.transform.translation;
+            let depth = relative.dot(forward);
+            (depth - radius, depth + radius)
+        })
+        .unwrap_or((f32::NEG_INFINITY, f32::INFINITY));
+    RenderBatchInstance {
+        instance,
+        shadow_center: world_center,
+        shadow_radius: radius,
+        shadow_depth_min,
+        shadow_depth_max,
+    }
+}
+
+pub(crate) fn shadow_ranges_for_instances(
+    instances: &[RenderBatchInstance],
+    instance_start: u32,
+    cascade_vp: &[[f32; 4]; 4],
+    cascade_near: f32,
+    cascade_far: f32,
+) -> Vec<Range<u32>> {
+    let mut ranges = Vec::new();
+    let mut active_start: Option<u32> = None;
+    for (index, instance) in instances.iter().enumerate() {
+        let overlaps = instance.shadow_depth_max >= cascade_near
+            && instance.shadow_depth_min <= cascade_far
+            && sphere_intersects_cascade_clip(
+                cascade_vp,
+                instance.shadow_center,
+                instance.shadow_radius,
+            );
+        let instance = instance_start + index as u32;
+        match (active_start, overlaps) {
+            (None, true) => active_start = Some(instance),
+            (Some(start), false) => {
+                ranges.push(start..instance);
+                active_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = active_start {
+        ranges.push(start..instance_start + instances.len() as u32);
+    }
+    ranges
+}
+
+#[allow(dead_code)]
+pub(crate) fn shadow_ranges_for_depth_bounds(
+    bounds: &[(f32, f32)],
+    instance_start: u32,
+    cascade_near: f32,
+    cascade_far: f32,
+) -> Vec<Range<u32>> {
+    let instances = bounds
+        .iter()
+        .map(|(depth_min, depth_max)| RenderBatchInstance {
+            instance: Instance {
+                offset: [0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                color: [1.0; 4],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                emissive: [0.0; 3],
+                receive_shadows: 1.0,
+            },
+            shadow_center: engine_core::math::Vec3::ZERO,
+            shadow_radius: 0.0,
+            shadow_depth_min: *depth_min,
+            shadow_depth_max: *depth_max,
+        })
+        .collect::<Vec<_>>();
+    shadow_ranges_for_instances(
+        &instances,
+        instance_start,
+        &crate::math::IDENTITY_MAT4,
+        cascade_near,
+        cascade_far,
+    )
+}
+
+pub(crate) fn sphere_intersects_cascade_clip(
+    cascade_vp: &[[f32; 4]; 4],
+    center: engine_core::math::Vec3,
+    radius: f32,
+) -> bool {
+    let clip_center = crate::math::mul_mat4_vec3(cascade_vp, center);
+    let radius = radius.max(0.0);
+    let clip_radius_x = radius
+        * (cascade_vp[0][0] * cascade_vp[0][0]
+            + cascade_vp[1][0] * cascade_vp[1][0]
+            + cascade_vp[2][0] * cascade_vp[2][0])
+            .sqrt();
+    let clip_radius_y = radius
+        * (cascade_vp[0][1] * cascade_vp[0][1]
+            + cascade_vp[1][1] * cascade_vp[1][1]
+            + cascade_vp[2][1] * cascade_vp[2][1])
+            .sqrt();
+    let clip_radius_z = radius
+        * (cascade_vp[0][2] * cascade_vp[0][2]
+            + cascade_vp[1][2] * cascade_vp[1][2]
+            + cascade_vp[2][2] * cascade_vp[2][2])
+            .sqrt();
+
+    clip_center.x + clip_radius_x >= -1.0
+        && clip_center.x - clip_radius_x <= 1.0
+        && clip_center.y + clip_radius_y >= -1.0
+        && clip_center.y - clip_radius_y <= 1.0
+        && clip_center.z + clip_radius_z >= 0.0
+        && clip_center.z - clip_radius_z <= 1.0
+}
+
+pub(crate) fn active_csm_cascade_count(csm: &CsmUniform) -> usize {
+    let mut count = 1usize;
+    for index in 1..4 {
+        if csm.cascade_splits[index] > csm.cascade_splits[index - 1] + f32::EPSILON {
+            count += 1;
+        }
+    }
+    count
+}
+
+pub(crate) fn csm_cascade_depth_range(csm: &CsmUniform, cascade_idx: usize) -> (f32, f32) {
+    let split_idx = cascade_idx.min(3);
+    let near = if split_idx == 0 {
+        0.0
+    } else {
+        csm.cascade_splits[split_idx - 1] - CSM_CASCADE_FADE_RANGE
+    };
+    let far = csm.cascade_splits[split_idx] + CSM_CASCADE_FADE_RANGE;
+    (near.max(0.0), far.max(0.0))
+}
 
 impl WgpuRenderDevice {
     /// Register PBR material parameters for an asset material name.
@@ -89,7 +291,7 @@ impl WgpuRenderDevice {
             + usize::from(!world.sprites.is_empty())
             + usize::from(!world.particles.is_empty()))
         .min(32);
-        let mut batches: HashMap<(String, String, bool), Vec<Instance>> =
+        let mut batches: HashMap<(String, String, bool), Vec<RenderBatchInstance>> =
             HashMap::with_capacity(batch_capacity);
         for (&object_index, selected_mesh) in visibility
             .visible_indices
@@ -106,23 +308,28 @@ impl WgpuRenderDevice {
                 selected_mesh.clone()
             };
             let mat = object.material.clone();
+            let instance = Instance {
+                offset: [t.translation.x, t.translation.y, t.translation.z],
+                scale: [
+                    t.scale.x.max(0.05),
+                    t.scale.y.max(0.05),
+                    t.scale.z.max(0.05),
+                ],
+                color,
+                rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                metallic,
+                roughness,
+                emissive,
+                receive_shadows: if object.receive_shadows { 1.0 } else { 0.0 },
+            };
             batches
                 .entry((mesh, mat, object.casts_shadows))
                 .or_default()
-                .push(Instance {
-                    offset: [t.translation.x, t.translation.y, t.translation.z],
-                    scale: [
-                        t.scale.x.max(0.05),
-                        t.scale.y.max(0.05),
-                        t.scale.z.max(0.05),
-                    ],
-                    color,
-                    rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
-                    metallic,
-                    roughness,
-                    emissive,
-                    receive_shadows: if object.receive_shadows { 1.0 } else { 0.0 },
-                });
+                .push(object_shadow_instance(
+                    object,
+                    world.camera.as_ref(),
+                    instance,
+                ));
         }
         let mut batches: Vec<_> = batches
             .into_iter()
@@ -141,7 +348,7 @@ impl WgpuRenderDevice {
                 let t = sprite.transform;
                 let x = t.scale.x.abs().max(0.01) * if sprite.flip_h { -1.0 } else { 1.0 };
                 let y = t.scale.y.abs().max(0.01) * if sprite.flip_v { -1.0 } else { 1.0 };
-                let instance = Instance {
+                let instance = render_instance(Instance {
                     offset: [
                         t.translation.x,
                         t.translation.y,
@@ -154,7 +361,7 @@ impl WgpuRenderDevice {
                     roughness: 0.5,
                     emissive: [0.0; 3],
                     receive_shadows: 1.0,
-                };
+                });
                 let texture = sprite.texture.clone().unwrap_or_default();
                 if current_texture
                     .as_ref()
@@ -196,11 +403,11 @@ impl WgpuRenderDevice {
                 .map_or(engine_core::math::Quat::IDENTITY, |camera| {
                     camera.transform.rotation
                 });
-            let particle_instances: Vec<Instance> = particles
+            let particle_instances: Vec<RenderBatchInstance> = particles
                 .into_iter()
                 .map(|particle| {
                     let t = particle.transform;
-                    Instance {
+                    render_instance(Instance {
                         offset: [t.translation.x, t.translation.y, t.translation.z],
                         scale: [
                             t.scale.x.max(0.01),
@@ -218,7 +425,7 @@ impl WgpuRenderDevice {
                         roughness: 0.5,
                         emissive: [0.0; 3],
                         receive_shadows: 1.0,
-                    }
+                    })
                 })
                 .collect();
             batches.push((

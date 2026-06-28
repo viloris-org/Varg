@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use crate::{
     device::*,
+    diagnostics,
     format::*,
+    light_preparation::csm_uniform_from_world,
     meshes::{SkinnedMeshBuffers, with_generated_tangents},
     render::*,
     scene_uniforms::*,
@@ -39,12 +41,12 @@ impl RenderDevice for WgpuRenderDevice {
                     .unwrap_or_else(|| cfg.width as f32 / cfg.height.max(1) as f32)
             })
             .unwrap_or(16.0 / 9.0);
-        let batches = self.prepare_render_batches(world, aspect);
+        let csm = csm_uniform_from_world(world, aspect);
+        let batches = self.prepare_render_batches(world, aspect, &csm);
         self.prepare_gpu_particles(world);
         let plan = self.active_frame_plan.clone().unwrap_or_default();
         self.upload_lighting_uniform(world);
         self.upload_gi_probes(world);
-        let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
         let use_cubemap = self.prepare_skybox_environment(world);
@@ -112,7 +114,7 @@ impl RenderDevice for WgpuRenderDevice {
                 .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
 
             let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let enable_ssao = self.ssao_compute_pipeline.is_some();
+            let enable_ssao = self.ssao_compute_pipeline.is_some() && !diagnostics::disable_ssao();
             let enable_ssgi = self.screen_space_gi_enabled(world);
             let ssgi_intensity = Self::screen_space_gi_intensity(world);
             let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();

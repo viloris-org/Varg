@@ -30,6 +30,7 @@ struct CsmUniform {
     cascade_vps: array<mat4x4<f32>, 5>,
     cascade_splits: vec4<f32>,
     params: vec4<f32>,
+    fade_params: vec4<f32>,
 };
 
 struct FogUniform {
@@ -235,6 +236,21 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>, dist
     return mix(color, fog.color, clamp(fog_factor, 0.0, 1.0));
 }
 
+fn compare_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32) -> f32 {
+    let texel = csm.params.y;
+    let safe_uv = clamp(uv, vec2<f32>(texel * 0.5), vec2<f32>(1.0 - texel * 0.5));
+    if (cascade_idx == 0u) {
+        return textureSampleCompare(csm_shadow_0, csm_sampler, safe_uv, depth);
+    } else if (cascade_idx == 1u) {
+        return textureSampleCompare(csm_shadow_1, csm_sampler, safe_uv, depth);
+    } else if (cascade_idx == 2u) {
+        return textureSampleCompare(csm_shadow_2, csm_sampler, safe_uv, depth);
+    } else if (cascade_idx == 3u) {
+        return textureSampleCompare(csm_shadow_3, csm_sampler, safe_uv, depth);
+    }
+    return textureSampleCompare(csm_shadow_4, csm_sampler, safe_uv, depth);
+}
+
 fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32) -> f32 {
     let bias = csm.params.z + csm.params.w * (1.0 - ndotl);
     let texel = csm.params.y;
@@ -243,18 +259,7 @@ fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32
     for (var bx = -2; bx <= 2; bx++) {
         for (var by = -2; by <= 2; by++) {
             let offset = vec2<f32>(f32(bx), f32(by)) * search_radius;
-            var visible = 1.0;
-            if (cascade_idx == 0u) {
-                visible = textureSampleCompare(csm_shadow_0, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 1u) {
-                visible = textureSampleCompare(csm_shadow_1, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 2u) {
-                visible = textureSampleCompare(csm_shadow_2, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 3u) {
-                visible = textureSampleCompare(csm_shadow_3, csm_sampler, uv + offset, depth - bias);
-            } else {
-                visible = textureSampleCompare(csm_shadow_4, csm_sampler, uv + offset, depth - bias);
-            }
+            let visible = compare_cascade_shadow(cascade_idx, uv + offset, depth - bias);
             if (visible < 0.5) {
                 blocker_count += 1.0;
             }
@@ -266,26 +271,30 @@ fn sample_cascade_shadow(cascade_idx: u32, uv: vec2<f32>, depth: f32, ndotl: f32
     for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
             let offset = vec2<f32>(f32(dx), f32(dy)) * texel * penumbra;
-            if (cascade_idx == 0u) {
-                shadow_factor += textureSampleCompare(csm_shadow_0, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 1u) {
-                shadow_factor += textureSampleCompare(csm_shadow_1, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 2u) {
-                shadow_factor += textureSampleCompare(csm_shadow_2, csm_sampler, uv + offset, depth - bias);
-            } else if (cascade_idx == 3u) {
-                shadow_factor += textureSampleCompare(csm_shadow_3, csm_sampler, uv + offset, depth - bias);
-            } else {
-                shadow_factor += textureSampleCompare(csm_shadow_4, csm_sampler, uv + offset, depth - bias);
-            }
+            shadow_factor += compare_cascade_shadow(cascade_idx, uv + offset, depth - bias);
         }
     }
     return shadow_factor / 9.0;
 }
 
+fn apply_csm_distance_fade(shadow_factor: f32, view_depth: f32) -> f32 {
+    let fade_start = min(csm.fade_params.x, csm.fade_params.y);
+    let fade_end = max(csm.fade_params.y, fade_start + EPSILON);
+    let fade_width = max(fade_end - fade_start, EPSILON);
+    let visibility_weight = clamp((fade_end - view_depth) / fade_width, 0.0, 1.0);
+    return mix(1.0, shadow_factor, visibility_weight);
+}
+
 fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    var cascade_idx = 4u;
+    if (view_depth >= csm.cascade_splits.w) {
+        return 1.0;
+    }
+    var cascade_idx = 3u;
     var fade = 1.0;
     let fade_range = max(csm.params.x, EPSILON);
+    let ndotl = max(dot(n, light_dir), 0.0);
+    let receiver_offset = n * (0.015 + (1.0 - ndotl) * 0.035);
+    let shadow_pos = world_pos + receiver_offset;
     if (view_depth < csm.cascade_splits.x) {
         cascade_idx = 0u;
         if (view_depth > csm.cascade_splits.x - fade_range) {
@@ -301,19 +310,13 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
         if (view_depth > csm.cascade_splits.z - fade_range) {
             fade = (csm.cascade_splits.z - view_depth) / fade_range;
         }
-    } else if (view_depth < csm.cascade_splits.w) {
-        cascade_idx = 3u;
-        if (view_depth > csm.cascade_splits.w - fade_range) {
-            fade = (csm.cascade_splits.w - view_depth) / fade_range;
-        }
     }
 
     var shadow_coord: vec4<f32>;
-    if (cascade_idx == 0u) { shadow_coord = csm.cascade_vps[0] * vec4<f32>(world_pos, 1.0); }
-    else if (cascade_idx == 1u) { shadow_coord = csm.cascade_vps[1] * vec4<f32>(world_pos, 1.0); }
-    else if (cascade_idx == 2u) { shadow_coord = csm.cascade_vps[2] * vec4<f32>(world_pos, 1.0); }
-    else if (cascade_idx == 3u) { shadow_coord = csm.cascade_vps[3] * vec4<f32>(world_pos, 1.0); }
-    else { shadow_coord = csm.cascade_vps[4] * vec4<f32>(world_pos, 1.0); }
+    if (cascade_idx == 0u) { shadow_coord = csm.cascade_vps[0] * vec4<f32>(shadow_pos, 1.0); }
+    else if (cascade_idx == 1u) { shadow_coord = csm.cascade_vps[1] * vec4<f32>(shadow_pos, 1.0); }
+    else if (cascade_idx == 2u) { shadow_coord = csm.cascade_vps[2] * vec4<f32>(shadow_pos, 1.0); }
+    else { shadow_coord = csm.cascade_vps[3] * vec4<f32>(shadow_pos, 1.0); }
 
     let ndc = shadow_coord.xyz / shadow_coord.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -323,17 +326,18 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
         return 1.0;
     }
 
-    let ndotl = max(dot(n, light_dir), 0.0);
     let base_shadow = sample_cascade_shadow(cascade_idx, uv, depth, ndotl);
-    if (fade < 1.0) {
+    let next_split_is_distinct =
+        (cascade_idx == 0u && csm.cascade_splits.y > csm.cascade_splits.x + EPSILON) ||
+        (cascade_idx == 1u && csm.cascade_splits.z > csm.cascade_splits.y + EPSILON) ||
+        (cascade_idx == 2u && csm.cascade_splits.w > csm.cascade_splits.z + EPSILON);
+    if (fade < 1.0 && next_split_is_distinct) {
         if (cascade_idx == 0u) {
-            shadow_coord = csm.cascade_vps[1] * vec4<f32>(world_pos, 1.0);
+            shadow_coord = csm.cascade_vps[1] * vec4<f32>(shadow_pos, 1.0);
         } else if (cascade_idx == 1u) {
-            shadow_coord = csm.cascade_vps[2] * vec4<f32>(world_pos, 1.0);
+            shadow_coord = csm.cascade_vps[2] * vec4<f32>(shadow_pos, 1.0);
         } else if (cascade_idx == 2u) {
-            shadow_coord = csm.cascade_vps[3] * vec4<f32>(world_pos, 1.0);
-        } else if (cascade_idx == 3u) {
-            shadow_coord = csm.cascade_vps[4] * vec4<f32>(world_pos, 1.0);
+            shadow_coord = csm.cascade_vps[3] * vec4<f32>(shadow_pos, 1.0);
         } else { return base_shadow; }
         let ndc2 = shadow_coord.xyz / shadow_coord.w;
         let uv2 = vec2<f32>(ndc2.x * 0.5 + 0.5, 0.5 - ndc2.y * 0.5);
@@ -342,9 +346,9 @@ fn sample_csm_shadow(world_pos: vec3<f32>, view_depth: f32, n: vec3<f32>, light_
             return base_shadow;
         }
         let next_shadow = sample_cascade_shadow(cascade_idx + 1u, uv2, depth2, ndotl);
-        return mix(base_shadow, next_shadow, 1.0 - fade);
+        return apply_csm_distance_fade(min(base_shadow, next_shadow), view_depth);
     }
-    return base_shadow;
+    return apply_csm_distance_fade(base_shadow, view_depth);
 }
 
 @vertex
@@ -427,7 +431,7 @@ fn fs_main(input: VsOut) -> FsOut {
         let shadow_light = lighting.lights[0];
         if (shadow_light.position_type.w < 0.5 && shadow_light.spot_angles.z > 0.5) {
             let shadow_light_dir = normalize(-shadow_light.direction_range.xyz);
-            shadow_factor = sample_csm_shadow(input.world_position, view_depth, n, shadow_light_dir);
+            shadow_factor = sample_csm_shadow(input.world_position, view_depth, tbn_n, shadow_light_dir);
         }
     }
 
@@ -665,14 +669,37 @@ struct VsIn {
     @location(11) receive_shadows: f32,
 };
 
+struct ShadowVsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) skip_shadow: f32,
+};
+
 @vertex
-fn vs_main(input: VsIn) -> @builtin(position) vec4<f32> {
+fn vs_main(input: VsIn) -> ShadowVsOut {
     let scaled_position = input.position * input.scale;
     let rotated_position = scaled_position
         + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_position)
         + input.rotation.w * scaled_position);
     let world_pos = rotated_position + input.offset;
-    return shadow.light_view_projection * vec4<f32>(world_pos, 1.0);
+
+    let scaled_normal = input.normal / max(abs(input.scale), vec3<f32>(0.0001));
+    let world_normal = normalize(scaled_normal
+        + 2.0 * cross(input.rotation.xyz, cross(input.rotation.xyz, scaled_normal)
+        + input.rotation.w * scaled_normal));
+    let low_profile = input.scale.y < 0.08;
+    let horizontal_face = abs(world_normal.y) > 0.92;
+
+    var out: ShadowVsOut;
+    out.position = shadow.light_view_projection * vec4<f32>(world_pos, 1.0);
+    out.skip_shadow = select(0.0, 1.0, low_profile && horizontal_face);
+    return out;
+}
+
+@fragment
+fn fs_main(input: ShadowVsOut) {
+    if (input.skip_shadow > 0.5) {
+        discard;
+    }
 }
 "#;
 

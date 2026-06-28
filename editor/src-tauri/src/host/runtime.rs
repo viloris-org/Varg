@@ -90,6 +90,7 @@ impl EditorHost {
         );
         let render_scaling = project_runtime_render_scaling(project)
             .unwrap_or_else(runtime_min::runtime_scaling_settings_from_env);
+        let render_scaling = editor_game_view_render_scaling(render_scaling);
         Ok(game_window::GameRuntimeSnapshot::new(
             config,
             project.root.clone(),
@@ -209,4 +210,51 @@ fn project_runtime_render_scaling(
     let build_text = std::fs::read_to_string(build_path).ok()?;
     let build = toml::from_str::<engine_ecs::BuildConfiguration>(&build_text).ok()?;
     Some(runtime_min::render_scaling_settings_from_build(&build))
+}
+
+fn editor_game_view_render_scaling(
+    settings: engine_render::RenderScalingSettings,
+) -> engine_render::RenderScalingSettings {
+    engine_render::RenderScalingSettings {
+        quality: engine_render::RenderQualityMode::Native,
+        preferred_upscaler: Some(engine_render::UpscalerKind::Native),
+        dynamic_resolution: false,
+        min_render_scale: 1.0,
+        max_render_scale: 1.0,
+        anti_aliasing: engine_render::AntiAliasingMode::Off,
+        ..settings
+    }
+    .normalized()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_game_view_render_scaling_forces_high_fidelity_preview() {
+        let settings = engine_render::RenderScalingSettings {
+            quality: engine_render::RenderQualityMode::Balanced,
+            preferred_upscaler: Some(engine_render::UpscalerKind::BuiltInSpatial),
+            dynamic_resolution: true,
+            min_render_scale: 0.5,
+            max_render_scale: 0.5,
+            target_fps: 144,
+            anti_aliasing: engine_render::AntiAliasingMode::Taa,
+            ..engine_render::RenderScalingSettings::default()
+        };
+
+        let preview = editor_game_view_render_scaling(settings);
+
+        assert_eq!(preview.quality, engine_render::RenderQualityMode::Native);
+        assert_eq!(
+            preview.preferred_upscaler,
+            Some(engine_render::UpscalerKind::Native)
+        );
+        assert!(!preview.dynamic_resolution);
+        assert_eq!(preview.min_render_scale, 1.0);
+        assert_eq!(preview.max_render_scale, 1.0);
+        assert_eq!(preview.anti_aliasing, engine_render::AntiAliasingMode::Off);
+        assert_eq!(preview.target_fps, 144);
+    }
 }

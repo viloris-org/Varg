@@ -420,11 +420,9 @@ impl GameApp {
             .window
             .as_ref()
             .ok_or_else(|| "game window is not initialized".to_owned())?;
-        let renderer = WgpuRenderDevice::new_with_performance(
-            window,
-            engine_render::RenderPerformanceConfig::competitive_120hz(),
-        )
-        .map_err(|error| format!("wgpu device: {error}"))?;
+        let renderer =
+            WgpuRenderDevice::new_with_performance(window, game_view_performance_config())
+                .map_err(|error| format!("wgpu device: {error}"))?;
         let runtime = snapshot
             .into_runtime(renderer)
             .map_err(|error| format!("runtime: {error}"))?;
@@ -467,6 +465,10 @@ impl GameApp {
     }
 }
 
+fn game_view_performance_config() -> engine_render::RenderPerformanceConfig {
+    engine_render::RenderPerformanceConfig::editor_1080p75()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +479,21 @@ mod tests {
         std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var_os("WAYLAND_SOCKET").is_some()
             || std::env::var_os("DISPLAY").is_some()
+    }
+
+    #[test]
+    fn game_view_uses_quality_first_editor_performance_policy() {
+        let config = game_view_performance_config();
+        assert_eq!(
+            config.present_strategy,
+            engine_render::PresentStrategy::VSync
+        );
+        assert_eq!(config.maximum_frame_latency, 2);
+        assert_eq!(config.render_scale, 1.0);
+        assert!(!config.dynamic_resolution.enabled);
+        assert_eq!(config.dynamic_resolution.target_fps, 75);
+        assert_eq!(config.dynamic_resolution.min_scale, 1.0);
+        assert_eq!(config.dynamic_resolution.max_scale, 1.0);
     }
 
     #[test]

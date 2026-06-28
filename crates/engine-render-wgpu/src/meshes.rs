@@ -451,19 +451,20 @@ pub(crate) fn generate_plane() -> (Vec<Vertex>, Vec<u32>) {
 
 pub(crate) fn generate_grid() -> Vec<Vertex> {
     let half = 50.0;
+    let y = 0.01;
     let mut vertices = Vec::with_capacity(404);
 
     for i in -50..=50 {
         let x = i as f32;
         let alpha = if i % 5 == 0 { 0.35 } else { 0.15 };
         vertices.push(Vertex {
-            position: [x, 0.0, -half],
+            position: [x, y, -half],
             normal: [0.0, 1.0, 0.0],
             uv: [alpha, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
         });
         vertices.push(Vertex {
-            position: [x, 0.0, half],
+            position: [x, y, half],
             normal: [0.0, 1.0, 0.0],
             uv: [alpha, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
@@ -473,13 +474,13 @@ pub(crate) fn generate_grid() -> Vec<Vertex> {
         let z = i as f32;
         let alpha = if i % 5 == 0 { 0.35 } else { 0.15 };
         vertices.push(Vertex {
-            position: [-half, 0.0, z],
+            position: [-half, y, z],
             normal: [0.0, 1.0, 0.0],
             uv: [alpha, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
         });
         vertices.push(Vertex {
-            position: [half, 0.0, z],
+            position: [half, y, z],
             normal: [0.0, 1.0, 0.0],
             uv: [alpha, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],

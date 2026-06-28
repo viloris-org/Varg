@@ -1,5 +1,20 @@
-use crate::math::{mul_mat4_vec3, orthographic_rh, orthographic_rh_custom, perspective_rh};
-use crate::{device::*, meshes::*, post::*, render::*, scene_uniforms::*, shaders::*, uniforms::*};
+use crate::math::{
+    IDENTITY_MAT4, mul_mat4_vec3, orthographic_rh, orthographic_rh_custom, perspective_rh,
+};
+use crate::{
+    batches::{
+        RenderBatchInstance, active_csm_cascade_count, csm_cascade_depth_range,
+        shadow_ranges_for_depth_bounds, shadow_ranges_for_instances,
+        sphere_intersects_cascade_clip,
+    },
+    device::*,
+    light_preparation::*,
+    meshes::*,
+    post::*,
+    render::*,
+    shaders::*,
+    uniforms::*,
+};
 use engine_render::{
     RenderGlobalIllumination, RenderLight, RenderLightKind, RenderObject, RenderWorld,
 };
@@ -168,7 +183,7 @@ fn gpu_uniform_structs_match_wgsl_alignment() {
         std::mem::size_of::<LightingUniform>(),
         32 + MAX_FORWARD_LIGHTS * std::mem::size_of::<ForwardLightUniform>()
     );
-    assert_eq!(std::mem::size_of::<CsmUniform>(), 352);
+    assert_eq!(std::mem::size_of::<CsmUniform>(), 368);
     assert_eq!(std::mem::size_of::<FogUniform>(), 32);
 }
 
@@ -192,13 +207,31 @@ fn forward_and_ssgi_shaders_expose_p1_p2_temporal_lighting_inputs() {
 fn screen_space_reflections_are_enabled_with_camera_matrices() {
     let render_source = include_str!("render.rs");
     let constructor_source = include_str!("constructors.rs");
+    let diagnostics_source = include_str!("diagnostics.rs");
 
     assert!(render_source.contains("inv_view_projection"));
     assert!(render_source.contains("view_projection: camera.view_projection"));
-    assert!(render_source.contains("ssr_enabled: 1.0"));
+    assert!(render_source.contains("diagnostics::disable_ssr()"));
     assert!(render_source.contains("ssr_intensity: 0.35"));
     assert!(constructor_source.contains("ssr_enabled: 1.0"));
     assert!(constructor_source.contains("ssr_intensity: 0.35"));
+    assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_SSR"));
+}
+
+#[test]
+fn render_diagnostics_expose_feature_disable_switches() {
+    let render_source = include_str!("render.rs");
+    let device_trait_source = include_str!("device_trait.rs");
+    let diagnostics_source = include_str!("diagnostics.rs");
+
+    assert!(render_source.contains("diagnostics::disable_grid()"));
+    assert!(render_source.contains("diagnostics::disable_csm_shadows()"));
+    assert!(render_source.contains("diagnostics::disable_ssao()"));
+    assert!(device_trait_source.contains("diagnostics::disable_ssao()"));
+    assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_GRID"));
+    assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_CSM_SHADOWS"));
+    assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_SSAO"));
+    assert!(diagnostics_source.contains("VARG_RENDER_DISABLE_SSR"));
 }
 
 #[test]
@@ -232,10 +265,58 @@ fn forward_shader_flips_csm_y_for_texture_sampling() {
 }
 
 #[test]
-fn forward_shader_rejects_invalid_next_cascade_before_fade_blend() {
+fn forward_shader_rejects_invalid_next_cascade_before_boundary_blend() {
     assert!(FORWARD_SHADER.contains("uv2.x < 0.0"));
     assert!(FORWARD_SHADER.contains("return base_shadow;"));
-    assert!(FORWARD_SHADER.contains("mix(base_shadow, next_shadow"));
+    assert!(
+        FORWARD_SHADER
+            .contains("apply_csm_distance_fade(min(base_shadow, next_shadow), view_depth)")
+    );
+    assert!(FORWARD_SHADER.contains("view_depth >= csm.cascade_splits.w"));
+    assert!(FORWARD_SHADER.contains("next_split_is_distinct"));
+    assert!(!FORWARD_SHADER.contains("csm.cascade_vps[4] * vec4<f32>(shadow_pos, 1.0)"));
+}
+
+#[test]
+fn forward_shader_fades_csm_to_lit_at_shadow_distance() {
+    assert!(FORWARD_SHADER.contains("fade_params: vec4<f32>"));
+    assert!(FORWARD_SHADER.contains("fn apply_csm_distance_fade"));
+    assert!(FORWARD_SHADER.contains("let fade_start = min(csm.fade_params.x, csm.fade_params.y)"));
+    assert!(FORWARD_SHADER.contains("return mix(1.0, shadow_factor, visibility_weight);"));
+    assert!(FORWARD_SHADER.contains("apply_csm_distance_fade(base_shadow, view_depth)"));
+}
+
+#[test]
+fn forward_shader_offsets_csm_receivers_to_reduce_self_shadowing() {
+    assert!(FORWARD_SHADER.contains("let receiver_offset = n *"));
+    assert!(FORWARD_SHADER.contains("let shadow_pos = world_pos + receiver_offset"));
+    assert!(FORWARD_SHADER.contains("vec4<f32>(shadow_pos, 1.0)"));
+    assert!(
+        FORWARD_SHADER.contains(
+            "sample_csm_shadow(input.world_position, view_depth, tbn_n, shadow_light_dir)"
+        )
+    );
+}
+
+#[test]
+fn shadow_pipeline_uses_front_face_culling_and_depth_bias() {
+    let constructor_source = include_str!("constructors.rs");
+
+    assert!(constructor_source.contains("label: Some(\"varg shadow pipeline\")"));
+    assert!(constructor_source.contains("cull_mode: Some(wgpu::Face::Front)"));
+    assert!(constructor_source.contains("constant: 8"));
+    assert!(constructor_source.contains("slope_scale: 4.0"));
+}
+
+#[test]
+fn shadow_shader_skips_low_profile_horizontal_receivers_as_casters() {
+    let constructor_source = include_str!("constructors.rs");
+
+    assert!(SHADOW_SHADER.contains("let low_profile = input.scale.y < 0.08"));
+    assert!(SHADOW_SHADER.contains("let horizontal_face = abs(world_normal.y) > 0.92"));
+    assert!(SHADOW_SHADER.contains("discard;"));
+    assert!(constructor_source.contains("entry_point: Some(\"fs_main\")"));
+    assert!(constructor_source.contains("targets: &[]"));
 }
 
 #[test]
@@ -252,6 +333,190 @@ fn csm_bounds_snap_to_shadow_texel_grid() {
     assert!(max_x >= 8.911);
     assert!(min_y <= -2.603);
     assert!(max_y >= 4.119);
+}
+
+#[test]
+fn shadow_caster_ranges_coalesce_contiguous_depth_overlaps() {
+    let ranges = shadow_ranges_for_depth_bounds(
+        &[(0.0, 3.0), (4.0, 7.0), (20.0, 25.0), (8.0, 9.0)],
+        10,
+        0.0,
+        10.0,
+    );
+
+    assert_eq!(ranges, vec![10..12, 13..14]);
+}
+
+#[test]
+fn shadow_caster_ranges_reject_instances_outside_cascade_clip() {
+    let instances = [
+        test_shadow_instance(engine_core::math::Vec3::ZERO, 0.25, 4.0, 6.0),
+        test_shadow_instance(engine_core::math::Vec3::new(2.5, 0.0, 0.0), 0.1, 4.0, 6.0),
+    ];
+    let ranges = shadow_ranges_for_instances(&instances, 3, &IDENTITY_MAT4, 0.0, 10.0);
+
+    assert_eq!(ranges, vec![3..4]);
+}
+
+#[test]
+fn cascade_clip_intersection_keeps_spheres_touching_edges() {
+    assert!(sphere_intersects_cascade_clip(
+        &IDENTITY_MAT4,
+        engine_core::math::Vec3::new(1.05, 0.0, 0.5),
+        0.1,
+    ));
+    assert!(!sphere_intersects_cascade_clip(
+        &IDENTITY_MAT4,
+        engine_core::math::Vec3::new(1.2, 0.0, 0.5),
+        0.1,
+    ));
+}
+
+#[test]
+fn csm_active_cascades_ignore_duplicate_terminal_splits() {
+    let csm = CsmUniform {
+        cascade_vps: [IDENTITY_MAT4; CSM_CASCADE_COUNT],
+        cascade_splits: [24.0, 60.0, 60.0, 60.0],
+        params: default_csm_params(),
+        fade_params: default_csm_fade_params(),
+    };
+
+    assert_eq!(active_csm_cascade_count(&csm), 2);
+    assert_eq!(csm_cascade_depth_range(&csm, 1), (20.0, 64.0));
+}
+
+#[test]
+fn csm_cascades_overlap_across_shader_fade_range() {
+    let camera_near = 0.1;
+    for split_idx in 0..3 {
+        let split_depth = CSM_CASCADE_SPLITS[split_idx];
+        let (_, current_far) = csm_cascade_view_depth_bounds(split_idx, camera_near);
+        let (next_near, _) = csm_cascade_view_depth_bounds(split_idx + 1, camera_near);
+
+        assert!(current_far >= split_depth + CSM_CASCADE_FADE_RANGE);
+        assert!(next_near <= split_depth - CSM_CASCADE_FADE_RANGE);
+    }
+}
+
+#[test]
+fn csm_uniform_uses_directional_light_shadow_settings() {
+    let mut light = test_light(
+        77,
+        RenderLightKind::Directional,
+        engine_core::math::Vec3::ZERO,
+        3.0,
+        1.0,
+    );
+    light.settings.shadow_max_distance = 80.0;
+    light.settings.directional_shadow_splits = [0.2, 0.4, 0.7];
+    light.settings.shadow_fade_start = 0.9;
+    light.settings.shadow_bias = 0.004;
+    light.settings.shadow_normal_bias = 0.011;
+    let world = RenderWorld {
+        camera: Some(engine_render::RenderCamera {
+            object: engine_core::EntityId::from_u128(1),
+            transform: engine_core::math::Transform {
+                translation: engine_core::math::Vec3::new(0.0, 0.0, 8.0),
+                rotation: engine_core::math::Quat::IDENTITY,
+                scale: engine_core::math::Vec3::ONE,
+            },
+            projection: engine_render::RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.1,
+            far: 100.0,
+            look_at_target: Some(engine_core::math::Vec3::ZERO),
+        }),
+        lights: vec![light],
+        ..RenderWorld::default()
+    };
+
+    let csm = csm_uniform_from_world(&world, 16.0 / 9.0);
+
+    assert_eq!(csm.cascade_splits, [16.0, 32.0, 56.0, 80.0]);
+    assert_eq!(csm.fade_params[0], 72.0);
+    assert_eq!(csm.fade_params[1], 80.0);
+    assert_eq!(csm.params[2], 0.004);
+    assert_eq!(csm.params[3], 0.011);
+}
+
+#[test]
+fn csm_uniform_respects_directional_shadow_mode() {
+    let camera = engine_render::RenderCamera {
+        object: engine_core::EntityId::from_u128(1),
+        transform: engine_core::math::Transform::IDENTITY,
+        projection: engine_render::RenderProjection::Perspective,
+        vertical_fov_degrees: 60.0,
+        near: 0.1,
+        far: 100.0,
+        look_at_target: Some(engine_core::math::Vec3::new(0.0, 0.0, -1.0)),
+    };
+    let mut orthogonal = test_light(
+        80,
+        RenderLightKind::Directional,
+        engine_core::math::Vec3::ZERO,
+        3.0,
+        1.0,
+    );
+    orthogonal.settings.shadow_max_distance = 64.0;
+    orthogonal.settings.directional_shadow_mode =
+        engine_render::RenderDirectionalShadowMode::Orthogonal;
+    let mut parallel2 = orthogonal.clone();
+    parallel2.object = engine_core::EntityId::from_u128(81);
+    parallel2.settings.shadow_max_distance = 60.0;
+    parallel2.settings.directional_shadow_splits = [0.4, 0.6, 0.8];
+    parallel2.settings.directional_shadow_mode =
+        engine_render::RenderDirectionalShadowMode::Parallel2Splits;
+
+    let orthogonal_csm = csm_uniform_from_world(
+        &RenderWorld {
+            camera: Some(camera.clone()),
+            lights: vec![orthogonal],
+            ..RenderWorld::default()
+        },
+        1.0,
+    );
+    let parallel2_csm = csm_uniform_from_world(
+        &RenderWorld {
+            camera: Some(camera),
+            lights: vec![parallel2],
+            ..RenderWorld::default()
+        },
+        1.0,
+    );
+
+    assert_eq!(orthogonal_csm.cascade_splits, [64.0, 64.0, 64.0, 64.0]);
+    assert_eq!(orthogonal_csm.params[0], 0.0);
+    assert_eq!(parallel2_csm.cascade_splits, [24.0, 60.0, 60.0, 60.0]);
+    assert_eq!(parallel2_csm.params[0], CSM_CASCADE_FADE_RANGE);
+}
+
+#[test]
+fn csm_uniform_disables_split_fade_when_directional_blending_is_off() {
+    let mut light = test_light(
+        78,
+        RenderLightKind::Directional,
+        engine_core::math::Vec3::ZERO,
+        3.0,
+        1.0,
+    );
+    light.settings.directional_shadow_blend_splits = false;
+    let world = RenderWorld {
+        camera: Some(engine_render::RenderCamera {
+            object: engine_core::EntityId::from_u128(1),
+            transform: engine_core::math::Transform::IDENTITY,
+            projection: engine_render::RenderProjection::Perspective,
+            vertical_fov_degrees: 60.0,
+            near: 0.1,
+            far: 100.0,
+            look_at_target: Some(engine_core::math::Vec3::new(0.0, 0.0, -1.0)),
+        }),
+        lights: vec![light],
+        ..RenderWorld::default()
+    };
+
+    let csm = csm_uniform_from_world(&world, 1.0);
+
+    assert_eq!(csm.params[0], 0.0);
 }
 
 #[test]
@@ -596,6 +861,30 @@ fn batch_len(batches: &[(String, Vec<Instance>)], mesh: &str) -> Option<usize> {
         .map(|(_, instances)| instances.len())
 }
 
+fn test_shadow_instance(
+    center: engine_core::math::Vec3,
+    radius: f32,
+    depth_min: f32,
+    depth_max: f32,
+) -> RenderBatchInstance {
+    RenderBatchInstance {
+        instance: Instance {
+            offset: [center.x, center.y, center.z],
+            scale: [radius, radius, radius],
+            color: [1.0; 4],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0; 3],
+            receive_shadows: 1.0,
+        },
+        shadow_center: center,
+        shadow_radius: radius,
+        shadow_depth_min: depth_min,
+        shadow_depth_max: depth_max,
+    }
+}
+
 fn test_mesh_batches(world: &RenderWorld) -> Vec<(String, Vec<Instance>)> {
     use std::collections::HashMap;
     let batch_capacity = (world.objects.len()
@@ -917,14 +1206,22 @@ fn grid_generates_404_vertices() {
 }
 
 #[test]
-fn grid_vertices_lie_on_y_zero() {
+fn grid_vertices_are_slightly_above_y_zero_to_avoid_z_fighting() {
     let vertices = generate_grid();
     for v in &vertices {
         assert!(
-            (v.position[1] - 0.0).abs() < f32::EPSILON,
-            "every grid vertex must lie on Y=0"
+            (v.position[1] - 0.01).abs() < f32::EPSILON,
+            "editor grid must sit slightly above Y=0 geometry"
         );
     }
+}
+
+#[test]
+fn grid_depth_test_uses_strict_less_to_avoid_equal_depth_fighting() {
+    let constructor_source = include_str!("constructors.rs");
+
+    assert!(constructor_source.contains("label: Some(\"varg grid pipeline\")"));
+    assert!(constructor_source.contains("depth_compare: Some(wgpu::CompareFunction::Less)"));
 }
 
 #[test]

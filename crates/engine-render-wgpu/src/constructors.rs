@@ -1,8 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    device::*, format::*, math::*, meshes::*, render::*, scene_uniforms::default_csm_params,
-    shaders::*, uniforms::*,
+    device::*,
+    format::*,
+    light_preparation::{default_csm_fade_params, default_csm_params},
+    math::*,
+    meshes::*,
+    render::*,
+    shaders::*,
+    uniforms::*,
 };
 use engine_core::{EngineError, EngineResult, HandleAllocator};
 use engine_render::{
@@ -585,6 +591,7 @@ impl WgpuRenderDevice {
                 cascade_vps: [IDENTITY_MAT4; CSM_CASCADE_COUNT],
                 cascade_splits: [0.0; 4],
                 params: default_csm_params(),
+                fade_params: default_csm_fade_params(),
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1508,7 +1515,7 @@ impl WgpuRenderDevice {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: Default::default(),
             }),
@@ -1606,7 +1613,7 @@ impl WgpuRenderDevice {
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
+                cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1615,13 +1622,18 @@ impl WgpuRenderDevice {
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
+                    constant: 8,
+                    slope_scale: 4.0,
                     clamp: 0.0,
                 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
             multiview_mask: None,
             cache: None,
         });

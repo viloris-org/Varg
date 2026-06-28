@@ -129,6 +129,8 @@ pub(crate) struct CsmUniform {
     pub(crate) cascade_splits: [f32; 4],
     /// x: cascade fade range, y: shadow map texel size, z: constant depth bias, w: slope bias.
     pub(crate) params: [f32; 4],
+    /// x: shadow fade start depth, y: shadow max distance.
+    pub(crate) fade_params: [f32; 4],
 }
 
 #[repr(C)]

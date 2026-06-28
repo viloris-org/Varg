@@ -1,6 +1,15 @@
 use crate::{
+    batches::{
+        RenderBatchDraw, active_csm_cascade_count, csm_cascade_depth_range,
+        shadow_ranges_for_instances,
+    },
     device::*,
+    diagnostics,
     format::*,
+    light_preparation::{
+        csm_uniform_from_world, gi_probe_uniform_and_data, lighting_uniform_from_world,
+        select_forward_lights,
+    },
     math::{IDENTITY_MAT4, inverse_mat4},
     passes::*,
     scene_uniforms::*,
@@ -86,7 +95,13 @@ impl WgpuRenderDevice {
     }
 
     pub(crate) fn upload_lighting_uniform(&mut self, world: &RenderWorld) {
-        let lighting = lighting_uniform_from_world(world);
+        let disable_csm_shadows = diagnostics::disable_csm_shadows();
+        let mut lighting = lighting_uniform_from_world(world);
+        if disable_csm_shadows {
+            for light in lighting.lights.iter_mut().take(lighting.params[0] as usize) {
+                light.spot_angles[2] = 0.0;
+            }
+        }
         self.latest_submitted_lights = world.lights.len() as u32;
         self.latest_visible_lights = lighting.params[0];
         self.latest_culled_lights = self
@@ -95,12 +110,13 @@ impl WgpuRenderDevice {
         let selected = select_forward_lights(world);
         self.latest_shadowed_lights = selected
             .iter()
-            .filter(|light| light.settings.casts_shadow)
+            .filter(|light| !disable_csm_shadows && light.settings.casts_shadow)
             .count() as u32;
         self.latest_directional_shadow_cascades = selected
             .iter()
             .find(|light| {
-                light.kind == engine_render::RenderLightKind::Directional
+                !disable_csm_shadows
+                    && light.kind == engine_render::RenderLightKind::Directional
                     && light.settings.casts_shadow
             })
             .map(|light| match light.settings.directional_shadow_mode {
@@ -249,7 +265,7 @@ impl WgpuRenderDevice {
         encoder: &mut wgpu::CommandEncoder,
         plan: &FramePipelinePlan,
         csm: &CsmUniform,
-        batches: &[(String, u32, String, bool)],
+        batches: &[RenderBatchDraw],
         resources: &FrameResources,
         output_view: &wgpu::TextureView,
         output_viewport: Option<SurfaceViewportRect>,
@@ -327,7 +343,7 @@ impl WgpuRenderDevice {
 
     pub(crate) fn update_render_submission_stats(
         &mut self,
-        batches: &[(String, u32, String, bool)],
+        batches: &[RenderBatchDraw],
         plan: &FramePipelinePlan,
         ssao_enabled: bool,
         ssgi_enabled: bool,
@@ -342,24 +358,36 @@ impl WgpuRenderDevice {
         };
         let forward_triangles: u64 = batches
             .iter()
-            .map(|(mesh, count, _, _)| batch_triangles(mesh, *count))
+            .map(|batch| batch_triangles(&batch.mesh_name, batch.count))
             .sum();
         let shadow_triangles: u64 = batches
             .iter()
-            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
-            .map(|(mesh, count, _, _)| batch_triangles(mesh, *count))
-            .sum::<u64>()
-            * CSM_CASCADE_COUNT as u64;
+            .filter(|batch| batch.count > 0 && batch.casts_shadows)
+            .map(|batch| {
+                let shadow_instances = batch
+                    .shadow_ranges
+                    .iter()
+                    .flat_map(|ranges| ranges.iter())
+                    .map(|range| range.end.saturating_sub(range.start))
+                    .sum();
+                batch_triangles(&batch.mesh_name, shadow_instances)
+            })
+            .sum();
 
-        let forward_draws = batches.iter().filter(|(_, count, _, _)| *count > 0).count() as u32;
+        let forward_draws = batches.iter().filter(|batch| batch.count > 0).count() as u32;
         let shadow_draws = batches
             .iter()
-            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
-            .count() as u32
-            * CSM_CASCADE_COUNT as u32;
+            .filter(|batch| batch.count > 0 && batch.casts_shadows)
+            .flat_map(|batch| batch.shadow_ranges.iter())
+            .map(|ranges| ranges.len() as u32)
+            .sum::<u32>();
         self.latest_shadow_caster_batches = batches
             .iter()
-            .filter(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
+            .filter(|batch| {
+                batch.count > 0
+                    && batch.casts_shadows
+                    && batch.shadow_ranges.iter().any(|ranges| !ranges.is_empty())
+            })
             .count() as u32;
         let bloom_draws = if bloom_enabled {
             self.bloom_mip_views
@@ -401,7 +429,8 @@ impl WgpuRenderDevice {
         &mut self,
         world: &RenderWorld,
         aspect: f32,
-    ) -> Vec<(String, u32, String, bool)> {
+        csm: &CsmUniform,
+    ) -> Vec<RenderBatchDraw> {
         let (batches, visibility) = self.mesh_batches_from_world_visible(world, aspect);
         self.latest_submitted_objects = world.objects.len() as u32;
         self.latest_visible_objects = visibility.visible_indices.len() as u32;
@@ -413,7 +442,7 @@ impl WgpuRenderDevice {
         }
         let mut all_instances = Vec::with_capacity(total_instances);
         for (_, instances, _, _) in &batches {
-            all_instances.extend_from_slice(instances);
+            all_instances.extend(instances.iter().map(|instance| instance.instance));
         }
         if !all_instances.is_empty() {
             self.queue.write_buffer(
@@ -422,10 +451,37 @@ impl WgpuRenderDevice {
                 bytemuck::cast_slice(&all_instances),
             );
         }
+        let active_cascades = active_csm_cascade_count(csm);
+        let mut instance_start = 0u32;
         batches
             .into_iter()
             .map(|(name, instances, mat, casts_shadows)| {
-                (name, instances.len() as u32, mat, casts_shadows)
+                let count = instances.len() as u32;
+                let mut shadow_ranges = std::array::from_fn(|_| Vec::new());
+                if casts_shadows {
+                    for (cascade_idx, ranges) in
+                        shadow_ranges.iter_mut().enumerate().take(active_cascades)
+                    {
+                        let (cascade_near, cascade_far) = csm_cascade_depth_range(csm, cascade_idx);
+                        *ranges = shadow_ranges_for_instances(
+                            &instances,
+                            instance_start,
+                            &csm.cascade_vps[cascade_idx],
+                            cascade_near,
+                            cascade_far,
+                        );
+                    }
+                }
+                let draw = RenderBatchDraw {
+                    mesh_name: name,
+                    count,
+                    material_name: mat,
+                    casts_shadows,
+                    instance_start,
+                    shadow_ranges,
+                };
+                instance_start = instance_start.saturating_add(count);
+                draw
             })
             .collect()
     }
@@ -609,9 +665,10 @@ impl WgpuRenderDevice {
         self.collect_gpu_frame_time();
         let render_started = Instant::now();
         let previous_gpu_frame_ms = self.performance_metrics.gpu_frame_ms;
-        let batches = self.prepare_render_batches(world, aspect);
+        let csm = csm_uniform_from_world(world, aspect);
+        let batches = self.prepare_render_batches(world, aspect, &csm);
         self.prepare_gpu_particles(world);
-        let total_instances: u32 = batches.iter().map(|(_, count, _, _)| *count).sum();
+        let total_instances: u32 = batches.iter().map(|batch| batch.count).sum();
         tracing::debug!(
             target: "engine",
             batch_count = batches.len(),
@@ -623,7 +680,6 @@ impl WgpuRenderDevice {
         );
         self.upload_lighting_uniform(world);
         self.upload_gi_probes(world);
-        let csm = csm_uniform_from_world(world, aspect);
         self.queue
             .write_buffer(&self.csm_uniform, 0, bytemuck::bytes_of(&csm));
         let use_cubemap = self.prepare_skybox_environment(world);
@@ -669,7 +725,7 @@ impl WgpuRenderDevice {
         };
         self.queue
             .write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&uniform));
-        let enable_ssao = self.ssao_compute_pipeline.is_some();
+        let enable_ssao = self.ssao_compute_pipeline.is_some() && !diagnostics::disable_ssao();
         let enable_ssgi = self.screen_space_gi_enabled(world);
         let ssgi_intensity = Self::screen_space_gi_intensity(world);
         let enable_bloom = self.bloom_compute_down.is_some() && self.bloom_compute_up.is_some();
@@ -765,7 +821,7 @@ impl WgpuRenderDevice {
     /// uploads post/SSAO uniforms, and pre-allocates CSM cascade data.
     pub(crate) fn encode_frame_passes(
         &mut self,
-        _batches: &[(String, u32, String, bool)],
+        _batches: &[RenderBatchDraw],
         csm: &CsmUniform,
         camera: &CameraUniform,
         tw: u32,
@@ -805,7 +861,7 @@ impl WgpuRenderDevice {
                 upscale_sharpness: self.upscale_sharpness,
                 ssgi_enabled: if ssgi_enabled { 1.0 } else { 0.0 },
                 ssgi_intensity,
-                ssr_enabled: 1.0,
+                ssr_enabled: if diagnostics::disable_ssr() { 0.0 } else { 1.0 },
                 ssr_intensity: 0.35,
                 taa_reset: if self.reset_temporal_history {
                     1.0
@@ -915,16 +971,26 @@ impl WgpuRenderDevice {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         _csm: &CsmUniform,
-        batches: &[(String, u32, String, bool)],
+        batches: &[RenderBatchDraw],
     ) {
+        if diagnostics::disable_csm_shadows() {
+            return;
+        }
         if !batches
             .iter()
-            .any(|(_, count, _, casts_shadows)| *count > 0 && *casts_shadows)
+            .any(|batch| batch.count > 0 && batch.casts_shadows)
         {
             return;
         }
 
         for cascade_idx in 0..CSM_CASCADE_COUNT {
+            if !batches.iter().any(|batch| {
+                batch.shadow_ranges[cascade_idx]
+                    .iter()
+                    .any(|range| !range.is_empty())
+            }) {
+                continue;
+            }
             encode_shadow_pass(
                 encoder,
                 &self.csm_depth_views[cascade_idx],
@@ -934,6 +1000,7 @@ impl WgpuRenderDevice {
                 &self.index_buffer,
                 &self.instance_buffer,
                 batches,
+                cascade_idx,
                 &self.mesh_cache,
             );
         }
@@ -942,7 +1009,7 @@ impl WgpuRenderDevice {
     pub(crate) fn encode_hdr_forward_passes(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        batches: &[(String, u32, String, bool)],
+        batches: &[RenderBatchDraw],
     ) {
         let hdr = self.hdr_target.as_ref().unwrap();
         encode_skybox_pass(
@@ -989,7 +1056,7 @@ impl WgpuRenderDevice {
             true,
         );
         self.encode_gpu_particle_render(encoder);
-        if self.editor_grid_enabled {
+        if self.editor_grid_enabled && !diagnostics::disable_grid() {
             encode_grid_pass(
                 encoder,
                 &hdr.color_view,

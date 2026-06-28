@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{device::*, meshes::*};
+use crate::{batches::RenderBatchDraw, device::*, meshes::*};
 
 pub(crate) fn encode_batched_forward_pass<'a>(
     encoder: &mut wgpu::CommandEncoder,
@@ -17,7 +17,7 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     default_vertex_buffer: &'a wgpu::Buffer,
     default_index_buffer: &'a wgpu::Buffer,
     instance_buffer: &wgpu::Buffer,
-    batches: &[(String, u32, String, bool)],
+    batches: &[RenderBatchDraw],
     transparent: bool,
 ) {
     let color_attachment = Some(wgpu::RenderPassColorAttachment {
@@ -107,14 +107,14 @@ pub(crate) fn encode_batched_forward_pass<'a>(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, camera_bind_group, &[]);
 
-    let mut instance_offset = 0u32;
-    for (mesh_name, count, material_name, _) in batches {
-        if *count == 0 {
+    for batch in batches {
+        if batch.count == 0 {
             continue;
         }
+        let mesh_name = &batch.mesh_name;
+        let material_name = &batch.material_name;
         let is_transparent = material_name.starts_with("@sprite:") || material_name == "@particle";
         if is_transparent != transparent {
-            instance_offset += count;
             continue;
         }
         let material_lookup = material_name
@@ -140,8 +140,11 @@ pub(crate) fn encode_batched_forward_pass<'a>(
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.set_vertex_buffer(1, instance_buffer.slice(..));
         pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..index_count, 0, instance_offset..instance_offset + count);
-        instance_offset += count;
+        pass.draw_indexed(
+            0..index_count,
+            0,
+            batch.instance_start..batch.instance_start + batch.count,
+        );
     }
 }
 pub(crate) fn encode_shadow_pass(
@@ -152,7 +155,8 @@ pub(crate) fn encode_shadow_pass(
     vertex_buffer: &wgpu::Buffer,
     index_buffer: &wgpu::Buffer,
     instance_buffer: &wgpu::Buffer,
-    batches: &[(String, u32, String, bool)],
+    batches: &[RenderBatchDraw],
+    cascade_idx: usize,
     mesh_cache: &HashMap<String, MeshBuffers>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -173,16 +177,14 @@ pub(crate) fn encode_shadow_pass(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
 
-    let mut instance_offset = 0u32;
-    for (mesh_name, count, _, casts_shadows) in batches {
-        if *count == 0 {
+    for batch in batches {
+        if batch.count == 0 {
             continue;
         }
-        if !*casts_shadows {
-            instance_offset += count;
+        if !batch.casts_shadows || batch.shadow_ranges[cascade_idx].is_empty() {
             continue;
         }
-        let buffers = mesh_cache.get(mesh_name);
+        let buffers = mesh_cache.get(&batch.mesh_name);
         let (vertex_buf, index_buf, index_count) = match buffers {
             Some(b) => (&b.vertex_buffer, &b.index_buffer, b.index_count),
             None => (vertex_buffer, index_buffer, CUBE_INDEX_COUNT),
@@ -190,8 +192,9 @@ pub(crate) fn encode_shadow_pass(
         pass.set_vertex_buffer(0, vertex_buf.slice(..));
         pass.set_vertex_buffer(1, instance_buffer.slice(..));
         pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..index_count, 0, instance_offset..instance_offset + count);
-        instance_offset += count;
+        for range in &batch.shadow_ranges[cascade_idx] {
+            pass.draw_indexed(0..index_count, 0, range.clone());
+        }
     }
 }
 
