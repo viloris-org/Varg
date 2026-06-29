@@ -233,6 +233,24 @@ function isNoCpuReadbackAdapter(adapter?: ViewportPresentationAdapter) {
   return Boolean(adapter?.available && !adapter.cpu_readback && adapter.gpu_native_surface);
 }
 
+function supportsNativeSceneViewMode(
+  mode: ViewportPresentationMode | null,
+  viewMode: SceneViewMode,
+) {
+  return viewMode === '3d' || mode === 'native-host-window' || mode === 'editor-compositor';
+}
+
+function selectNoCpuReadbackPresentation(
+  adapters: ViewportPresentationAdapter[],
+  preferredMode?: ViewportPresentationMode | null,
+): ViewportPresentationMode | null {
+  const preferred = preferredMode
+    ? adapters.find((adapter) => adapter.mode === preferredMode)
+    : undefined;
+  if (isNoCpuReadbackAdapter(preferred)) return preferred.mode;
+  return adapters.find(isNoCpuReadbackAdapter)?.mode ?? null;
+}
+
 function useMeasuredFps() {
   const [fps, setFps] = useState<number | null>(null);
 
@@ -1620,6 +1638,8 @@ export default function CalmEditorPrototype({
     } else {
       await syncNoCpuReadbackSceneView({
         viewport,
+        playMode: isPlaying,
+        viewMode: sceneViewMode,
         yaw: camera.yaw,
         pitch: camera.pitch,
         distance: camera.distance,
@@ -1628,32 +1648,42 @@ export default function CalmEditorPrototype({
         targetZ: camera.targetZ,
       });
     }
-  }, [embeddedSceneViewport, viewportPresentation]);
+  }, [embeddedSceneViewport, isPlaying, sceneViewMode, viewportPresentation]);
 
   const openNativeSceneViewport = useCallback(async () => {
     if (!viewportPresentation) throw new Error('No native Scene View adapter is available.');
     const viewport = embeddedSceneViewport();
     if (!viewport) throw new Error('Scene View frame is not ready yet.');
     const camera = cameraRef.current;
-    const openSceneView = isWaylandEmbeddedCompositorPresentation(viewportPresentation)
-      ? openWaylandEmbeddedCompositorSceneView
-      : openNoCpuReadbackSceneView;
-    await openSceneView({
+    const cameraParams = {
       viewport,
+      viewMode: sceneViewMode,
       yaw: camera.yaw,
       pitch: camera.pitch,
       distance: camera.distance,
       targetX: camera.targetX,
       targetY: camera.targetY,
       targetZ: camera.targetZ,
-    });
-  }, [embeddedSceneViewport, viewportPresentation]);
+    };
+    if (isWaylandEmbeddedCompositorPresentation(viewportPresentation)) {
+      await openWaylandEmbeddedCompositorSceneView({
+        viewport,
+        yaw: camera.yaw,
+        pitch: camera.pitch,
+        distance: camera.distance,
+        targetX: camera.targetX,
+        targetY: camera.targetY,
+        targetZ: camera.targetZ,
+      });
+    } else {
+      await openNoCpuReadbackSceneView({ ...cameraParams, playMode: isPlaying });
+    }
+  }, [embeddedSceneViewport, isPlaying, sceneViewMode, viewportPresentation]);
 
   const zeroCopySceneActive = backendReady
     && noCpuReadbackPresentation
-    && sceneViewMode === '3d'
     && viewMode !== 'scripts'
-    && !isPlaying
+    && supportsNativeSceneViewMode(viewportPresentation, sceneViewMode)
     && !nativeSceneError;
 
   const nativeHostSceneActive = zeroCopySceneActive && noCpuReadbackPresentation;
@@ -1877,14 +1907,20 @@ export default function CalmEditorPrototype({
     viewportPresentationCapabilities()
       .then((capabilities) => {
         setViewportPresentationAdapters(capabilities.adapters);
-        setViewportPresentation(capabilities.default_mode);
+        setViewportPresentation(selectNoCpuReadbackPresentation(
+          capabilities.adapters,
+          capabilities.default_mode,
+        ));
       })
       .catch(() => {});
     viewportPresentationStatus()
       .then((status) => {
         setViewportPresentationDiagnostics(status);
         if (status.adapters) setViewportPresentationAdapters(status.adapters);
-        setViewportPresentation(status.default_mode ?? null);
+        setViewportPresentation(selectNoCpuReadbackPresentation(
+          status.adapters ?? [],
+          status.default_mode ?? null,
+        ));
       })
       .catch(() => {
         setViewportPresentationDiagnostics(null);
@@ -1917,8 +1953,8 @@ export default function CalmEditorPrototype({
     if (
       !backendReady
       || !noCpuReadbackPresentation
-      || viewMode !== '3d'
-      || isPlaying
+      || viewMode === 'scripts'
+      || !supportsNativeSceneViewMode(viewportPresentation, sceneViewMode)
     ) return;
     let cancelled = false;
     openNativeSceneViewport()
@@ -1935,7 +1971,7 @@ export default function CalmEditorPrototype({
     return () => {
       cancelled = true;
     };
-  }, [backendReady, isPlaying, noCpuReadbackPresentation, openNativeSceneViewport, sceneVersion, viewMode, viewportPresentation]);
+  }, [backendReady, isPlaying, noCpuReadbackPresentation, openNativeSceneViewport, sceneVersion, sceneViewMode, viewMode, viewportPresentation]);
 
   useEffect(() => {
     if (!zeroCopySceneActive || nativeSceneOpenRevision === 0) return;
@@ -2013,9 +2049,8 @@ export default function CalmEditorPrototype({
   useEffect(() => {
     if (
       noCpuReadbackPresentation
-      && sceneViewMode === '3d'
       && viewMode !== 'scripts'
-      && !isPlaying
+      && supportsNativeSceneViewMode(viewportPresentation, sceneViewMode)
       && !nativeSceneError
     ) return;
     closeNativeSceneView().catch(() => {});
@@ -2347,6 +2382,10 @@ export default function CalmEditorPrototype({
   };
 
   const runGame = async () => {
+    if (zeroCopySceneActive || noCpuReadbackPresentation) {
+      setIsPlaying((value) => !value);
+      return;
+    }
     if (backendReady) {
       await openGameView().catch(() => setIsPlaying((value) => !value));
       return;

@@ -1,6 +1,8 @@
 use serde_json::Value;
 use tauri::{Emitter, State};
 
+use engine_core::{TaskPriority, shared_task_runtime};
+
 use crate::state::EditorHostState;
 use crate::{
     CompletedQuestAiRequest, EngineError, EngineResult, PreparedQuestAiRequest,
@@ -48,7 +50,7 @@ pub(crate) fn start_quest_ai_request(
         })
         .map_err(|error| error.to_string())?;
     let requests = requests.requests.clone();
-    std::thread::spawn(move || {
+    shared_task_runtime().spawn("editor.quest.ai", TaskPriority::Background, move || {
         let emit_delta = &mut |delta: engine_ai::AiStreamDelta| {
             if requests
                 .lock()

@@ -1,6 +1,8 @@
 use serde_json::Value;
 use tauri::{Emitter, State};
 
+use engine_core::{TaskPriority, shared_task_runtime};
+
 use crate::state::EditorHostState;
 use crate::{CompletedCopilotRequest, CopilotRequestState};
 
@@ -16,7 +18,7 @@ pub(crate) fn start_copilot_plan(
         .with_host(|host| host.prepare_copilot_request(&params))
         .map_err(|error| error.to_string())?;
     let requests = requests.requests.clone();
-    std::thread::spawn(move || {
+    shared_task_runtime().spawn("editor.copilot.plan", TaskPriority::Background, move || {
         let original_prompt = prepared.original_prompt.clone();
         let knowledge_entries_used = prepared.knowledge_entries_used;
         let approval_mode = prepared.approval_mode;

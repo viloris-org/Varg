@@ -23,16 +23,17 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(any(feature = "importers", feature = "watch"))]
 use std::sync::mpsc::{self, Receiver};
 #[cfg(feature = "importers")]
-use std::{io::Read, sync::mpsc::Sender, thread::JoinHandle};
+use std::{io::Read, sync::mpsc::Sender};
 
 use engine_core::{AssetId, EngineError, EngineResult, Handle, HandleAllocator, ResourceId};
+#[cfg(feature = "importers")]
+use engine_core::{TaskPriority, shared_task_runtime};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for asset-side files.
@@ -1702,47 +1703,30 @@ pub struct ImportJob {
 /// Handle to a background import worker thread.
 #[cfg(feature = "importers")]
 pub struct ImportWorker {
-    thread_handle: Option<JoinHandle<()>>,
-    job_sender: Sender<ImportJob>,
+    outcome_sender: Sender<ImportOutcome>,
     outcome_receiver: Receiver<ImportOutcome>,
 }
 
 #[cfg(feature = "importers")]
 impl ImportWorker {
-    /// Spawns a new background worker thread for processing imports.
+    /// Creates a background import worker backed by the shared engine task runtime.
     pub fn spawn() -> Self {
-        let (job_sender, job_receiver) = mpsc::channel::<ImportJob>();
         let (outcome_sender, outcome_receiver) = mpsc::channel::<ImportOutcome>();
 
-        let thread_handle = thread::spawn(move || {
-            loop {
-                match job_receiver.recv() {
-                    Ok(job) => {
-                        let outcome = Self::process_job(job);
-                        // If the outcome receiver is dropped, the main thread has exited
-                        if outcome_sender.send(outcome).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                }
-            }
-        });
-
         Self {
-            thread_handle: Some(thread_handle),
-            job_sender,
+            outcome_sender,
             outcome_receiver,
         }
     }
 
-    /// Enqueues an import job to be processed by the worker.
+    /// Enqueues an import job to be processed on the shared background task runtime.
     pub fn enqueue(&self, job: ImportJob) -> EngineResult<()> {
-        self.job_sender
-            .send(job)
-            .map_err(|_| EngineError::other("import worker thread has terminated"))
+        let outcome_sender = self.outcome_sender.clone();
+        shared_task_runtime().spawn("asset.import", TaskPriority::Background, move || {
+            let outcome = Self::process_job(job);
+            let _ = outcome_sender.send(outcome);
+        });
+        Ok(())
     }
 
     /// Polls for completed import outcomes without blocking.
@@ -1794,24 +1778,6 @@ impl ImportWorker {
                     upload: None,
                 }
             }
-        }
-    }
-}
-
-#[cfg(feature = "importers")]
-impl Drop for ImportWorker {
-    fn drop(&mut self) {
-        // Take the thread handle first
-        if let Some(handle) = self.thread_handle.take() {
-            // Drop the sender explicitly by replacing it with a dummy channel
-            // This signals the worker thread to exit
-            drop(std::mem::replace(&mut self.job_sender, {
-                let (tx, _rx) = mpsc::channel();
-                tx
-            }));
-
-            // Wait for the worker thread to finish
-            let _ = handle.join();
         }
     }
 }
@@ -1874,7 +1840,7 @@ impl ImportQueue {
         }
 
         let chunk_size = tasks.len().div_ceil(worker_count);
-        let mut outcomes = thread::scope(|scope| {
+        let mut outcomes = std::thread::scope(|scope| {
             let mut workers = Vec::new();
             for chunk in tasks.chunks(chunk_size) {
                 let chunk = chunk.to_vec();

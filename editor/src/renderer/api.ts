@@ -323,6 +323,8 @@ export async function openWaylandEmbeddedCompositorSceneView(params: {
 
 export async function openNoCpuReadbackSceneView(params: {
   viewport: { x: number; y: number; width: number; height: number };
+  playMode?: boolean;
+  viewMode?: '2d' | '3d';
   yaw: number;
   pitch: number;
   distance: number;
@@ -332,6 +334,8 @@ export async function openNoCpuReadbackSceneView(params: {
 }): Promise<void> {
   await invoke('open_no_cpu_readback_scene_view', {
     viewport: params.viewport,
+    playMode: params.playMode ?? null,
+    viewMode: params.viewMode ?? null,
     yaw: params.yaw,
     pitch: params.pitch,
     distance: params.distance,
@@ -355,6 +359,8 @@ export async function openZeroCopySceneView(params: {
 
 export async function syncNoCpuReadbackSceneView(params: {
   viewport: { x: number; y: number; width: number; height: number };
+  playMode?: boolean;
+  viewMode?: '2d' | '3d';
   yaw?: number;
   pitch?: number;
   distance?: number;
@@ -367,6 +373,8 @@ export async function syncNoCpuReadbackSceneView(params: {
 }): Promise<void> {
   await invoke('sync_no_cpu_readback_scene_view', {
     viewport: params.viewport,
+    playMode: params.playMode ?? null,
+    viewMode: params.viewMode ?? null,
     yaw: params.yaw ?? null,
     pitch: params.pitch ?? null,
     distance: params.distance ?? null,

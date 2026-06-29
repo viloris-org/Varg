@@ -54,6 +54,8 @@ pub enum SceneCommand {
     Hide,
     SetCamera(SceneCameraState),
     SetViewport(SceneViewportRect),
+    SetRenderMode(SceneRenderMode),
+    SetEditorViewMode(SceneEditorViewMode),
     Shutdown,
 }
 
@@ -370,6 +372,18 @@ pub enum SceneWindowKind {
     Embedded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneRenderMode {
+    Editor,
+    Game,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneEditorViewMode {
+    TwoD,
+    ThreeD,
+}
+
 pub struct SceneRuntimeSnapshot {
     config: EngineConfig,
     project_root: PathBuf,
@@ -458,6 +472,18 @@ impl SceneWindowHandle {
     pub fn set_camera(&self, camera: SceneCameraState) -> Result<(), String> {
         self.cmd_tx
             .send(SceneCommand::SetCamera(camera))
+            .map_err(|_| "scene window thread is not running".to_owned())
+    }
+
+    pub fn set_render_mode(&self, mode: SceneRenderMode) -> Result<(), String> {
+        self.cmd_tx
+            .send(SceneCommand::SetRenderMode(mode))
+            .map_err(|_| "scene window thread is not running".to_owned())
+    }
+
+    pub fn set_editor_view_mode(&self, mode: SceneEditorViewMode) -> Result<(), String> {
+        self.cmd_tx
+            .send(SceneCommand::SetEditorViewMode(mode))
             .map_err(|_| "scene window thread is not running".to_owned())
     }
 
@@ -817,6 +843,12 @@ impl ApplicationHandler for SceneApp {
                 SceneCommand::SetViewport(viewport) => {
                     self.apply_viewport(viewport);
                 }
+                SceneCommand::SetRenderMode(_) => {
+                    self.request_temporal_accumulation();
+                }
+                SceneCommand::SetEditorViewMode(_) => {
+                    self.request_temporal_accumulation();
+                }
                 SceneCommand::Shutdown => {
                     event_loop.exit();
                     return;
@@ -993,6 +1025,8 @@ struct RawSceneApp {
     last_frame: Instant,
     pending_snapshot: Option<SceneRuntimeSnapshot>,
     camera: SceneCameraState,
+    render_mode: SceneRenderMode,
+    editor_view_mode: SceneEditorViewMode,
     visible: bool,
     dirty: bool,
     temporal_frames_remaining: u8,
@@ -1021,6 +1055,8 @@ fn run_raw_scene_surface(
         last_frame: Instant::now(),
         pending_snapshot: Some(snapshot),
         camera,
+        render_mode: SceneRenderMode::Editor,
+        editor_view_mode: SceneEditorViewMode::ThreeD,
         visible: true,
         dirty: true,
         temporal_frames_remaining: TEMPORAL_ACCUMULATION_FRAMES,
@@ -1051,7 +1087,10 @@ fn run_raw_scene_surface(
             }
             continue;
         }
-        if app.dirty || app.temporal_frames_remaining > 0 {
+        if app.render_mode == SceneRenderMode::Game
+            || app.dirty
+            || app.temporal_frames_remaining > 0
+        {
             app.render_frame();
         }
         match app.cmd_rx.recv_timeout(EDITOR_TARGET_FRAME_DT) {
@@ -1094,6 +1133,19 @@ impl RawSceneApp {
                 self.request_temporal_accumulation();
             }
             SceneCommand::SetViewport(viewport) => self.apply_viewport(viewport),
+            SceneCommand::SetRenderMode(mode) => {
+                if self.render_mode != mode {
+                    self.render_mode = mode;
+                    self.last_frame = Instant::now() - EDITOR_TARGET_FRAME_DT;
+                    self.request_temporal_accumulation();
+                }
+            }
+            SceneCommand::SetEditorViewMode(mode) => {
+                if self.editor_view_mode != mode {
+                    self.editor_view_mode = mode;
+                    self.request_temporal_accumulation();
+                }
+            }
             SceneCommand::Shutdown => {
                 self.shutdown = true;
             }
@@ -1286,13 +1338,41 @@ impl RawSceneApp {
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        if self.render_mode == SceneRenderMode::Game {
+            if let Err(error) = runtime.tick_game_frame(dt.min(Duration::from_millis(100)), false) {
+                let _ = self
+                    .event_tx
+                    .send(SceneEvent::Error(format!("game render: {error}")));
+            }
+            if runtime.take_exit_requested() {
+                self.visible = false;
+                let _ = self.event_tx.send(SceneEvent::Closed);
+            }
+            self.dirty = false;
+            self.temporal_frames_remaining = 0;
+            return;
+        }
+
         let mut world = runtime_min::extract_render_world(&runtime.scene);
         let target = self.camera.target;
-        let translation = Vec3::new(
-            target.x + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.sin(),
-            target.y + self.camera.distance * self.camera.pitch.sin(),
-            target.z + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.cos(),
-        );
+        let (translation, projection) = match self.editor_view_mode {
+            SceneEditorViewMode::TwoD => (
+                Vec3::new(target.x, target.y, target.z + self.camera.distance),
+                RenderProjection::Orthographic {
+                    vertical_size: self.camera.distance * 2.0,
+                },
+            ),
+            SceneEditorViewMode::ThreeD => (
+                Vec3::new(
+                    target.x
+                        + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.sin(),
+                    target.y + self.camera.distance * self.camera.pitch.sin(),
+                    target.z
+                        + self.camera.distance * self.camera.pitch.cos() * self.camera.yaw.cos(),
+                ),
+                RenderProjection::Perspective,
+            ),
+        };
         let object = world
             .camera
             .as_ref()
@@ -1304,7 +1384,7 @@ impl RawSceneApp {
                 translation,
                 ..Transform::IDENTITY
             },
-            projection: RenderProjection::Perspective,
+            projection,
             vertical_fov_degrees: 60.0,
             near: 0.01,
             far: 1000.0,

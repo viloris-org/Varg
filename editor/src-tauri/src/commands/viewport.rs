@@ -53,6 +53,13 @@ fn native_host_panel_state_from_options(
     }
 }
 
+fn scene_editor_view_mode(view_mode: Option<&str>) -> scene_window::SceneEditorViewMode {
+    match view_mode {
+        Some("2d") => scene_window::SceneEditorViewMode::TwoD,
+        _ => scene_window::SceneEditorViewMode::ThreeD,
+    }
+}
+
 #[tauri::command]
 pub(crate) fn viewport_readback_raw(
     state: State<'_, EditorHostState>,
@@ -234,6 +241,8 @@ pub(crate) fn sync_no_cpu_readback_scene_view(
     app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     viewport: EmbeddedSceneViewport,
+    play_mode: Option<bool>,
+    view_mode: Option<String>,
     yaw: Option<f32>,
     pitch: Option<f32>,
     distance: Option<f32>,
@@ -265,6 +274,12 @@ pub(crate) fn sync_no_cpu_readback_scene_view(
             .as_ref()
             .ok_or_else(|| "no-CPU-readback scene view is not running".to_owned())?;
         scene_window.set_viewport(viewport)?;
+        scene_window.set_render_mode(if play_mode.unwrap_or(false) {
+            scene_window::SceneRenderMode::Game
+        } else {
+            scene_window::SceneRenderMode::Editor
+        })?;
+        scene_window.set_editor_view_mode(scene_editor_view_mode(view_mode.as_deref()))?;
         if let (
             Some(yaw),
             Some(pitch),
@@ -298,7 +313,8 @@ pub(crate) fn sync_zero_copy_scene_view(
     target_z: Option<f32>,
 ) -> Result<(), String> {
     sync_no_cpu_readback_scene_view(
-        app, state, viewport, yaw, pitch, distance, target_x, target_y, target_z, None, None, None,
+        app, state, viewport, None, None, yaw, pitch, distance, target_x, target_y, target_z, None,
+        None, None,
     )
 }
 
@@ -307,6 +323,8 @@ pub(crate) fn open_no_cpu_readback_scene_view(
     app: tauri::AppHandle,
     state: State<'_, EditorHostState>,
     viewport: EmbeddedSceneViewport,
+    play_mode: Option<bool>,
+    view_mode: Option<String>,
     yaw: f32,
     pitch: f32,
     distance: f32,
@@ -357,6 +375,12 @@ pub(crate) fn open_no_cpu_readback_scene_view(
         if let Some(scene_window) = host.scene_window.as_ref() {
             scene_window.set_viewport(viewport)?;
             scene_window.restart(snapshot, camera)?;
+            scene_window.set_render_mode(if play_mode.unwrap_or(false) {
+                scene_window::SceneRenderMode::Game
+            } else {
+                scene_window::SceneRenderMode::Editor
+            })?;
+            scene_window.set_editor_view_mode(scene_editor_view_mode(view_mode.as_deref()))?;
             return scene_window.show();
         }
 
@@ -374,6 +398,12 @@ pub(crate) fn open_no_cpu_readback_scene_view(
             camera,
             mode,
         );
+        handle.set_render_mode(if play_mode.unwrap_or(false) {
+            scene_window::SceneRenderMode::Game
+        } else {
+            scene_window::SceneRenderMode::Editor
+        })?;
+        handle.set_editor_view_mode(scene_editor_view_mode(view_mode.as_deref()))?;
         host.scene_window = Some(handle);
         Ok(())
     })
@@ -392,7 +422,7 @@ pub(crate) fn open_zero_copy_scene_view(
     target_z: f32,
 ) -> Result<(), String> {
     open_no_cpu_readback_scene_view(
-        app, state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
+        app, state, viewport, None, None, yaw, pitch, distance, target_x, target_y, target_z,
     )
 }
 
@@ -409,7 +439,7 @@ pub(crate) fn open_editor_compositor_scene_view(
     target_z: f32,
 ) -> Result<(), String> {
     open_no_cpu_readback_scene_view(
-        app, state, viewport, yaw, pitch, distance, target_x, target_y, target_z,
+        app, state, viewport, None, None, yaw, pitch, distance, target_x, target_y, target_z,
     )
 }
 

@@ -35,7 +35,7 @@ pub use tools::{
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use engine_core::{EngineError, EngineResult};
+use engine_core::{EngineError, EngineResult, TaskHandle, TaskPriority, shared_task_runtime};
 
 fn default_true() -> bool {
     true
@@ -2615,13 +2615,13 @@ impl AgentSession {
             EngineError::config(format!("Failed to spawn command '{}': {}", command, e))
         })?;
         let stdout_reader = child.stdout.take().map(|mut stdout| {
-            std::thread::spawn(move || {
+            shared_task_runtime().spawn("ai.command.stdout", TaskPriority::High, move || {
                 let mut bytes = Vec::new();
                 stdout.read_to_end(&mut bytes).map(|_| bytes)
             })
         });
         let stderr_reader = child.stderr.take().map(|mut stderr| {
-            std::thread::spawn(move || {
+            shared_task_runtime().spawn("ai.command.stderr", TaskPriority::High, move || {
                 let mut bytes = Vec::new();
                 stderr.read_to_end(&mut bytes).map(|_| bytes)
             })
@@ -2784,15 +2784,15 @@ fn list_entity_names(context: &ProjectContext) -> String {
 }
 
 fn join_output_reader(
-    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    reader: Option<TaskHandle<std::io::Result<Vec<u8>>>>,
     stream: &str,
 ) -> EngineResult<Vec<u8>> {
     let Some(reader) = reader else {
         return Ok(Vec::new());
     };
     reader
-        .join()
-        .map_err(|_| EngineError::config(format!("{stream} reader thread panicked")))?
+        .wait()
+        .map_err(|error| EngineError::config(format!("{stream} reader task failed: {error}")))?
         .map_err(|error| EngineError::config(format!("failed to read command {stream}: {error}")))
 }
 

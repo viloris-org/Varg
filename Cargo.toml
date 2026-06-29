@@ -87,6 +87,42 @@ editor = ["runtime-min/editor"]
 agent-tools = ["runtime-min/agent-tools"]
 dev-full = ["runtime-min/dev-full"]
 
+[workspace.metadata.varg.layers]
+runtime = [
+    "engine-core",
+    "engine-ecs",
+    "engine-platform",
+    "engine-assets",
+    "engine-render",
+    "engine-physics",
+    "engine-audio",
+    "engine-script-varg",
+    "engine-script-declarative",
+    "engine-render-2d",
+    "engine-ui",
+    "engine-animation",
+    "engine-skeleton",
+    "runtime-min",
+]
+runtime-backend = [
+    "engine-render-wgpu",
+    "engine-shader",
+]
+editor = [
+    "engine-editor",
+    "varg-editor-tauri",
+]
+tools = [
+    "engine-packager",
+    "xtask",
+]
+extensions = [
+    "engine-agent-cluster",
+    "engine-ai",
+    "engine-policy",
+    "engine-quest",
+]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

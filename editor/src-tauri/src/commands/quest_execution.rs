@@ -3,6 +3,8 @@ use std::time::Instant;
 use serde_json::Value;
 use tauri::{Emitter, State};
 
+use engine_core::{TaskPriority, shared_task_runtime};
+
 use crate::state::EditorHostState;
 use crate::{QuestExecutionRequestState, record_quest_execution_failure, run_quest_execution};
 
@@ -20,28 +22,33 @@ pub(crate) fn start_quest_execution(
         .map_err(|error| error.to_string())?;
     let quest_store = prepared.quest_store.clone();
     let requests = requests.requests.clone();
-    std::thread::spawn(move || {
-        let result = run_quest_execution(prepared)
-            .or_else(|error| record_quest_execution_failure(&quest_store, &id, started_at, error));
-        let mut request_state = requests.lock().expect("poisoned lock");
-        if request_state.cancelled.remove(&request_id) {
+    shared_task_runtime().spawn(
+        "editor.quest.execution",
+        TaskPriority::Background,
+        move || {
+            let result = run_quest_execution(prepared).or_else(|error| {
+                record_quest_execution_failure(&quest_store, &id, started_at, error)
+            });
+            let mut request_state = requests.lock().expect("poisoned lock");
+            if request_state.cancelled.remove(&request_id) {
+                drop(request_state);
+                let _ = app.emit(
+                    "quest-execution-complete",
+                    serde_json::json!({ "request_id": request_id }),
+                );
+                return;
+            }
+            request_state.completed.insert(
+                request_id.clone(),
+                result.map_err(|error| error.to_string()),
+            );
             drop(request_state);
             let _ = app.emit(
                 "quest-execution-complete",
                 serde_json::json!({ "request_id": request_id }),
             );
-            return;
-        }
-        request_state.completed.insert(
-            request_id.clone(),
-            result.map_err(|error| error.to_string()),
-        );
-        drop(request_state);
-        let _ = app.emit(
-            "quest-execution-complete",
-            serde_json::json!({ "request_id": request_id }),
-        );
-    });
+        },
+    );
     Ok(())
 }
 
